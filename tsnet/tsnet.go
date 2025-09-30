@@ -99,7 +99,7 @@ func (s *Server) runAdv(ctx context.Context) {
 		case <-ticker.C:
 			epoch++
 			log.Infof("Tick %d", epoch)
-			_, err := s.broadcastSend.Write([]byte(fmt.Sprintf("tsync %s epoch %d", s.Name, epoch)))
+			_, err := fmt.Fprintf(s.broadcastSend, "tsync %s epoch %d", s.Name, epoch)
 			if err != nil {
 				log.Errf("Error sending UDP packet: %v", err)
 			}
