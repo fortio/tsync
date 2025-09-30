@@ -3,6 +3,7 @@ package tsnet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -52,12 +53,18 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.addr)
-	// Listen on all interfaces
-	s.broadcastListen, err = net.ListenMulticastUDP("udp4", nil, s.addr)
+	// Try to get the right interface to listen on
+	goodIf, localIp, err := GetInternetInterface()
+	if err != nil {
+		log.Warnf("Could not get default route interface, will listen on all: %v", err)
+	} else {
+		log.Infof("Using interface %q for multicast (with local IP %v)", goodIf.Name, localIp)
+	}
+	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.addr)
 	if err != nil {
 		return err
 	}
-	s.broadcastSend, err = net.DialUDP("udp4", nil, s.addr)
+	s.broadcastSend, err = net.DialUDP("udp4", localIp, s.addr)
 	if err != nil {
 		s.broadcastListen.Close()
 		return err
@@ -131,4 +138,41 @@ func (s *Server) runReceive(ctx context.Context) {
 			log.Infof("Received %d bytes from %v: %q", n, addr, buf[:n])
 		}
 	}
+}
+
+// Returns the interface used to reach a public IP (default route).
+// Windows tend to pick somehow the wrong interface instead of listening to all/correct
+// default one so we try to guess the right one by connecting to an external address
+func GetInternetInterface() (*net.Interface, *net.UDPAddr, error) {
+	conn, err := net.Dial("udp4", "8.8.8.8:53")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	localIP := localAddr.IP
+
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagRunning == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP == nil || ipnet.IP.To4() == nil {
+				continue
+			}
+			if ipnet.IP.Equal(localIP) {
+				return &iface, localAddr, nil
+			}
+		}
+	}
+	return nil, nil, errors.New("no default route interface found")
 }
