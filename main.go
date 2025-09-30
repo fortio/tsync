@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -29,14 +30,15 @@ func Main() int {
 		Name: *fName,
 	}
 	srv := cfg.NewServer()
-	if err := srv.Start(); err != nil {
+	if err := srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
+	defer srv.Stop()
 	log.Infof("Started tsync with name %q", srv.Name)
 	log.Infof("Press Q, q or Ctrl-C to stop")
 	for {
 		if err := ap.ReadOrResizeOrSignal(); err != nil {
-			log.Infof("Error: %v", err)
+			log.Infof("Exiting on %v", err)
 			return 1
 		}
 		c := ap.Data[0]
