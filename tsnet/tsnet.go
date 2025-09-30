@@ -23,8 +23,7 @@ type Server struct {
 }
 
 func (c *Config) NewServer() *Server {
-	name := c.Name
-	return &Server{Name: name}
+	return &Server{Name: c.Name}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -60,7 +59,7 @@ func (s *Server) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Infof("Exiting tsync server %q", s.Name)
+			log.Infof("Exiting tsync server %q after %d ticks (%v)", s.Name, epoch, ctx.Err())
 			return
 		case <-ticker.C:
 			epoch++

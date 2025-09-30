@@ -38,7 +38,7 @@ func Main() int {
 	log.Infof("Press Q, q or Ctrl-C to stop")
 	for {
 		if err := ap.ReadOrResizeOrSignal(); err != nil {
-			log.Infof("Error: %v", err)
+			log.Infof("Exiting on %v", err)
 			return 1
 		}
 		c := ap.Data[0]
