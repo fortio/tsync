@@ -63,17 +63,17 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.addr)
 	// Try to get the right interface to listen on
-	goodIf, localIp, err := GetInternetInterface(s.Target)
+	goodIf, localIP, err := GetInternetInterface(s.Target)
 	if err != nil {
-		log.Warnf("Could not get default route interface, will listen on all: %v", err)
+		log.Warnf("Could not get default route interface using %q as test destination, will listen on all: %v", s.Target, err)
 	} else {
-		log.Infof("Using interface %q for multicast (with local IP %v)", goodIf.Name, localIp)
+		log.Infof("Using interface %q for multicast (with local IP %v)", goodIf.Name, localIP)
 	}
 	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.addr)
 	if err != nil {
 		return err
 	}
-	s.broadcastSend, err = net.DialUDP("udp4", localIp, s.addr)
+	s.broadcastSend, err = net.DialUDP("udp4", localIP, s.addr)
 	if err != nil {
 		s.broadcastListen.Close()
 		return err
@@ -153,7 +153,7 @@ func (s *Server) runReceive(ctx context.Context) {
 // Windows tend to pick somehow the wrong interface instead of listening to all/correct
 // default one so we try to guess the right one by connecting to an external address.
 func GetInternetInterface(target string) (*net.Interface, *net.UDPAddr, error) {
-	conn, err := net.Dial("udp4", target)
+	conn, err := net.Dial("udp4", target) //nolint:noctx // initialization time
 	if err != nil {
 		return nil, nil, err
 	}
@@ -166,7 +166,12 @@ func GetInternetInterface(target string) (*net.Interface, *net.UDPAddr, error) {
 		return nil, nil, err
 	}
 	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagRunning == 0 {
+		want := net.FlagUp | net.FlagMulticast | net.FlagRunning
+		if iface.Flags&want != want {
+			continue
+		}
+		// don't want:
+		if iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 		addrs, err := iface.Addrs()
