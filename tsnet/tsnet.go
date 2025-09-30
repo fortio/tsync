@@ -3,6 +3,9 @@ package tsnet
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -10,34 +13,59 @@ import (
 	"fortio.org/log"
 )
 
+// Max size of messages
+const BufSize = 576 - 60 - 8 // 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes
+
 type Config struct {
 	// Name to use, if empty hostname will be used.
-	Name string
+	Name  string
+	Port  int
+	Mcast string
 }
 
 type Server struct {
-	// Name of this server instance.
-	Name   string
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	// Our copy of the input config.
+	Config
+	// internal stuff
+	addr            *net.UDPAddr
+	broadcastListen *net.UDPConn
+	broadcastSend   *net.UDPConn
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{Name: c.Name}
+	return &Server{Config: *c}
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	var err error
 	if s.Name == "" {
-		var err error
 		s.Name, err = os.Hostname()
 		if err != nil {
 			return err
 		}
 	}
+	addr := fmt.Sprintf("%s:%d", s.Mcast, s.Port)
+	s.addr, err = net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return err
+	}
+	// Listen on all interfaces
+	s.broadcastListen, err = net.ListenMulticastUDP("udp4", nil, s.addr)
+	if err != nil {
+		return err
+	}
+	s.broadcastSend, err = net.DialUDP("udp4", nil, s.addr)
+	if err != nil {
+		s.broadcastListen.Close()
+		return err
+	}
 	// get a cancelable context
 	ctx, s.cancel = context.WithCancel(ctx)
-	s.wg.Add(1)
-	go s.run(ctx)
+	s.wg.Add(2)
+	go s.runAdv(ctx)
+	go s.runReceive(ctx)
 	return nil
 }
 
@@ -46,24 +74,54 @@ func (s *Server) Stop() {
 		return
 	}
 	s.cancel()
-	s.wg.Wait()
+	s.broadcastListen.Close()
+	s.broadcastSend.Close()
 	s.cancel = nil
+	s.wg.Wait()
 }
 
-func (s *Server) run(ctx context.Context) {
+func (s *Server) runAdv(ctx context.Context) {
 	defer s.wg.Done()
-	// 1 sec tick
-	ticker := time.NewTicker(time.Second)
+	// 1 sec tick + some random jitter
+	jitter := rand.IntN(1024) //nolint:gosec // not cryptographic
+	interval := time.Second + time.Duration(jitter)*time.Millisecond
+	ticker := time.NewTicker(interval)
+	log.Infof("Starting tsync server %q on %s with %d bytes buffer and %v interval (jitter %d ms)",
+		s.Name, s.broadcastListen.LocalAddr(), BufSize, interval, jitter)
 	defer ticker.Stop()
 	epoch := 0
 	for {
 		select {
 		case <-ctx.Done():
-			log.Infof("Exiting tsync server %q after %d ticks (%v)", s.Name, epoch, ctx.Err())
+			log.Infof("Exiting tsync listener %q after %d ticks (%v)", s.Name, epoch, ctx.Err())
 			return
 		case <-ticker.C:
 			epoch++
 			log.Infof("Tick %d", epoch)
+			_, err := s.broadcastSend.Write([]byte(fmt.Sprintf("tsync %s epoch %d", s.Name, epoch)))
+			if err != nil {
+				log.Errf("Error sending UDP packet: %v", err)
+			}
+		}
+	}
+}
+
+func (s *Server) runReceive(ctx context.Context) {
+	defer s.wg.Done()
+	buf := make([]byte, BufSize)
+	log.Infof("Starting tsync receiver on %s with %d bytes buffer", s.broadcastListen.LocalAddr(), BufSize)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Infof("Exiting tsync receiver after %v", ctx.Err())
+			return
+		default:
+			n, addr, err := s.broadcastListen.ReadFromUDP(buf)
+			if err != nil {
+				log.Errf("Error receiving UDP packet: %v", err)
+				continue
+			}
+			log.Infof("Received %d bytes from %v: %q", n, addr, buf[:n])
 		}
 	}
 }

@@ -18,6 +18,10 @@ func main() {
 
 func Main() int {
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
+	// echo -n "ts" | od -d -> 29556
+	fPort := flag.Int("port", 29556, "Port to use for the server")
+	// 239.255."t"."s"
+	fMcast := flag.String("mcast", "239.255.116.115", "Multicast address to use for server discovery, default none (use unicast)")
 	cli.Main()
 	ap := ansipixels.NewAnsiPixels(20)
 	if err := ap.Open(); err != nil {
@@ -27,7 +31,9 @@ func Main() int {
 	crlfWriter := &terminal.CRLFWriter{Out: os.Stdout}
 	terminal.LoggerSetup(crlfWriter)
 	cfg := tsnet.Config{
-		Name: *fName,
+		Name:  *fName,
+		Port:  *fPort,
+		Mcast: *fMcast,
 	}
 	srv := cfg.NewServer()
 	if err := srv.Start(context.Background()); err != nil {
