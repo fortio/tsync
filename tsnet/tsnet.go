@@ -42,10 +42,13 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) Stop() error {
+func (s *Server) Stop() {
+	if s.cancel == nil {
+		return
+	}
 	s.cancel()
 	s.wg.Wait()
-	return nil
+	s.cancel = nil
 }
 
 func (s *Server) run(ctx context.Context) {

@@ -33,6 +33,7 @@ func Main() int {
 	if err := srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
+	defer srv.Stop()
 	log.Infof("Started tsync with name %q", srv.Name)
 	log.Infof("Press Q, q or Ctrl-C to stop")
 	for {
@@ -44,9 +45,6 @@ func Main() int {
 		switch c {
 		case 'q', 'Q', 3: // Ctrl-C
 			log.Infof("Exiting on %q", c)
-			if err := srv.Stop(); err != nil {
-				return log.FErrf("Failed to stop tsync server: %v", err)
-			}
 			return 0
 		default:
 			log.Infof("Got %q", c)
