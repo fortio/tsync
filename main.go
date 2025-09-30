@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -29,7 +30,7 @@ func Main() int {
 		Name: *fName,
 	}
 	srv := cfg.NewServer()
-	if err := srv.Start(); err != nil {
+	if err := srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
 	log.Infof("Started tsync with name %q", srv.Name)
@@ -43,6 +44,9 @@ func Main() int {
 		switch c {
 		case 'q', 'Q', 3: // Ctrl-C
 			log.Infof("Exiting on %q", c)
+			if err := srv.Stop(); err != nil {
+				return log.FErrf("Failed to stop tsync server: %v", err)
+			}
 			return 0
 		default:
 			log.Infof("Got %q", c)
