@@ -1,0 +1,51 @@
+package main
+
+import (
+	"flag"
+	"os"
+
+	"fortio.org/cli"
+	"fortio.org/log"
+	"fortio.org/terminal"
+	"fortio.org/terminal/ansipixels"
+	"fortio.org/tsync/tsnet"
+)
+
+func main() {
+	os.Exit(Main())
+}
+
+func Main() int {
+	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
+	cli.Main()
+	ap := ansipixels.NewAnsiPixels(20)
+	if err := ap.Open(); err != nil {
+		return 1 // error already logged
+	}
+	defer ap.Restore()
+	crlfWriter := &terminal.CRLFWriter{Out: os.Stdout}
+	terminal.LoggerSetup(crlfWriter)
+	cfg := tsnet.Config{
+		Name: *fName,
+	}
+	srv := cfg.NewServer()
+	if err := srv.Start(); err != nil {
+		return log.FErrf("Failed to start tsync server: %v", err)
+	}
+	log.Infof("Started tsync with name %q", srv.Name)
+	log.Infof("Press Q, q or Ctrl-C to stop")
+	for {
+		if err := ap.ReadOrResizeOrSignal(); err != nil {
+			log.Infof("Error: %v", err)
+			return 1
+		}
+		c := ap.Data[0]
+		switch c {
+		case 'q', 'Q', 3: // Ctrl-C
+			log.Infof("Exiting on %q", c)
+			return 0
+		default:
+			log.Infof("Got %q", c)
+		}
+	}
+}
