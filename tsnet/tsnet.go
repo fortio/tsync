@@ -94,7 +94,7 @@ func (s *Server) runAdv(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Infof("Exiting tsync listener %q after %d ticks (%v)", s.Name, epoch, ctx.Err())
+			log.Infof("Exiting tsync sender %q after %d ticks (%v)", s.Name, epoch, ctx.Err())
 			return
 		case <-ticker.C:
 			epoch++
@@ -118,6 +118,7 @@ func (s *Server) runReceive(ctx context.Context) {
 			log.Infof("Exiting tsync receiver after %v", ctx.Err())
 			return
 		default:
+			// we rely on Stop() closing the socket to unblock ReadFromUDP on exit.
 			n, addr, err := s.broadcastListen.ReadFromUDP(buf)
 			if err != nil {
 				if ctx.Err() != nil {
