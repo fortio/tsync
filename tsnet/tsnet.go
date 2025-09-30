@@ -13,7 +13,7 @@ import (
 	"fortio.org/log"
 )
 
-// Max size of messages
+// Max size of messages.
 const BufSize = 576 - 60 - 8 // 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes
 
 type Config struct {
@@ -51,6 +51,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.addr)
 	// Listen on all interfaces
 	s.broadcastListen, err = net.ListenMulticastUDP("udp4", nil, s.addr)
 	if err != nil {
@@ -74,10 +75,10 @@ func (s *Server) Stop() {
 		return
 	}
 	s.cancel()
-	s.broadcastListen.Close()
-	s.broadcastSend.Close()
 	s.cancel = nil
+	s.broadcastListen.Close() // needed or write will block forever
 	s.wg.Wait()
+	s.broadcastSend.Close()
 }
 
 func (s *Server) runAdv(ctx context.Context) {
@@ -86,8 +87,8 @@ func (s *Server) runAdv(ctx context.Context) {
 	jitter := rand.IntN(1024) //nolint:gosec // not cryptographic
 	interval := time.Second + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
-	log.Infof("Starting tsync server %q on %s with %d bytes buffer and %v interval (jitter %d ms)",
-		s.Name, s.broadcastListen.LocalAddr(), BufSize, interval, jitter)
+	log.Infof("Starting tsync broadcast sender %q (%v) with %v interval (jitter %d ms)",
+		s.Name, s.broadcastSend.LocalAddr(), interval, jitter)
 	defer ticker.Stop()
 	epoch := 0
 	for {
@@ -109,7 +110,8 @@ func (s *Server) runAdv(ctx context.Context) {
 func (s *Server) runReceive(ctx context.Context) {
 	defer s.wg.Done()
 	buf := make([]byte, BufSize)
-	log.Infof("Starting tsync receiver on %s with %d bytes buffer", s.broadcastListen.LocalAddr(), BufSize)
+	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
+		s.Name, s.broadcastListen.LocalAddr(), BufSize)
 	for {
 		select {
 		case <-ctx.Done():
@@ -118,7 +120,11 @@ func (s *Server) runReceive(ctx context.Context) {
 		default:
 			n, addr, err := s.broadcastListen.ReadFromUDP(buf)
 			if err != nil {
-				log.Errf("Error receiving UDP packet: %v", err)
+				if ctx.Err() != nil {
+					log.Infof("Normal read from closed error on exit: %v", err)
+				} else {
+					log.Errf("Error receiving UDP packet: %v", err)
+				}
 				continue
 			}
 			log.Infof("Received %d bytes from %v: %q", n, addr, buf[:n])
