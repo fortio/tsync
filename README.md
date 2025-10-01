@@ -17,6 +17,11 @@ The program starts by figuring out which interface and local address to use (bec
 
 It then does listens to a multi cast address (default 239.255.116.115:29556) and also periodically sends to that address its own information and reads peers found information.
 
+Currently, example of peer detection with tsync running on a mac, a linux and a windows box:
+
+![Example Screenshot](screenshot.png)
+
+
 ## Install
 You can get the binary from [releases](https://github.com/fortio/tsync/releases)
 
