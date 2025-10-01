@@ -63,7 +63,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.addr)
 	// Try to get the right interface to listen on
-	goodIf, localIP, err := GetInternetInterface(s.Target)
+	goodIf, localIP, err := GetInternetInterface(ctx, s.Target)
 	if err != nil {
 		log.Warnf("Could not get default route interface using %q as test destination, will listen on all: %v", s.Target, err)
 	} else {
@@ -152,8 +152,9 @@ func (s *Server) runReceive(ctx context.Context) {
 // Returns the interface used to reach a public IP (default route).
 // Windows tend to pick somehow the wrong interface instead of listening to all/correct
 // default one so we try to guess the right one by connecting to an external address.
-func GetInternetInterface(target string) (*net.Interface, *net.UDPAddr, error) {
-	conn, err := net.Dial("udp4", target) //nolint:noctx // initialization time
+func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *net.UDPAddr, error) {
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "udp4", target)
 	if err != nil {
 		return nil, nil, err
 	}
