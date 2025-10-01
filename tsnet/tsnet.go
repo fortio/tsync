@@ -135,6 +135,10 @@ func (s *Server) runAdv(ctx context.Context) {
 	}
 }
 
+func (s *Server) OurAddress() *net.UDPAddr {
+	return s.ourSendAddr
+}
+
 func (s *Server) runReceive(ctx context.Context) {
 	defer s.wg.Done()
 	buf := make([]byte, BufSize)

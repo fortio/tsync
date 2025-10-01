@@ -44,8 +44,8 @@ func Main() int {
 		OnNewPeer: func(peer tsnet.Peer) {
 			mutex.Lock()
 			peers.Add(fmt.Sprintf("%s%s%s (%s%s%s)",
-				tcolor.Blue.Foreground(), peer.Name, tcolor.Reset,
-				tcolor.Green.Foreground(), peer.Addr, tcolor.Reset))
+				tcolor.BrightBlue.Foreground(), peer.Name, tcolor.Reset,
+				tcolor.BrightGreen.Foreground(), peer.Addr, tcolor.Reset))
 			mutex.Unlock()
 		},
 	}
@@ -65,7 +65,11 @@ func Main() int {
 			fmt.Fprintf(&buf, "\n%s", p)
 		}
 		mutex.Unlock()
-		ap.WriteBoxed(1, "%sPeers:%s%s", tcolor.Bold, tcolor.Reset, buf.String())
+		ap.WriteBoxed(1, "%sHere%s:\n%s%s%s (%s%s%s)\n%sPeers%s:%s",
+			tcolor.Bold, tcolor.Reset,
+			tcolor.BrightYellow.Foreground(), srv.Name, tcolor.Reset,
+			tcolor.Green.Foreground(), srv.OurAddress().String(), tcolor.Reset,
+			tcolor.Bold, tcolor.Reset, buf.String())
 		ap.RestoreCursorPos()
 		ap.EndSyncMode()
 		ap.StartSyncMode()
