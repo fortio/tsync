@@ -57,6 +57,7 @@ func Main() int {
 	log.Infof("Press Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := 0
+	var buf strings.Builder
 	err := ap.FPSTicks(context.Background(), func(_ context.Context) bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
@@ -67,15 +68,16 @@ func Main() int {
 				ap.StartSyncMode()
 			}
 			prev = numPeers
-			var buf strings.Builder
-			for _, p := range sets.Sort(peers) {
+			newPeers := peers.Clone()
+			mutex.Unlock()
+			for _, p := range sets.Sort(newPeers) {
 				fmt.Fprintf(&buf, "\n%s", p)
 			}
-			mutex.Unlock()
 			ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s)\n🔗%s",
 				tcolor.BrightYellow.Foreground(), srv.Name, tcolor.Reset,
 				tcolor.Green.Foreground(), srv.OurAddress().String(), tcolor.Reset,
 				buf.String())
+			buf.Reset()
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
 		} else {
