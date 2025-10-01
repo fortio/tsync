@@ -33,7 +33,6 @@ func Main() int {
 		return 1 // error already logged
 	}
 	defer ap.Restore()
-	ap.LoggerSetup()
 	peers := sets.New[string]()
 	var mutex sync.Mutex
 	cfg := tsnet.Config{
@@ -57,21 +56,31 @@ func Main() int {
 	log.Infof("Started tsync with name %q", srv.Name)
 	log.Infof("Press Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
+	prev := 0
 	err := ap.FPSTicks(context.Background(), func(_ context.Context) bool {
-		ap.SaveCursorPos()
-		var buf strings.Builder
+		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
+		logHadOutput := ap.FlushLogger()
 		mutex.Lock()
-		for _, p := range sets.Sort(peers) {
-			fmt.Fprintf(&buf, "\n%s", p)
+		numPeers := peers.Len()
+		if logHadOutput || numPeers != prev {
+			if !logHadOutput {
+				ap.StartSyncMode()
+			}
+			prev = numPeers
+			var buf strings.Builder
+			for _, p := range sets.Sort(peers) {
+				fmt.Fprintf(&buf, "\n%s", p)
+			}
+			mutex.Unlock()
+			ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s)\n🔗%s",
+				tcolor.BrightYellow.Foreground(), srv.Name, tcolor.Reset,
+				tcolor.Green.Foreground(), srv.OurAddress().String(), tcolor.Reset,
+				buf.String())
+			ap.RestoreCursorPos()
+			ap.EndSyncMode()
+		} else {
+			mutex.Unlock()
 		}
-		mutex.Unlock()
-		ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s)\n🔗%s",
-			tcolor.BrightYellow.Foreground(), srv.Name, tcolor.Reset,
-			tcolor.Green.Foreground(), srv.OurAddress().String(), tcolor.Reset,
-			buf.String())
-		ap.RestoreCursorPos()
-		ap.EndSyncMode()
-		ap.StartSyncMode()
 		if len(ap.Data) == 0 {
 			return true
 		}
