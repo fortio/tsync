@@ -22,6 +22,7 @@ func Main() int {
 	fPort := flag.Int("port", 29556, "Port to use")
 	// 239.255."t"."s"
 	fMcast := flag.String("mcast", "239.255.116.115", "Multicast address to use for server discovery")
+	fTarget := flag.String("target", tsnet.DefaultTarget, "Test target udp ip:port to use to find the right interface and local ip")
 	cli.Main()
 	ap := ansipixels.NewAnsiPixels(20)
 	if err := ap.Open(); err != nil {
@@ -31,9 +32,10 @@ func Main() int {
 	crlfWriter := &terminal.CRLFWriter{Out: os.Stdout}
 	terminal.LoggerSetup(crlfWriter)
 	cfg := tsnet.Config{
-		Name:  *fName,
-		Port:  *fPort,
-		Mcast: *fMcast,
+		Name:   *fName,
+		Port:   *fPort,
+		Mcast:  *fMcast,
+		Target: *fTarget,
 	}
 	srv := cfg.NewServer()
 	if err := srv.Start(context.Background()); err != nil {
