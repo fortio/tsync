@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
+	"strings"
+	"sync"
 
 	"fortio.org/cli"
 	"fortio.org/log"
-	"fortio.org/terminal"
+	"fortio.org/sets"
 	"fortio.org/terminal/ansipixels"
+	"fortio.org/terminal/ansipixels/tcolor"
 	"fortio.org/tsync/tsnet"
 )
 
@@ -24,18 +28,26 @@ func Main() int {
 	fMcast := flag.String("mcast", "239.255.116.115", "Multicast address to use for server discovery")
 	fTarget := flag.String("target", tsnet.DefaultTarget, "Test target udp ip:port to use to find the right interface and local ip")
 	cli.Main()
-	ap := ansipixels.NewAnsiPixels(20)
+	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
 		return 1 // error already logged
 	}
 	defer ap.Restore()
-	crlfWriter := &terminal.CRLFWriter{Out: os.Stdout}
-	terminal.LoggerSetup(crlfWriter)
+	ap.LoggerSetup()
+	peers := sets.New[string]()
+	var mutex sync.Mutex
 	cfg := tsnet.Config{
 		Name:   *fName,
 		Port:   *fPort,
 		Mcast:  *fMcast,
 		Target: *fTarget,
+		OnNewPeer: func(peer tsnet.Peer) {
+			mutex.Lock()
+			peers.Add(fmt.Sprintf("%s%s%s (%s%s%s)",
+				tcolor.Blue.Foreground(), peer.Name, tcolor.Reset,
+				tcolor.Green.Foreground(), peer.Addr, tcolor.Reset))
+			mutex.Unlock()
+		},
 	}
 	srv := cfg.NewServer()
 	if err := srv.Start(context.Background()); err != nil {
@@ -44,18 +56,35 @@ func Main() int {
 	defer srv.Stop()
 	log.Infof("Started tsync with name %q", srv.Name)
 	log.Infof("Press Q, q or Ctrl-C to stop")
-	for {
-		if err := ap.ReadOrResizeOrSignal(); err != nil {
-			log.Infof("Exiting on %v", err)
-			return 1
+	ap.AutoSync = false
+	err := ap.FPSTicks(context.Background(), func(_ context.Context) bool {
+		ap.SaveCursorPos()
+		var buf strings.Builder
+		mutex.Lock()
+		for _, p := range sets.Sort(peers) {
+			fmt.Fprintf(&buf, "\n%s", p)
+		}
+		mutex.Unlock()
+		ap.WriteBoxed(1, "%sPeers:%s%s", tcolor.Bold, tcolor.Reset, buf.String())
+		ap.RestoreCursorPos()
+		ap.EndSyncMode()
+		ap.StartSyncMode()
+		if len(ap.Data) == 0 {
+			return true
 		}
 		c := ap.Data[0]
 		switch c {
 		case 'q', 'Q', 3: // Ctrl-C
 			log.Infof("Exiting on %q", c)
-			return 0
+			return false
 		default:
 			log.Infof("Got %q", c)
 		}
+		return true
+	})
+	if err != nil {
+		log.Infof("Exiting on %v", err)
+		return 1
 	}
+	return 0
 }

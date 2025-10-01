@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fortio.org/log"
+	"fortio.org/sets"
 )
 
 const (
@@ -28,21 +29,31 @@ type Config struct {
 	Mcast string
 	// Which ip:port we try to resolve to find our address and interface.
 	Target string
+	// Callback called when a new peer is detected. Must not block for long or
+	// it will delay processing of incoming messages.
+	OnNewPeer func(peer Peer)
 }
 
 type Server struct {
 	// Our copy of the input config.
 	Config
-	// internal stuff
-	addr            *net.UDPAddr
+	// internal state
+	ourSendAddr     *net.UDPAddr
+	destAddr        *net.UDPAddr
 	broadcastListen *net.UDPConn
 	broadcastSend   *net.UDPConn
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	peers           sets.Set[Peer]
+}
+
+type Peer struct {
+	Name string
+	Addr string
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{Config: *c}
+	return &Server{Config: *c, peers: sets.New[Peer]()}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -57,11 +68,11 @@ func (s *Server) Start(ctx context.Context) error {
 		s.Target = DefaultTarget
 	}
 	addr := fmt.Sprintf("%s:%d", s.Mcast, s.Port)
-	s.addr, err = net.ResolveUDPAddr("udp4", addr)
+	s.destAddr, err = net.ResolveUDPAddr("udp4", addr)
 	if err != nil {
 		return err
 	}
-	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.addr)
+	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.destAddr)
 	// Try to get the right interface to listen on
 	goodIf, localIP, err := GetInternetInterface(ctx, s.Target)
 	if err != nil {
@@ -69,15 +80,16 @@ func (s *Server) Start(ctx context.Context) error {
 	} else {
 		log.Infof("Using interface %q for multicast (with local IP %v)", goodIf.Name, localIP)
 	}
-	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.addr)
+	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.destAddr)
 	if err != nil {
 		return err
 	}
-	s.broadcastSend, err = net.DialUDP("udp4", localIP, s.addr)
+	s.broadcastSend, err = net.DialUDP("udp4", localIP, s.destAddr)
 	if err != nil {
 		s.broadcastListen.Close()
 		return err
 	}
+	s.ourSendAddr = s.broadcastSend.LocalAddr().(*net.UDPAddr)
 	// get a cancelable context
 	ctx, s.cancel = context.WithCancel(ctx)
 	s.wg.Add(2)
@@ -104,7 +116,7 @@ func (s *Server) runAdv(ctx context.Context) {
 	interval := time.Second + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
 	log.Infof("Starting tsync broadcast sender %q (%v) with %v interval (jitter %d ms)",
-		s.Name, s.broadcastSend.LocalAddr(), interval, jitter)
+		s.Name, s.ourSendAddr, interval, jitter)
 	defer ticker.Stop()
 	epoch := 0
 	for {
@@ -114,8 +126,8 @@ func (s *Server) runAdv(ctx context.Context) {
 			return
 		case <-ticker.C:
 			epoch++
-			log.Infof("Tick %d", epoch)
-			_, err := fmt.Fprintf(s.broadcastSend, "tsync %s epoch %d", s.Name, epoch)
+			log.LogVf("Tick %d", epoch)
+			err := s.MessageSend(epoch)
 			if err != nil {
 				log.Errf("Error sending UDP packet: %v", err)
 			}
@@ -128,6 +140,7 @@ func (s *Server) runReceive(ctx context.Context) {
 	buf := make([]byte, BufSize)
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
 		s.Name, s.broadcastListen.LocalAddr(), BufSize)
+	ourAddr := s.ourSendAddr
 	for {
 		select {
 		case <-ctx.Done():
@@ -144,7 +157,26 @@ func (s *Server) runReceive(ctx context.Context) {
 				}
 				continue
 			}
-			log.Infof("Received %d bytes from %v: %q", n, addr, buf[:n])
+			if addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
+				log.Debugf("Ignoring our own packet (%q)", buf[:n])
+				continue
+			}
+			log.LogVf("Received %d bytes from %v: %q", n, addr, buf[:n])
+			name, theirEpoch, err := s.MessageDecode(buf[:n])
+			if err != nil {
+				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
+				continue
+			}
+			peer := Peer{Name: name, Addr: addr.String()}
+			if s.peers.Has(peer) {
+				log.LogVf("Already known peer %v", peer)
+				continue
+			}
+			s.peers.Add(peer)
+			log.Infof("New peer %q (found at their %d) at %v, total %d", peer.Name, theirEpoch, peer.Addr, s.peers.Len())
+			if s.OnNewPeer != nil {
+				s.OnNewPeer(peer)
+			}
 		}
 	}
 }
@@ -160,6 +192,8 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 	}
 	defer conn.Close()
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	// clear the port as it's the current port for this test and not something useful to return.
+	localAddr.Port = 0
 	localIP := localAddr.IP
 
 	interfaces, err := net.Interfaces()
@@ -190,4 +224,22 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 		}
 	}
 	return nil, nil, errors.New("no default route interface found")
+}
+
+func (s *Server) MessageSend(epoch int) error {
+	_, err := fmt.Fprintf(s.broadcastSend, "tsync %s epoch %d", s.Name, epoch)
+	return err
+}
+
+func (s *Server) MessageDecode(buf []byte) (string, int, error) {
+	var name string
+	var epoch int
+	n, err := fmt.Sscanf(string(buf), "tsync %s epoch %d", &name, &epoch)
+	if err != nil {
+		return "", 0, err
+	}
+	if n != 2 {
+		return "", 0, fmt.Errorf("could not decode message %q", string(buf))
+	}
+	return name, epoch, nil
 }

@@ -11,6 +11,12 @@ Cross platform terminal UI (tui) and network based synchronization of clipboard 
 
 Includes reusable library for network discovery and file/dir sync.
 
+## What does it do / How does it work?
+
+The program starts by figuring out which interface and local address to use (because on windows the default picks WSL virtual interface and thus fails to see real peers) by looking up a configurable target (defaults to udp 8.8.8.8:53 ie one of google's dns server)
+
+It then does listens to a multi cast address (default 239.255.116.115:29556) and also periodically sends to that address its own information and reads peers found information.
+
 ## Install
 You can get the binary from [releases](https://github.com/fortio/tsync/releases)
 
