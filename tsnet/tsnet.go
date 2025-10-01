@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	if s.Target == "" {
 		s.Target = DefaultTarget
+	}
+	if strings.IndexByte(s.Target, ':') < 0 {
+		s.Target += ":53" // default to dns port (even we don't really use the port for target)
 	}
 	addr := fmt.Sprintf("%s:%d", s.Mcast, s.Port)
 	s.destAddr, err = net.ResolveUDPAddr("udp4", addr)
