@@ -65,11 +65,10 @@ func Main() int {
 			fmt.Fprintf(&buf, "\n%s", p)
 		}
 		mutex.Unlock()
-		ap.WriteBoxed(1, "%sHere%s:\n%s%s%s (%s%s%s)\n%sPeers%s:%s",
-			tcolor.Bold, tcolor.Reset,
+		ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s)\n🔗%s",
 			tcolor.BrightYellow.Foreground(), srv.Name, tcolor.Reset,
 			tcolor.Green.Foreground(), srv.OurAddress().String(), tcolor.Reset,
-			tcolor.Bold, tcolor.Reset, buf.String())
+			buf.String())
 		ap.RestoreCursorPos()
 		ap.EndSyncMode()
 		ap.StartSyncMode()
