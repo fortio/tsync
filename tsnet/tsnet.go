@@ -230,15 +230,17 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 	return nil, nil, errors.New("no default route interface found")
 }
 
+const MessageFormat = "tsync %s epoch %d"
+
 func (s *Server) MessageSend(epoch int) error {
-	_, err := fmt.Fprintf(s.broadcastSend, "tsync %s epoch %d", s.Name, epoch)
+	_, err := fmt.Fprintf(s.broadcastSend, MessageFormat, s.Name, epoch)
 	return err
 }
 
 func (s *Server) MessageDecode(buf []byte) (string, int, error) {
 	var name string
 	var epoch int
-	n, err := fmt.Sscanf(string(buf), "tsync %s epoch %d", &name, &epoch)
+	n, err := fmt.Sscanf(string(buf), MessageFormat, &name, &epoch)
 	if err != nil {
 		return "", 0, err
 	}
