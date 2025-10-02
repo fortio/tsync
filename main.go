@@ -13,11 +13,38 @@ import (
 	"fortio.org/sets"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
+	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
 
 func main() {
 	os.Exit(Main())
+}
+
+func LoadIdentity() (*tcrypto.Identity, error) {
+	storage, err := tcrypto.InitStorage()
+	if err != nil {
+		return nil, err
+	}
+	// Try to load existing identity
+	op := "Loaded"
+	level := log.Info
+	id, err := storage.LoadIdentity()
+	if err != nil {
+		log.Infof("No existing identity found, creating new one: %v", err)
+		id, err = tcrypto.NewIdentity()
+		if err != nil {
+			return nil, err
+		}
+		err = storage.SaveIdentity(id)
+		if err != nil {
+			return nil, err
+		}
+		op = "Created"
+		level = log.Warning
+	}
+	log.Logf(level, "%s identity with public key: %s", op, id.PublicKeyToString())
+	return id, nil
 }
 
 func Main() int {
@@ -33,6 +60,10 @@ func Main() int {
 		return 1 // error already logged
 	}
 	defer ap.Restore()
+	id, err := LoadIdentity()
+	if err != nil {
+		return log.FErrf("Failed to load or create identity: %v", err)
+	}
 	peers := sets.New[string]()
 	var mutex sync.Mutex
 	cfg := tsnet.Config{
@@ -41,15 +72,23 @@ func Main() int {
 		Mcast:  *fMcast,
 		Target: *fTarget,
 		OnNewPeer: func(peer tsnet.Peer) {
+			pub, err1 := tcrypto.IdentityPublicKeyString(peer.PublicKey)
+			if err1 != nil {
+				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err1)
+				return
+			}
+			id := tcrypto.HumanHash(pub)
 			mutex.Lock()
-			peers.Add(fmt.Sprintf("%s%s%s (%s%s%s)",
+			peers.Add(fmt.Sprintf("%s%s%s (%s%s%s) %s",
 				tcolor.BrightBlue.Foreground(), peer.Name, tcolor.Reset,
-				tcolor.BrightGreen.Foreground(), peer.Addr, tcolor.Reset))
+				tcolor.BrightGreen.Foreground(), peer.Addr, tcolor.Reset,
+				id))
 			mutex.Unlock()
 		},
+		Identity: id,
 	}
 	srv := cfg.NewServer()
-	if err := srv.Start(context.Background()); err != nil {
+	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
 	defer srv.Stop()
@@ -58,7 +97,7 @@ func Main() int {
 	ap.AutoSync = false
 	prev := 0
 	var buf strings.Builder
-	err := ap.FPSTicks(context.Background(), func(_ context.Context) bool {
+	err = ap.FPSTicks(context.Background(), func(_ context.Context) bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
 		mutex.Lock()
@@ -73,9 +112,10 @@ func Main() int {
 			for _, p := range sets.Sort(newPeers) {
 				fmt.Fprintf(&buf, "\n%s", p)
 			}
-			ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s)\n🔗%s",
+			ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s) %s\n🔗%s",
 				tcolor.BrightYellow.Foreground(), srv.Name, tcolor.Reset,
 				tcolor.Green.Foreground(), srv.OurAddress().String(), tcolor.Reset,
+				id.HumanID(),
 				buf.String())
 			buf.Reset()
 			ap.RestoreCursorPos()

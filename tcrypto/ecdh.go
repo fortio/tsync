@@ -27,11 +27,11 @@ func NewEphemeralKeys() (*Ephemeral, error) {
 }
 
 func (c *Ephemeral) PublicKeyToString() string {
-	return EncodeBytes(c.PublicKey.Bytes())
+	return EncodeBytes(PublicKeyPrefix, c.PublicKey.Bytes())
 }
 
 func StringToPublicKey(s string) (*ecdh.PublicKey, error) {
-	bytes, err := DecodeBytes(s)
+	bytes, err := DecodeBytes(PublicKeyPrefix, s)
 	if err != nil {
 		return nil, err
 	}

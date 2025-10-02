@@ -14,6 +14,7 @@ import (
 
 	"fortio.org/log"
 	"fortio.org/sets"
+	"fortio.org/tsync/tcrypto"
 )
 
 const (
@@ -33,6 +34,7 @@ type Config struct {
 	// Callback called when a new peer is detected. Must not block for long or
 	// it will delay processing of incoming messages.
 	OnNewPeer func(peer Peer)
+	Identity  *tcrypto.Identity // long term identity for this server
 }
 
 type Server struct {
@@ -46,11 +48,13 @@ type Server struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	peers           sets.Set[Peer]
+	idStr           string
 }
 
 type Peer struct {
-	Name string
-	Addr string
+	Name      string
+	PublicKey string
+	Addr      string
 }
 
 func (c *Config) NewServer() *Server {
@@ -58,6 +62,7 @@ func (c *Config) NewServer() *Server {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	s.idStr = s.Identity.PublicKeyToString()
 	var err error
 	if s.Name == "" {
 		s.Name, err = os.Hostname()
@@ -170,12 +175,12 @@ func (s *Server) runReceive(ctx context.Context) {
 				continue
 			}
 			log.LogVf("Received %d bytes from %v: %q", n, addr, buf[:n])
-			name, theirEpoch, err := s.MessageDecode(buf[:n])
+			name, pubKey, theirEpoch, err := s.MessageDecode(buf[:n])
 			if err != nil {
 				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
 				continue
 			}
-			peer := Peer{Name: name, Addr: addr.String()}
+			peer := Peer{Name: name, Addr: addr.String(), PublicKey: pubKey}
 			if s.peers.Has(peer) {
 				log.LogVf("Already known peer %v", peer)
 				continue
@@ -234,22 +239,23 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 	return nil, nil, errors.New("no default route interface found")
 }
 
-const MessageFormat = "tsync %s epoch %d"
+const MessageFormat = "tsync1 %s %s e %d" // name, public key, epoch
 
 func (s *Server) MessageSend(epoch int) error {
-	_, err := fmt.Fprintf(s.broadcastSend, MessageFormat, s.Name, epoch)
+	_, err := fmt.Fprintf(s.broadcastSend, MessageFormat, s.Name, s.idStr, epoch)
 	return err
 }
 
-func (s *Server) MessageDecode(buf []byte) (string, int, error) {
+func (s *Server) MessageDecode(buf []byte) (string, string, int, error) {
 	var name string
+	var pubKeyStr string
 	var epoch int
-	n, err := fmt.Sscanf(string(buf), MessageFormat, &name, &epoch)
+	n, err := fmt.Sscanf(string(buf), MessageFormat, &name, &pubKeyStr, &epoch)
 	if err != nil {
-		return "", 0, err
+		return "", "", 0, err
 	}
-	if n != 2 {
-		return "", 0, fmt.Errorf("could not decode message %q", string(buf))
+	if n != 3 {
+		return "", "", 0, fmt.Errorf("could not decode message %q", string(buf))
 	}
-	return name, epoch, nil
+	return name, pubKeyStr, epoch, nil
 }
