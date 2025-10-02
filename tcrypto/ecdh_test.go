@@ -32,7 +32,7 @@ func TestECDH(t *testing.T) {
 	}
 	AssertBytesEqual(t, "Alice public key", alice.PublicKey.Bytes(), alicePub2.Bytes())
 	// Mess it up on purpose to test failure
-	badStr := "AA" + alicePubStr[2:]
+	badStr := alicePubStr[0:2] + "AA" + alicePubStr[4:]
 	aliceBadPub, err := tcrypto.StringToPublicKey(badStr)
 	t.Logf("Got alice from   : %s -> %x with error: %v", badStr, aliceBadPub.Bytes(), err)
 	if err != nil {

@@ -11,29 +11,29 @@ type Identity struct {
 }
 
 const (
-	SignedPrefix = "s:"
+	SignedPrefix     = "s."
+	PrivateKeyPrefix = "k."
+	PublicKeyPrefix  = "p."
+	// MessagePrefix    = "m:".
 )
 
 func (id *Identity) SignMessage(message []byte) string {
 	signature := ed25519.Sign(id.PrivateKey, message)
-	return SignedPrefix + EncodeBytes(message) + ":" + EncodeBytes(signature)
+	return EncodeBytes(SignedPrefix, message) + "/" + EncodeBytes("", signature)
 }
 
 func VerifySignedMessage(signedMessage string, pubKey ed25519.PublicKey) ([]byte, error) {
-	if len(signedMessage) < len(SignedPrefix) || signedMessage[:len(SignedPrefix)] != SignedPrefix {
-		return nil, NewSignatureInvalidErr("invalid signed message prefix")
-	}
-	parts := strings.SplitN(signedMessage[len(SignedPrefix):], ":", 3)
+	parts := strings.SplitN(signedMessage, "/", 2)
 	if len(parts) != 2 {
-		return nil, NewSignatureInvalidErr("invalid signed message format")
+		return nil, NewSignatureInvalidErr("invalid signed message format, missing '/' separator")
 	}
-	message, err := DecodeBytes(parts[0])
+	message, err := DecodeBytes(SignedPrefix, parts[0])
 	if err != nil {
-		return nil, NewSignatureInvalidErr("failed to decode message")
+		return nil, NewSignatureInvalidErr("failed to decode message: " + err.Error())
 	}
-	signature, err := DecodeBytes(parts[1])
+	signature, err := DecodeBytes("", parts[1])
 	if err != nil {
-		return nil, NewSignatureInvalidErr("failed to decode signature")
+		return nil, NewSignatureInvalidErr("failed to decode signature: " + err.Error())
 	}
 	if !ed25519.Verify(pubKey, message, signature) {
 		return nil, NewSignatureInvalidErr("signature verification failed")
@@ -53,7 +53,7 @@ func NewIdentity() (*Identity, error) {
 }
 
 func IdentityFromPrivateKey(privKeyStr string) (*Identity, error) {
-	privKeyBytes, err := DecodeBytes(privKeyStr)
+	privKeyBytes, err := DecodeBytes(PrivateKeyPrefix, privKeyStr)
 	if err != nil {
 		return nil, err
 	}
@@ -66,15 +66,15 @@ func IdentityFromPrivateKey(privKeyStr string) (*Identity, error) {
 }
 
 func (id *Identity) PrivateKeyToString() string {
-	return EncodeBytes(id.PrivateKey)
+	return EncodeBytes(PrivateKeyPrefix, id.PrivateKey)
 }
 
 func (id *Identity) PublicKeyToString() string {
-	return EncodeBytes(id.PublicKey)
+	return EncodeBytes(PublicKeyPrefix, id.PublicKey)
 }
 
 func IdentityPublicKeyString(s string) (ed25519.PublicKey, error) {
-	bytes, err := DecodeBytes(s)
+	bytes, err := DecodeBytes(PublicKeyPrefix, s)
 	if err != nil {
 		return nil, err
 	}
