@@ -72,9 +72,9 @@ func Main() int {
 		Mcast:  *fMcast,
 		Target: *fTarget,
 		OnNewPeer: func(peer tsnet.Peer) {
-			pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
-			if err != nil {
-				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
+			pub, err1 := tcrypto.IdentityPublicKeyString(peer.PublicKey)
+			if err1 != nil {
+				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err1)
 				return
 			}
 			id := tcrypto.HumanHash(pub)
