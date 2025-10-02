@@ -13,6 +13,9 @@ func AssertBytesEqual(t *testing.T, msg string, a, b []byte) {
 	}
 }
 
+// TODO: a function that ensures what we replace in the messages/sig to make them bad
+// is actually not accidentally the same as in the original.
+
 func TestECDH(t *testing.T) {
 	alice, err := tcrypto.NewEphemeralKeys()
 	if err != nil {
@@ -32,7 +35,7 @@ func TestECDH(t *testing.T) {
 	}
 	AssertBytesEqual(t, "Alice public key", alice.PublicKey.Bytes(), alicePub2.Bytes())
 	// Mess it up on purpose to test failure
-	badStr := alicePubStr[0:2] + "AA" + alicePubStr[4:]
+	badStr := alicePubStr[0:2] + "AAA" + alicePubStr[5:]
 	aliceBadPub, err := tcrypto.StringToPublicKey(badStr)
 	t.Logf("Got alice from   : %s -> %x with error: %v", badStr, aliceBadPub.Bytes(), err)
 	if err != nil {

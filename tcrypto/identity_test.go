@@ -26,7 +26,7 @@ func TestIdentity(t *testing.T) {
 	}
 	AssertBytesEqual(t, "Alice public key", alice.PublicKey, alicePub2)
 	// Mess it up on purpose to test failure
-	badStr := alicePubStr[0:2] + "AA" + alicePubStr[4:]
+	badStr := alicePubStr[0:2] + "AAA" + alicePubStr[5:]
 	aliceBadPub, err := tcrypto.IdentityPublicKeyString(badStr)
 	t.Logf("Got alice from   : %s -> %x with error: %v", badStr, aliceBadPub, err)
 	if err != nil {
@@ -59,7 +59,7 @@ func TestIdentity(t *testing.T) {
 	}
 	t.Logf("Got expected error verifying with wrong public key: %v", err)
 	// Try to verify a tampered message (should fail)
-	tamperedSignedMsg := signedMsg[:len(signedMsg)-1] + "A"
+	tamperedSignedMsg := signedMsg[:len(signedMsg)-3] + "AAA"
 	_, err = tcrypto.VerifySignedMessage(tamperedSignedMsg, alicePub2)
 	if err == nil {
 		t.Fatalf("Unexpectedly verified a tampered signed message")
