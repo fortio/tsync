@@ -73,6 +73,10 @@ func (id *Identity) PublicKeyToString() string {
 	return EncodeBytes(PublicKeyPrefix, id.PublicKey)
 }
 
+func (id *Identity) HumanID() string {
+	return HumanHash(id.PublicKey)
+}
+
 func IdentityPublicKeyString(s string) (ed25519.PublicKey, error) {
 	bytes, err := DecodeBytes(PublicKeyPrefix, s)
 	if err != nil {

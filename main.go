@@ -28,6 +28,7 @@ func LoadIdentity() (*tcrypto.Identity, error) {
 	}
 	// Try to load existing identity
 	op := "Loaded"
+	level := log.Info
 	id, err := storage.LoadIdentity()
 	if err != nil {
 		log.Infof("No existing identity found, creating new one: %v", err)
@@ -40,8 +41,9 @@ func LoadIdentity() (*tcrypto.Identity, error) {
 			return nil, err
 		}
 		op = "Created"
+		level = log.Warning
 	}
-	log.Infof("%s identity with public key: %s", op, id.PublicKeyToString())
+	log.Logf(level, "%s identity with public key: %s", op, id.PublicKeyToString())
 	return id, nil
 }
 
@@ -70,10 +72,17 @@ func Main() int {
 		Mcast:  *fMcast,
 		Target: *fTarget,
 		OnNewPeer: func(peer tsnet.Peer) {
+			pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
+			if err != nil {
+				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
+				return
+			}
+			id := tcrypto.HumanHash(pub)
 			mutex.Lock()
-			peers.Add(fmt.Sprintf("%s%s%s (%s%s%s)",
+			peers.Add(fmt.Sprintf("%s%s%s (%s%s%s) %s",
 				tcolor.BrightBlue.Foreground(), peer.Name, tcolor.Reset,
-				tcolor.BrightGreen.Foreground(), peer.Addr, tcolor.Reset))
+				tcolor.BrightGreen.Foreground(), peer.Addr, tcolor.Reset,
+				id))
 			mutex.Unlock()
 		},
 		Identity: id,
@@ -103,9 +112,10 @@ func Main() int {
 			for _, p := range sets.Sort(newPeers) {
 				fmt.Fprintf(&buf, "\n%s", p)
 			}
-			ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s)\n🔗%s",
+			ap.WriteBoxed(1, "🏠\n%s%s%s (%s%s%s) %s\n🔗%s",
 				tcolor.BrightYellow.Foreground(), srv.Name, tcolor.Reset,
 				tcolor.Green.Foreground(), srv.OurAddress().String(), tcolor.Reset,
+				id.HumanID(),
 				buf.String())
 			buf.Reset()
 			ap.RestoreCursorPos()
