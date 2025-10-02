@@ -20,8 +20,6 @@ func (e *EncodingError) Error() string {
 	return "encoding error: " + e.Msg
 }
 
-var ErrInvalidEncoding = &EncodingError{Msg: "invalid encoding"}
-
 func NewEncodingErr(msg string) error {
 	return &EncodingError{Msg: msg}
 }

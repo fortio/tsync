@@ -13,11 +13,36 @@ import (
 	"fortio.org/sets"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
+	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
 
 func main() {
 	os.Exit(Main())
+}
+
+func LoadIdentity() (*tcrypto.Identity, error) {
+	storage, err := tcrypto.InitStorage()
+	if err != nil {
+		return nil, err
+	}
+	// Try to load existing identity
+	op := "Loaded"
+	id, err := storage.LoadIdentity()
+	if err != nil {
+		log.Infof("No existing identity found, creating new one: %v", err)
+		id, err = tcrypto.NewIdentity()
+		if err != nil {
+			return nil, err
+		}
+		err = storage.SaveIdentity(id)
+		if err != nil {
+			return nil, err
+		}
+		op = "Created"
+	}
+	log.Infof("%s identity with public key: %s", op, id.PublicKeyToString())
+	return id, nil
 }
 
 func Main() int {
@@ -33,6 +58,10 @@ func Main() int {
 		return 1 // error already logged
 	}
 	defer ap.Restore()
+	id, err := LoadIdentity()
+	if err != nil {
+		return log.FErrf("Failed to load or create identity: %v", err)
+	}
 	peers := sets.New[string]()
 	var mutex sync.Mutex
 	cfg := tsnet.Config{
@@ -47,9 +76,10 @@ func Main() int {
 				tcolor.BrightGreen.Foreground(), peer.Addr, tcolor.Reset))
 			mutex.Unlock()
 		},
+		Identity: id,
 	}
 	srv := cfg.NewServer()
-	if err := srv.Start(context.Background()); err != nil {
+	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
 	defer srv.Stop()
@@ -58,7 +88,7 @@ func Main() int {
 	ap.AutoSync = false
 	prev := 0
 	var buf strings.Builder
-	err := ap.FPSTicks(context.Background(), func(_ context.Context) bool {
+	err = ap.FPSTicks(context.Background(), func(_ context.Context) bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
 		mutex.Lock()
