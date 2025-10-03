@@ -31,14 +31,14 @@ CGO_ENABLED=0 go install fortio.org/tsync@latest  # to install (in ~/go/bin typi
 CGO_ENABLED=0 go run fortio.org/tsync@latest  # to run without install
 ```
 
-or even
-```
-docker run -ti fortio/tsync # but that's obviously slower
-```
-
 or
 ```
 brew install fortio/tap/tsync
+```
+
+or even - but multicast that we need doesn't seem to work at least on docker for mac.
+```
+docker run --network host -v ~/.tsync:/home/user/.tsync -ti fortio/tsync
 ```
 
 
