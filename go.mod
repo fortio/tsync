@@ -1,6 +1,6 @@
 module fortio.org/tsync
 
-go 1.23.0
+go 1.24.0
 
 require (
 	fortio.org/cli v1.11.0

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fortio.org/log"
+	"fortio.org/tsync/smap"
 	"fortio.org/tsync/tcrypto"
 )
 
@@ -49,7 +50,7 @@ type Server struct {
 	broadcastSend   *net.UDPConn
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
-	peers           map[Peer]PeerData
+	Peers           *smap.Map[Peer, PeerData]
 	idStr           string
 }
 
@@ -66,7 +67,7 @@ type PeerData struct {
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{Config: *c, peers: make(map[Peer]PeerData)}
+	return &Server{Config: *c, Peers: smap.New[Peer, PeerData]()}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -193,14 +194,14 @@ func (s *Server) runReceive(ctx context.Context) {
 			}
 			data := PeerData{Epoch: theirEpoch, LastSeen: time.Now()}
 			peer := Peer{Name: name, IP: addr.IP.String(), Port: addr.Port, PublicKey: pubKey}
-			if v, ok := s.peers[peer]; ok {
+			if v, ok := s.Peers.Get(peer); ok {
 				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
 				// update last seen and epoch
-				s.peers[peer] = data
+				s.Peers.Set(peer, data)
 				continue
 			}
-			s.peers[peer] = data
-			log.S(log.Info, "New peer", log.Any("count", len(s.peers)),
+			s.Peers.Set(peer, data)
+			log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
 				log.Any("Peer", peer), log.Any("Data", data))
 			if s.OnNewPeer != nil {
 				s.OnNewPeer(peer)
