@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"fortio.org/log"
-	"fortio.org/sets"
 	"fortio.org/tsync/tcrypto"
 )
 
@@ -21,7 +20,9 @@ const (
 	// Max size of messages.
 	BufSize = 576 - 60 - 8 // 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes
 	// What udp address we try by default to find our interface and ip.
-	DefaultTarget = "8.8.8.8:53"
+	DefaultTarget            = "8.8.8.8:53"
+	DefaultBroadcastInterval = 1500 * time.Millisecond
+	TimeFormat               = "15:04:05.000" // time only + millis.
 )
 
 type Config struct {
@@ -33,8 +34,9 @@ type Config struct {
 	Target string
 	// Callback called when a new peer is detected. Must not block for long or
 	// it will delay processing of incoming messages.
-	OnNewPeer func(peer Peer)
-	Identity  *tcrypto.Identity // long term identity for this server
+	OnNewPeer             func(peer Peer)
+	Identity              *tcrypto.Identity // long term identity for this server
+	BaseBroadcastInterval time.Duration     // default to 1.5s if 0
 }
 
 type Server struct {
@@ -47,18 +49,24 @@ type Server struct {
 	broadcastSend   *net.UDPConn
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
-	peers           sets.Set[Peer]
+	peers           map[Peer]PeerData
 	idStr           string
 }
 
 type Peer struct {
 	Name      string
 	PublicKey string
-	Addr      string
+	IP        string
+	Port      int
+}
+
+type PeerData struct {
+	Epoch    int
+	LastSeen time.Time
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{Config: *c, peers: sets.New[Peer]()}
+	return &Server{Config: *c, peers: make(map[Peer]PeerData)}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -69,6 +77,9 @@ func (s *Server) Start(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+	}
+	if s.BaseBroadcastInterval <= 0 {
+		s.BaseBroadcastInterval = DefaultBroadcastInterval
 	}
 	if s.Target == "" {
 		s.Target = DefaultTarget
@@ -121,8 +132,8 @@ func (s *Server) Stop() {
 func (s *Server) runAdv(ctx context.Context) {
 	defer s.wg.Done()
 	// 1 sec tick + some random jitter
-	jitter := rand.IntN(1024) //nolint:gosec // not cryptographic
-	interval := time.Second + time.Duration(jitter)*time.Millisecond
+	jitter := 1 + rand.IntN(1024) //nolint:gosec // not cryptographic
+	interval := s.BaseBroadcastInterval + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
 	log.Infof("Starting tsync broadcast sender %q (%v) with %v interval (jitter %d ms)",
 		s.Name, s.ourSendAddr, interval, jitter)
@@ -180,13 +191,17 @@ func (s *Server) runReceive(ctx context.Context) {
 				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
 				continue
 			}
-			peer := Peer{Name: name, Addr: addr.String(), PublicKey: pubKey}
-			if s.peers.Has(peer) {
-				log.LogVf("Already known peer %v", peer)
+			data := PeerData{Epoch: theirEpoch, LastSeen: time.Now()}
+			peer := Peer{Name: name, IP: addr.IP.String(), Port: addr.Port, PublicKey: pubKey}
+			if v, ok := s.peers[peer]; ok {
+				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
+				// update last seen and epoch
+				s.peers[peer] = data
 				continue
 			}
-			s.peers.Add(peer)
-			log.Infof("New peer %q (found at their %d) at %v, total %d", peer.Name, theirEpoch, peer.Addr, s.peers.Len())
+			s.peers[peer] = data
+			log.S(log.Info, "New peer", log.Any("count", len(s.peers)),
+				log.Any("Peer", peer), log.Any("Data", data))
 			if s.OnNewPeer != nil {
 				s.OnNewPeer(peer)
 			}
