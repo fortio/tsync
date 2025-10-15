@@ -1,4 +1,4 @@
-// Network library support for tsync (discovery/registration and communication).
+// Package tsnet is the network library support for tsync (discovery/registration and communication).
 package tsnet
 
 import (
@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	// Max size of messages.
-	BufSize = 576 - 60 - 8 // 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes
-	// What udp address we try by default to find our interface and ip.
+	// BufSize is the max size of messages (safe size).
+	// 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes.
+	BufSize = 576 - 60 - 8
+	// DefaultTarget: which udp address we try by default to find our interface and ip.
 	DefaultTarget            = "8.8.8.8:53"
 	DefaultBroadcastInterval = 1500 * time.Millisecond
 	TimeFormat               = "15:04:05.000" // time only + millis.
@@ -210,7 +211,7 @@ func (s *Server) runReceive(ctx context.Context) {
 	}
 }
 
-// Returns the interface used to reach a public IP (default route).
+// GetInternetInterface returns the interface used to reach a public IP (default route).
 // Windows tend to pick somehow the wrong interface instead of listening to all/correct
 // default one so we try to guess the right one by connecting to an external address.
 func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *net.UDPAddr, error) {
