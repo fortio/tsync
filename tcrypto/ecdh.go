@@ -1,4 +1,4 @@
-// tcrypto library for tsync crypto operations (key generation etc).
+// Package tcrypto is the library for tsync crypto operations (key generation etc).
 package tcrypto
 
 import (
