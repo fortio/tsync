@@ -502,12 +502,10 @@ func TestConcurrentIterators(t *testing.T) {
 			m.Set("concurrent", i)
 		}
 	}()
-
 	// Wait for all goroutines
 	for range numGoroutines + 1 {
 		<-done
 	}
-
 	// Verify map is still functional after concurrent iterations
 	m.Set("test", 999)
 	val, ok := m.Get("test")
