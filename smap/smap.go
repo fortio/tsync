@@ -4,7 +4,6 @@ package smap
 import (
 	"cmp"
 	"iter"
-	"slices"
 	"sort"
 	"sync"
 )
@@ -198,24 +197,7 @@ func (s *Map[K, V]) AllSorted(less func(a, b K) bool) iter.Seq2[K, V] {
 // NaturalSort returns an iterator that visits key-value pairs in the natural order of Q (using <).
 // This requires Q (K from the Map[Q, V]) to be an ordered type.
 func NaturalSort[Q cmp.Ordered, V any](s *Map[Q, V]) iter.Seq2[Q, V] {
-	return func(yield func(Q, V) bool) {
-		s.mu.RLock()
-		keys := make([]Q, 0, len(s.m))
-		for k := range s.m {
-			keys = append(keys, k)
-		}
-		s.mu.RUnlock()
-		slices.Sort(keys)
-		for _, k := range keys {
-			s.mu.RLock()
-			v, ok := s.m[k]
-			s.mu.RUnlock()
-			if !ok {
-				continue
-			}
-			if !yield(k, v) {
-				return
-			}
-		}
-	}
+	return s.AllSorted(func(a, b Q) bool {
+		return a < b
+	})
 }
