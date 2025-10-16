@@ -6,10 +6,16 @@ import (
 	"sync"
 )
 
+type KV[K comparable, V any] struct {
+	Key   K
+	Value V
+}
+
 // Map is a concurrent safe map.
 type Map[K comparable, V any] struct {
-	mu sync.RWMutex
-	m  map[K]V
+	mu      sync.RWMutex
+	version uint64
+	m       map[K]V
 }
 
 // New creates a new sync Map.
@@ -19,10 +25,32 @@ func New[K comparable, V any]() *Map[K, V] {
 	}
 }
 
-func (s *Map[K, V]) Set(key K, value V) {
+// Version returns the current version of the map. If any changes were made, the version is incremented by 1 each time.
+func (s *Map[K, V]) Version() (current uint64) {
+	s.mu.RLock()
+	current = s.version
+	s.mu.RUnlock()
+	return current
+}
+
+func (s *Map[K, V]) Set(key K, value V) (newVersion uint64) {
 	s.mu.Lock()
 	s.m[key] = value
+	s.version++
+	newVersion = s.version
 	s.mu.Unlock()
+	return newVersion
+}
+
+func (s *Map[K, V]) MultiSet(kvs []KV[K, V]) (newVersion uint64) {
+	s.mu.Lock()
+	for _, kv := range kvs {
+		s.m[kv.Key] = kv.Value
+	}
+	s.version++
+	newVersion = s.version
+	s.mu.Unlock()
+	return newVersion
 }
 
 func (s *Map[K, V]) Get(key K) (V, bool) {
@@ -32,10 +60,15 @@ func (s *Map[K, V]) Get(key K) (V, bool) {
 	return value, ok
 }
 
-func (s *Map[K, V]) Delete(key K) {
+func (s *Map[K, V]) Delete(key ...K) (newVersion uint64) {
 	s.mu.Lock()
-	delete(s.m, key)
+	for _, k := range key {
+		delete(s.m, k)
+	}
+	s.version++
+	newVersion = s.version
 	s.mu.Unlock()
+	return newVersion
 }
 
 func (s *Map[K, V]) Has(key K) bool {
@@ -55,12 +88,15 @@ func (s *Map[K, V]) Len() int {
 func (s *Map[K, V]) Clear() {
 	s.mu.Lock()
 	clear(s.m)
+	s.version++
 	s.mu.Unlock()
 }
 
 // All returns an iterator over key-value pairs from the map.
 // This allows ranging over the sync Map like a regular map using Go 1.24+ iterators.
-// The iteration takes a read lock for the duration of copying the entries.
+// The iteration takes a read lock for the duration of going over the entries.
+// If you wish to modify the map during iteration, you should postpone to after the loop.
+// eg. accumulate entries in a slice and call s.Delete(toDeleteSlice) or [MultiSet] for instance.
 func (s *Map[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		s.mu.RLock()

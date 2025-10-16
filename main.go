@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"fortio.org/cli"
 	"fortio.org/log"
-	"fortio.org/sets"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
 	"fortio.org/tsync/tcrypto"
@@ -47,6 +46,14 @@ func LoadIdentity() (*tcrypto.Identity, error) {
 	return id, nil
 }
 
+func PeerString(peer tsnet.Peer, peerData tsnet.PeerData) string {
+	return fmt.Sprintf("%s%s%s (%s%s%s %s%d%s) %s%s%s",
+		tcolor.BrightCyan.Foreground(), peer.Name, tcolor.Reset,
+		tcolor.BrightGreen.Foreground(), peer.IP, tcolor.Reset,
+		tcolor.Blue.Foreground(), peerData.Port, tcolor.Reset,
+		tcolor.BrightYellow.Foreground(), peerData.HumanHash, tcolor.Reset)
+}
+
 func Main() int {
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
 	// echo -n "ts" | od -d -> 29556
@@ -66,27 +73,14 @@ func Main() int {
 	if err != nil {
 		return log.FErrf("Failed to load or create identity: %v", err)
 	}
-	peers := sets.New[string]()
-	var mutex sync.Mutex
+	var version atomic.Uint64
 	cfg := tsnet.Config{
 		Name:   *fName,
 		Port:   *fPort,
 		Mcast:  *fMcast,
 		Target: *fTarget,
-		OnNewPeer: func(peer tsnet.Peer) {
-			pub, err1 := tcrypto.IdentityPublicKeyString(peer.PublicKey)
-			if err1 != nil {
-				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err1)
-				return
-			}
-			id := tcrypto.HumanHash(pub)
-			mutex.Lock()
-			peers.Add(fmt.Sprintf("%s%s%s (%s%s%s %s%d%s) %s%s%s",
-				tcolor.BrightCyan.Foreground(), peer.Name, tcolor.Reset,
-				tcolor.BrightGreen.Foreground(), peer.IP, tcolor.Reset,
-				tcolor.Blue.Foreground(), peer.Port, tcolor.Reset,
-				tcolor.BrightYellow.Foreground(), id, tcolor.Reset))
-			mutex.Unlock()
+		OnChange: func(v uint64) {
+			version.Store(v)
 		},
 		Identity:              id,
 		BaseBroadcastInterval: *fInterval,
@@ -99,7 +93,7 @@ func Main() int {
 	log.Infof("Started tsync with name %q", srv.Name)
 	log.Infof("Press Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
-	prev := -1
+	prev := ^uint64(0)
 	var buf strings.Builder
 	ourAddress := srv.OurAddress()
 	ourIP := ourAddress.IP.String()
@@ -111,31 +105,26 @@ func Main() int {
 		tcolor.Yellow.Foreground(), id.HumanID(), tcolor.Reset,
 	)
 	ap.OnResize = func() error {
-		prev = -1 // force repaint
+		prev = ^uint64(0) // force repaint
 		return nil
 	}
 	err = ap.FPSTicks(func() bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
-		mutex.Lock()
-		numPeers := peers.Len()
+		curVersion := version.Load()
 		// log.Debugf("Have %d peers (prev %d), logHadOutput=%v", numPeers, prev, logHadOutput)
-		if logHadOutput || numPeers != prev {
+		if logHadOutput || curVersion != prev {
 			if !logHadOutput {
 				ap.StartSyncMode()
 			}
-			prev = numPeers
-			newPeers := peers.Clone()
-			mutex.Unlock()
-			for _, p := range sets.Sort(newPeers) {
-				fmt.Fprintf(&buf, "\n%s", p)
+			prev = curVersion
+			for peer, peerData := range srv.Peers.All() {
+				fmt.Fprintf(&buf, "\n%s", PeerString(peer, peerData))
 			}
 			ap.WriteBoxed(1, "%s\n🔗%s", ourLine, buf.String())
 			buf.Reset()
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
-		} else {
-			mutex.Unlock()
 		}
 		if len(ap.Data) == 0 {
 			return true

@@ -1,6 +1,7 @@
 package smap
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -560,4 +561,71 @@ func TestConcurrentClearAndLen(t *testing.T) {
 	if m.Len() != 1 {
 		t.Errorf("Expected length 1, got %d", m.Len())
 	}
+}
+
+func TestVersion(t *testing.T) {
+	m := New[string, int]()
+	initial := m.Version()
+	m.Set("a", 1)
+	if m.Version() == initial {
+		t.Error("Version should increment after Set")
+	}
+	m.Set("b", 2)
+	if m.Version() <= initial+1 {
+		t.Error("Version should increment again after another Set")
+	}
+	m.Delete("a")
+	if m.Version() <= initial+2 {
+		t.Error("Version should increment after Delete")
+	}
+}
+
+func TestMultiSet(t *testing.T) {
+	m := New[string, int]()
+	kvs := []KV[string, int]{
+		{"x", 10},
+		{"y", 20},
+		{"z", 30},
+	}
+	m.MultiSet(kvs)
+	if m.Len() != 3 {
+		t.Errorf("Expected 3 entries after MultiSet, got %d", m.Len())
+	}
+	for _, kv := range kvs {
+		v, ok := m.Get(kv.Key)
+		if !ok || v != kv.Value {
+			t.Errorf("Expected %s=%d, got %d", kv.Key, kv.Value, v)
+		}
+	}
+}
+
+func TestDeleteMultiple(t *testing.T) {
+	m := New[string, int]()
+	m.Set("a", 1)
+	m.Set("b", 2)
+	m.Set("c", 3)
+	m.Delete("a", "b")
+	if m.Has("a") || m.Has("b") {
+		t.Error("Keys 'a' and 'b' should be deleted")
+	}
+	if !m.Has("c") {
+		t.Error("Key 'c' should still exist")
+	}
+}
+
+// This deadlocks (by design/as documented) so isn't actually a test.
+func DeleteDuringIterationDeadlock(t *testing.T) {
+	m := New[string, int]()
+	m.Set("a", 1)
+	m.Set("b", 2)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		for k := range m.Keys() {
+			m.Delete(k) // This should deadlock due to lock ordering
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+	t.Errorf("Unexpected no hang")
 }
