@@ -61,9 +61,9 @@ type Server struct {
 }
 
 type Peer struct {
+	IP        string
 	Name      string
 	PublicKey string
-	IP        string
 }
 
 type PeerData struct {
