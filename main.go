@@ -57,7 +57,7 @@ func Main() int {
 	fInterval := flag.Duration("interval", tsnet.DefaultBroadcastInterval,
 		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
 	cli.Main()
-	ap := ansipixels.NewAnsiPixels(10)
+	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
 		return 1 // error already logged
 	}
@@ -110,12 +110,16 @@ func Main() int {
 		tcolor.Blue.Foreground(), ourPort, tcolor.Reset,
 		tcolor.Yellow.Foreground(), id.HumanID(), tcolor.Reset,
 	)
+	ap.OnResize = func() error {
+		prev = -1 // force repaint
+		return nil
+	}
 	err = ap.FPSTicks(func() bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
 		mutex.Lock()
 		numPeers := peers.Len()
-		log.Debugf("Have %d peers (prev %d), logHadOutput=%v", numPeers, prev, logHadOutput)
+		// log.Debugf("Have %d peers (prev %d), logHadOutput=%v", numPeers, prev, logHadOutput)
 		if logHadOutput || numPeers != prev {
 			if !logHadOutput {
 				ap.StartSyncMode()
