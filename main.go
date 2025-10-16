@@ -111,6 +111,9 @@ func Main() int {
 	err = ap.FPSTicks(func() bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
+		if srv.Stopped() {
+			return false
+		}
 		curVersion := version.Load()
 		// log.Debugf("Have %d peers (prev %d), logHadOutput=%v", numPeers, prev, logHadOutput)
 		if logHadOutput || curVersion != prev {
