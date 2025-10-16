@@ -121,7 +121,7 @@ func Main() int {
 				ap.StartSyncMode()
 			}
 			prev = curVersion
-			for peer, peerData := range srv.Peers.All() {
+			for peer, peerData := range srv.Peers.AllSorted(tsnet.PeerSort) {
 				fmt.Fprintf(&buf, "\n%s", PeerString(peer, peerData))
 			}
 			ap.WriteBoxed(1, "%s\n🔗%s", ourLine, buf.String())

@@ -308,6 +308,126 @@ func TestKeysEarlyTermination(t *testing.T) {
 	}
 }
 
+func TestKeysSorted(t *testing.T) {
+	m := New[string, int]()
+	m.Set("c", 3)
+	m.Set("a", 1)
+	m.Set("b", 2)
+
+	expected := []string{"a", "b", "c"}
+	idx := 0
+	for k := range m.KeysSorted(func(a, b string) bool { return a < b }) {
+		if idx >= len(expected) {
+			t.Fatalf("received more keys than expected; extra key %q", k)
+		}
+		if k != expected[idx] {
+			t.Fatalf("expected key %q at position %d, got %q", expected[idx], idx, k)
+		}
+		idx++
+	}
+	if idx != len(expected) {
+		t.Fatalf("expected %d keys, got %d", len(expected), idx)
+	}
+
+	t.Run("earlyTermination", func(t *testing.T) {
+		seqMap := New[string, int]()
+		seqMap.Set("y", 2)
+		seqMap.Set("x", 1)
+		seq := seqMap.KeysSorted(func(a, b string) bool { return a < b })
+		calls := 0
+		seq(func(string) bool {
+			calls++
+			return false
+		})
+		if calls != 1 {
+			t.Fatalf("expected to stop after 1 iteration, got %d", calls)
+		}
+	})
+
+	t.Run("structKeyCustomSort", func(t *testing.T) {
+		type compoundKey struct {
+			label    string
+			priority int
+		}
+
+		s := New[compoundKey, int]()
+		s.Set(compoundKey{label: "gamma", priority: 2}, 20)
+		s.Set(compoundKey{label: "alpha", priority: 3}, 30)
+		s.Set(compoundKey{label: "omega", priority: 1}, 10)
+
+		less := func(a, b compoundKey) bool {
+			return a.priority < b.priority
+		}
+
+		order := make([]compoundKey, 0, 3)
+		for k := range s.KeysSorted(less) {
+			order = append(order, k)
+		}
+
+		expectedOrder := []compoundKey{
+			{label: "omega", priority: 1},
+			{label: "gamma", priority: 2},
+			{label: "alpha", priority: 3},
+		}
+
+		if len(order) != len(expectedOrder) {
+			t.Fatalf("expected %d keys, got %d", len(expectedOrder), len(order))
+		}
+
+		for i, got := range order {
+			want := expectedOrder[i]
+			if got != want {
+				t.Fatalf("at position %d expected %v, got %v", i, want, got)
+			}
+		}
+	})
+}
+
+func TestAllSorted(t *testing.T) {
+	m := New[int, string]()
+	m.Set(3, "three")
+	m.Set(1, "one")
+	m.Set(2, "two")
+
+	visited := make([]KV[int, string], 0, 3)
+	for k, v := range m.AllSorted(func(a, b int) bool { return a < b }) {
+		visited = append(visited, KV[int, string]{Key: k, Value: v})
+		if k == 1 {
+			m.Delete(2)
+		}
+	}
+
+	expected := []KV[int, string]{
+		{Key: 1, Value: "one"},
+		{Key: 3, Value: "three"},
+	}
+
+	if len(visited) != len(expected) {
+		t.Fatalf("expected %d key/value pairs, got %d", len(expected), len(visited))
+	}
+
+	for i, kv := range expected {
+		if visited[i] != kv {
+			t.Fatalf("expected pair %v at position %d, got %v", kv, i, visited[i])
+		}
+	}
+
+	t.Run("earlyTermination", func(t *testing.T) {
+		seqMap := New[int, string]()
+		seqMap.Set(2, "two")
+		seqMap.Set(1, "one")
+		seq := seqMap.AllSorted(func(a, b int) bool { return a < b })
+		calls := 0
+		seq(func(int, string) bool {
+			calls++
+			return false
+		})
+		if calls != 1 {
+			t.Fatalf("expected to stop after 1 iteration, got %d", calls)
+		}
+	})
+}
+
 func TestIteratorWithDifferentTypes(t *testing.T) {
 	// Test with different types
 	m := New[int, string]()

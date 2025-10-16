@@ -3,6 +3,7 @@ package smap
 
 import (
 	"iter"
+	"sort"
 	"sync"
 )
 
@@ -133,6 +134,59 @@ func (s *Map[K, V]) Keys() iter.Seq[K] {
 		defer s.mu.RUnlock()
 		for k := range s.m {
 			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+// KeysSorted returns an iterator over keys sorted using the provided comparison function.
+// The map snapshot occurs under a read lock, then sorting happens without holding the lock.
+func (s *Map[K, V]) KeysSorted(less func(a, b K) bool) iter.Seq[K] {
+	return func(yield func(K) bool) {
+		s.mu.RLock()
+		keys := make([]K, 0, len(s.m))
+		for k := range s.m {
+			keys = append(keys, k)
+		}
+		s.mu.RUnlock()
+
+		sort.Slice(keys, func(i, j int) bool {
+			return less(keys[i], keys[j])
+		})
+
+		for _, k := range keys {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+// AllSorted returns an iterator over key-value pairs where keys are visited in the order defined by less.
+// The keys snapshot occurs under a read lock, then sorting and value lookups happen without holding it.
+// Because of that, by the time a key is revisited later, it may have been deleted; such entries are skipped.
+func (s *Map[K, V]) AllSorted(less func(a, b K) bool) iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		s.mu.RLock()
+		keys := make([]K, 0, len(s.m))
+		for k := range s.m {
+			keys = append(keys, k)
+		}
+		s.mu.RUnlock()
+
+		sort.Slice(keys, func(i, j int) bool {
+			return less(keys[i], keys[j])
+		})
+
+		for _, k := range keys {
+			s.mu.RLock()
+			v, ok := s.m[k]
+			s.mu.RUnlock()
+			if !ok {
+				continue
+			}
+			if !yield(k, v) {
 				return
 			}
 		}
