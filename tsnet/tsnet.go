@@ -27,6 +27,7 @@ const (
 	DefaultBroadcastInterval = 1500 * time.Millisecond
 	TimeFormat               = "15:04:05.000" // time only + millis.
 	DefaultPeerTimeout       = 10 * time.Second
+	epochStopMarker          = -999
 )
 
 type Config struct {
@@ -133,7 +134,7 @@ func (s *Server) Stop() {
 	if s.Stopped() {
 		return
 	}
-	s.epoch.Store(-999)
+	s.epoch.Store(epochStopMarker)
 	if s.cancel == nil {
 		return
 	}
@@ -165,8 +166,8 @@ func (s *Server) runAdv(ctx context.Context) {
 			return
 		case <-ticker.C:
 			newEpoch := s.epoch.Add(1)
-			log.LogVf("Tick %d", epoch)
-			if newEpoch < -999 {
+			log.LogVf("Tick %d -> %d", epoch, newEpoch)
+			if newEpoch < epochStopMarker {
 				panic("ticks wrapped, server ran for over 2B ticks??")
 			}
 			if newEpoch < 0 {
@@ -250,6 +251,7 @@ func (s *Server) runReceive(ctx context.Context) {
 				} else {
 					log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%v %v)", peer, data)
 				}
+				continue
 			}
 			if v, ok := s.Peers.Get(peer); ok {
 				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
