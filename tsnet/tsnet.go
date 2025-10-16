@@ -23,11 +23,11 @@ const (
 	// 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes.
 	BufSize = 576 - 60 - 8
 	// DefaultTarget: which udp address we try by default to find our interface and ip.
-	DefaultTarget            = "8.8.8.8:53"
-	DefaultBroadcastInterval = 1500 * time.Millisecond
-	TimeFormat               = "15:04:05.000" // time only + millis.
-	DefaultPeerTimeout       = 10 * time.Second
-	epochStopMarker          = -999
+	DefaultTarget                  = "8.8.8.8:53"
+	DefaultBroadcastInterval       = 1500 * time.Millisecond
+	TimeFormat                     = "15:04:05.000" // time only + millis.
+	DefaultPeerTimeout             = 10 * time.Second
+	epochStopMarker          int32 = -999
 )
 
 type Config struct {
@@ -171,7 +171,7 @@ func (s *Server) runAdv(ctx context.Context) {
 				panic("ticks wrapped, server ran for over 2B ticks??")
 			}
 			if newEpoch < 0 {
-				log.Infof("Server stopped or ticks wrapped, not sending message")
+				log.Infof("Server stopped, not sending message")
 				return
 			}
 			epoch = newEpoch
