@@ -216,11 +216,11 @@ func (s *Server) runReceive(ctx context.Context) {
 				continue
 			}
 			pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
+			data.HumanHash = tcrypto.HumanHash(pub)
 			if err != nil {
 				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
-				return
+				data.HumanHash = "BAD-PKEY"
 			}
-			data.HumanHash = tcrypto.HumanHash(pub)
 			nv := s.Peers.Set(peer, data)
 			log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
 				log.Any("Peer", peer), log.Any("Data", data))
