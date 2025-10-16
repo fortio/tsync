@@ -750,7 +750,7 @@ func DeleteDuringIterationDeadlock(t *testing.T) {
 	t.Errorf("Unexpected no hang")
 }
 
-func TestAllNaturalSort(t *testing.T) {
+func TestAllNaturalSort(t *testing.T) { //nolint:gocognit // it's a test!
 	t.Run("int", func(t *testing.T) {
 		m := New[int, string]()
 		m.Set(3, "three")

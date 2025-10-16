@@ -343,8 +343,8 @@ func (s *Server) MessageDecode(buf []byte) (string, string, int32, error) {
 	return name, pubKeyStr, epoch, nil
 }
 
-// Sort function for smap.AllSorted.
-// Sort by ip, then name, then public key
+// PeerSort sort function for smap.AllSorted.
+// Sorts by ip, then name, then public key.
 func PeerSort(a, b Peer) bool {
 	if a.IP != b.IP {
 		return a.IP < b.IP
