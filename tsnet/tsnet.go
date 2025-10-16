@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fortio.org/log"
@@ -22,9 +23,11 @@ const (
 	// 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes.
 	BufSize = 576 - 60 - 8
 	// DefaultTarget: which udp address we try by default to find our interface and ip.
-	DefaultTarget            = "8.8.8.8:53"
-	DefaultBroadcastInterval = 1500 * time.Millisecond
-	TimeFormat               = "15:04:05.000" // time only + millis.
+	DefaultTarget                  = "8.8.8.8:53"
+	DefaultBroadcastInterval       = 1500 * time.Millisecond
+	TimeFormat                     = "15:04:05.000" // time only + millis.
+	DefaultPeerTimeout             = 10 * time.Second
+	epochStopMarker          int32 = -999
 )
 
 type Config struct {
@@ -40,6 +43,7 @@ type Config struct {
 	OnChange              func(version uint64)
 	Identity              *tcrypto.Identity // long term identity for this server
 	BaseBroadcastInterval time.Duration     // default to 1.5s if 0
+	PeerTimeout           time.Duration     // default to 10s if 0
 }
 
 type Server struct {
@@ -54,18 +58,19 @@ type Server struct {
 	wg              sync.WaitGroup
 	Peers           *smap.Map[Peer, PeerData]
 	idStr           string
+	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
 }
 
 type Peer struct {
+	IP        string
 	Name      string
 	PublicKey string
-	IP        string
 }
 
 type PeerData struct {
 	HumanHash string
 	Port      int
-	Epoch     int
+	Epoch     int32
 	LastSeen  time.Time
 }
 
@@ -84,6 +89,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	if s.BaseBroadcastInterval <= 0 {
 		s.BaseBroadcastInterval = DefaultBroadcastInterval
+	}
+	if s.PeerTimeout <= 0 {
+		s.PeerTimeout = DefaultPeerTimeout
 	}
 	if s.Target == "" {
 		s.Target = DefaultTarget
@@ -123,6 +131,10 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) Stop() {
+	if s.Stopped() {
+		return
+	}
+	s.epoch.Store(epochStopMarker)
 	if s.cancel == nil {
 		return
 	}
@@ -131,6 +143,10 @@ func (s *Server) Stop() {
 	s.broadcastListen.Close() // needed or write will block forever
 	s.wg.Wait()
 	s.broadcastSend.Close()
+}
+
+func (s *Server) Stopped() bool {
+	return s.epoch.Load() < 0 // we may stop with -999 and some extra Add(1) happens but stays negative.
 }
 
 func (s *Server) runAdv(ctx context.Context) {
@@ -142,20 +158,44 @@ func (s *Server) runAdv(ctx context.Context) {
 	log.Infof("Starting tsync broadcast sender %q (%v) with %v interval (jitter %d ms)",
 		s.Name, s.ourSendAddr, interval, jitter)
 	defer ticker.Stop()
-	epoch := 0
+	epoch := s.epoch.Load()
 	for {
 		select {
 		case <-ctx.Done():
 			log.Infof("Exiting tsync sender %q after %d ticks (%v)", s.Name, epoch, ctx.Err())
 			return
 		case <-ticker.C:
-			epoch++
-			log.LogVf("Tick %d", epoch)
+			newEpoch := s.epoch.Add(1)
+			log.LogVf("Tick %d -> %d", epoch, newEpoch)
+			if newEpoch < epochStopMarker {
+				panic("ticks wrapped, server ran for over 2B ticks??")
+			}
+			if newEpoch < 0 {
+				log.Infof("Server stopped, not sending message")
+				return
+			}
+			epoch = newEpoch
 			err := s.MessageSend(epoch)
 			if err != nil {
 				log.Errf("Error sending UDP packet: %v", err)
 			}
+			// Run some cleanup/expire entries
+			s.PeersCleanup()
 		}
+	}
+}
+
+func (s *Server) PeersCleanup() {
+	toDelete := make([]Peer, 0)
+	now := time.Now()
+	for peer, data := range s.Peers.All() {
+		if now.Sub(data.LastSeen) > s.PeerTimeout {
+			toDelete = append(toDelete, peer)
+		}
+	}
+	if len(toDelete) > 0 {
+		log.Infof("Removing %d expired peers: %v", len(toDelete), toDelete)
+		s.Peers.Delete(toDelete...)
 	}
 }
 
@@ -175,6 +215,7 @@ func (s *Server) runReceive(ctx context.Context) {
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
 		s.Name, s.broadcastListen.LocalAddr(), BufSize)
 	ourAddr := s.ourSendAddr
+	us := Peer{Name: s.Name, IP: ourAddr.IP.String(), PublicKey: s.Identity.PublicKeyToString()}
 	for {
 		select {
 		case <-ctx.Done():
@@ -203,6 +244,15 @@ func (s *Server) runReceive(ctx context.Context) {
 			}
 			data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now()}
 			peer := Peer{Name: name, IP: addr.IP.String(), PublicKey: pubKey}
+			if peer == us {
+				if theirEpoch <= s.epoch.Load() {
+					log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%v %v)", peer, data)
+					s.Stop()
+				} else {
+					log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%v %v)", peer, data)
+				}
+				continue
+			}
 			if v, ok := s.Peers.Get(peer); ok {
 				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
 				// transfer the human hash (same pub key so same human hash)
@@ -276,15 +326,15 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 
 const MessageFormat = "tsync1 %s %s e %d" // name, public key, epoch
 
-func (s *Server) MessageSend(epoch int) error {
+func (s *Server) MessageSend(epoch int32) error {
 	_, err := fmt.Fprintf(s.broadcastSend, MessageFormat, s.Name, s.idStr, epoch)
 	return err
 }
 
-func (s *Server) MessageDecode(buf []byte) (string, string, int, error) {
+func (s *Server) MessageDecode(buf []byte) (string, string, int32, error) {
 	var name string
 	var pubKeyStr string
-	var epoch int
+	var epoch int32
 	n, err := fmt.Sscanf(string(buf), MessageFormat, &name, &pubKeyStr, &epoch)
 	if err != nil {
 		return "", "", 0, err
@@ -293,4 +343,16 @@ func (s *Server) MessageDecode(buf []byte) (string, string, int, error) {
 		return "", "", 0, fmt.Errorf("could not decode message %q", string(buf))
 	}
 	return name, pubKeyStr, epoch, nil
+}
+
+// PeerSort sort function for smap.AllSorted.
+// Sorts by IP, then name, then public key.
+func PeerSort(a, b Peer) bool {
+	if a.IP != b.IP {
+		return a.IP < b.IP
+	}
+	if a.Name != b.Name {
+		return a.Name < b.Name
+	}
+	return a.PublicKey < b.PublicKey
 }
