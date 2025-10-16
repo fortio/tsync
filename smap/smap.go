@@ -195,8 +195,8 @@ func (s *Map[K, V]) AllSorted(less func(a, b K) bool) iter.Seq2[K, V] {
 	}
 }
 
-// NaturalSort returns an iterator that visits key-value pairs in the natural order of K (using <).
-// This requires K to be an ordered type.
+// NaturalSort returns an iterator that visits key-value pairs in the natural order of Q (using <).
+// This requires Q (K from the Map[Q, V]) to be an ordered type.
 func NaturalSort[Q cmp.Ordered, V any](s *Map[Q, V]) iter.Seq2[Q, V] {
 	return func(yield func(Q, V) bool) {
 		s.mu.RLock()
