@@ -34,9 +34,10 @@ type Config struct {
 	Mcast string
 	// Which ip:port we try to resolve to find our address and interface.
 	Target string
-	// Callback called when a new peer is detected. Must not block for long or
+	// Callback called when a the Server Peers map has changed, a new peer is detected
+	// or old one removed or updated. Must not block for long or
 	// it will delay processing of incoming messages.
-	OnNewPeer             func(peer Peer)
+	OnChange              func(version uint64)
 	Identity              *tcrypto.Identity // long term identity for this server
 	BaseBroadcastInterval time.Duration     // default to 1.5s if 0
 }
@@ -59,12 +60,13 @@ type Peer struct {
 	Name      string
 	PublicKey string
 	IP        string
-	Port      int
 }
 
 type PeerData struct {
-	Epoch    int
-	LastSeen time.Time
+	HumanHash string
+	Port      int
+	Epoch     int
+	LastSeen  time.Time
 }
 
 func (c *Config) NewServer() *Server {
@@ -161,6 +163,12 @@ func (s *Server) OurAddress() *net.UDPAddr {
 	return s.ourSendAddr
 }
 
+func (s *Server) change(version uint64) {
+	if s.OnChange != nil {
+		s.OnChange(version)
+	}
+}
+
 func (s *Server) runReceive(ctx context.Context) {
 	defer s.wg.Done()
 	buf := make([]byte, BufSize)
@@ -193,20 +201,30 @@ func (s *Server) runReceive(ctx context.Context) {
 				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
 				continue
 			}
-			data := PeerData{Epoch: theirEpoch, LastSeen: time.Now()}
-			peer := Peer{Name: name, IP: addr.IP.String(), Port: addr.Port, PublicKey: pubKey}
+			data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now()}
+			peer := Peer{Name: name, IP: addr.IP.String(), PublicKey: pubKey}
 			if v, ok := s.Peers.Get(peer); ok {
 				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
-				// update last seen and epoch
-				s.Peers.Set(peer, data)
+				// transfer the human hash (same pub key so same human hash)
+				data.HumanHash = v.HumanHash
+				// Check if this is an updated port
+				if v.Port != data.Port {
+					log.Infof("Peer %q port changed from %d to %d", peer, v.Port, data.Port)
+				}
+				// Update last seen and epoch
+				s.change(s.Peers.Set(peer, data))
 				continue
 			}
-			s.Peers.Set(peer, data)
+			pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
+			if err != nil {
+				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
+				return
+			}
+			data.HumanHash = tcrypto.HumanHash(pub)
+			nv := s.Peers.Set(peer, data)
 			log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
 				log.Any("Peer", peer), log.Any("Data", data))
-			if s.OnNewPeer != nil {
-				s.OnNewPeer(peer)
-			}
+			s.change(nv)
 		}
 	}
 }

@@ -33,20 +33,24 @@ func (s *Map[K, V]) Version() (current uint64) {
 	return current
 }
 
-func (s *Map[K, V]) Set(key K, value V) {
+func (s *Map[K, V]) Set(key K, value V) (newVersion uint64) {
 	s.mu.Lock()
 	s.m[key] = value
 	s.version++
+	newVersion = s.version
 	s.mu.Unlock()
+	return newVersion
 }
 
-func (s *Map[K, V]) MultiSet(kvs []KV[K, V]) {
+func (s *Map[K, V]) MultiSet(kvs []KV[K, V]) (newVersion uint64) {
 	s.mu.Lock()
 	for _, kv := range kvs {
 		s.m[kv.Key] = kv.Value
 	}
 	s.version++
+	newVersion = s.version
 	s.mu.Unlock()
+	return newVersion
 }
 
 func (s *Map[K, V]) Get(key K) (V, bool) {
@@ -56,13 +60,15 @@ func (s *Map[K, V]) Get(key K) (V, bool) {
 	return value, ok
 }
 
-func (s *Map[K, V]) Delete(key ...K) {
+func (s *Map[K, V]) Delete(key ...K) (newVersion uint64) {
 	s.mu.Lock()
 	for _, k := range key {
 		delete(s.m, k)
 	}
 	s.version++
+	newVersion = s.version
 	s.mu.Unlock()
+	return newVersion
 }
 
 func (s *Map[K, V]) Has(key K) bool {

@@ -613,18 +613,19 @@ func TestDeleteMultiple(t *testing.T) {
 	}
 }
 
+// This deadlocks (by design/as documented) so isn't actually a test.
 func DeleteDuringIterationDeadlock(t *testing.T) {
-	// This is expected to deadlock and is for demonstration only.
 	m := New[string, int]()
 	m.Set("a", 1)
 	m.Set("b", 2)
 	wg := sync.WaitGroup{}
-	wg.Go(func() {
+	wg.Add(1)
+	go func() {
 		for k := range m.Keys() {
 			m.Delete(k) // This should deadlock due to lock ordering
 		}
 		wg.Done()
-	})
+	}()
 	wg.Wait()
 	t.Errorf("Unexpected no hang")
 }
