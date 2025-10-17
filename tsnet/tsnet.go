@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"fortio.org/log"
-	"fortio.org/tsync/smap"
+	"fortio.org/smap"
 	"fortio.org/tsync/tcrypto"
 )
 
