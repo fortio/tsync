@@ -186,7 +186,7 @@ func (s *Server) runAdv(ctx context.Context) {
 }
 
 func (s *Server) PeersCleanup() {
-	toDelete := make([]Peer, 0)
+	var toDelete []Peer
 	now := time.Now()
 	for peer, data := range s.Peers.All() {
 		if now.Sub(data.LastSeen) > s.PeerTimeout {
