@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	fortio.org/cli v1.12.2
 	fortio.org/log v1.18.1
+	fortio.org/smap v0.5.0
 	fortio.org/terminal v0.60.2-0.20251016004457-bd10d724e69a
 )
 
