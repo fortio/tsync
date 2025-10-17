@@ -6,7 +6,7 @@ require (
 	fortio.org/cli v1.12.2
 	fortio.org/log v1.18.1
 	fortio.org/smap v1.0.1
-	fortio.org/terminal v0.60.2-0.20251016004457-bd10d724e69a
+	fortio.org/terminal v0.60.2
 )
 
 require (
