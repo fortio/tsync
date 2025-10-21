@@ -55,7 +55,13 @@ func PeerString(peer tsnet.Peer, peerData tsnet.PeerData) string {
 		tcolor.BrightYellow.Foreground(), peerData.HumanHash, tcolor.Reset)
 }
 
-var alignment = []table.Alignment{table.Left, table.Center, table.Left, table.Right, table.Right}
+var alignment = []table.Alignment{
+	table.Right,  // Id
+	table.Center, // Name
+	table.Left,   // Ip
+	table.Right,  // Port
+	table.Right,  // Human Hash
+}
 
 func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
 	return []string{
@@ -69,7 +75,7 @@ func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
 
 func OurLine(srv *tsnet.Server, ourIP, ourPort, humanID string) []string {
 	return []string{
-		"",
+		"🏠",
 		tcolor.Cyan.Foreground() + srv.Name + tcolor.Reset,
 		tcolor.Green.Foreground() + ourIP + tcolor.Reset,
 		tcolor.Blue.Foreground() + ourPort + tcolor.Reset,
@@ -139,13 +145,19 @@ func Main() int {
 			}
 			prev = curVersion
 			lines := make([][]string, 0, srv.Peers.Len()+3) // note len may actually change.
-			lines = append(lines, []string{"", "🏠", "", "", ""}, ourLine, []string{"", "🔗", "", "", ""})
+			lines = append(lines, ourLine, []string{
+				tcolor.DarkGray.Foreground() + "Id" + tcolor.Reset,
+				"🔗 " + tcolor.DarkGray.Foreground() + "Name" + tcolor.Reset,
+				tcolor.DarkGray.Foreground() + "Ip" + tcolor.Reset,
+				tcolor.DarkGray.Foreground() + "Port" + tcolor.Reset,
+				tcolor.DarkGray.Foreground() + "Hash" + tcolor.Reset,
+			})
 			idx := 1
 			for peer, peerData := range srv.Peers.AllSorted(tsnet.PeerSort) {
 				lines = append(lines, PeerLine(idx, peer, peerData))
 				idx++
 			}
-			table.WriteTableBoxed(ap, 1, alignment, 2, lines)
+			table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
 		}
