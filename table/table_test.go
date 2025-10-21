@@ -1,6 +1,8 @@
 package table
 
 import (
+	"bufio"
+	"bytes"
 	"strings"
 	"testing"
 
@@ -368,9 +370,9 @@ func TestCreateTableLines_VisualAlignment(t *testing.T) {
 				{"Bob", "25", "LA"},
 			},
 			expected: `
-Name   Age  City
-Alice  30   NYC 
-Bob    25   LA  `,
+Name   Age  City|
+Alice  30   NYC |
+Bob    25   LA  |`,
 		},
 		{
 			name:          "Right alignment",
@@ -382,9 +384,9 @@ Bob    25   LA  `,
 				{"Bob", "25", "LA"},
 			},
 			expected: `
- Name  Age  City
-Alice   30   NYC
-  Bob   25    LA`,
+ Name  Age  City|
+Alice   30   NYC|
+  Bob   25    LA|`,
 		},
 		{
 			name:          "Center alignment",
@@ -396,9 +398,9 @@ Alice   30   NYC
 				{"Bob", "25", "LA"},
 			},
 			expected: `
-Name   Age  City
-Alice  30   NYC 
- Bob   25    LA `,
+Name   Age  City|
+Alice  30   NYC |
+ Bob   25    LA |`,
 		},
 		{
 			name:          "Mixed alignment",
@@ -410,9 +412,9 @@ Alice  30   NYC
 				{"Banana", "0.75", "50"},
 			},
 			expected: `
-Product   Price   Stock
-Apple      1.50    100 
-Banana     0.75    50  `,
+Product   Price   Stock|
+Apple      1.50    100 |
+Banana     0.75    50  |`,
 		},
 		{
 			name:          "No spacing",
@@ -423,8 +425,8 @@ Banana     0.75    50  `,
 				{"X", "Y", "Z"},
 			},
 			expected: `
-ABBCCC
-XY   Z`,
+ABBCCC|
+XY   Z|`,
 		},
 		{
 			name:          "Wide spacing",
@@ -435,8 +437,8 @@ XY   Z`,
 				{"A", "B"},
 			},
 			expected: `
-Foo     Bar
-A         B`,
+Foo     Bar|
+A         B|`,
 		},
 	}
 
@@ -444,10 +446,63 @@ A         B`,
 		t.Run(tt.name, func(t *testing.T) {
 			lines, _ := CreateTableLines(ap, tt.alignment, tt.columnSpacing, tt.table)
 			result := "\n" + strings.Join(lines, "\n")
+			expected := strings.ReplaceAll(tt.expected, "|", "")
 
-			if result != tt.expected {
-				t.Errorf("\nExpected:\n%s\n\nGot:\n%s", tt.expected, result)
+			if result != expected {
+				t.Errorf("\nExpected:\n%s\n\nGot:\n%s", expected, result)
 			}
 		})
+	}
+}
+
+func TestWriteTableBoxed(t *testing.T) {
+	var buf bytes.Buffer
+	writer := bufio.NewWriter(&buf)
+	ap := &ansipixels.AnsiPixels{
+		W:   80,
+		H:   24,
+		Out: writer,
+	}
+
+	alignment := []Alignment{Left, Right, Center}
+	columnSpacing := 2
+	table := [][]string{
+		{"Name", "Age", "City"},
+		{"Alice", "30", "NYC"},
+		{"Bob", "25", "LA"},
+	}
+
+	y := 5
+	width := WriteTableBoxed(ap, y, alignment, columnSpacing, table)
+
+	// Flush the writer to get the output
+	writer.Flush()
+
+	// Check that width was returned
+	if width == 0 {
+		t.Error("Expected non-zero width")
+	}
+
+	// Check that something was written to the buffer
+	output := buf.String()
+	if len(output) == 0 {
+		t.Error("Expected output to be written to buffer")
+	}
+
+	// Check that the output contains the table data
+	if !strings.Contains(output, "Name") {
+		t.Error("Expected output to contain 'Name'")
+	}
+	if !strings.Contains(output, "Alice") {
+		t.Error("Expected output to contain 'Alice'")
+	}
+	if !strings.Contains(output, "Bob") {
+		t.Error("Expected output to contain 'Bob'")
+	}
+
+	// Check that MoveCursor was called (cursor positioning escape codes should be present)
+	// ANSI escape codes for cursor movement start with ESC[
+	if !strings.Contains(output, "\x1b[") {
+		t.Error("Expected output to contain ANSI escape codes for cursor positioning")
 	}
 }
