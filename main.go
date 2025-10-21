@@ -157,7 +157,9 @@ func Main() int {
 				ap.StartSyncMode()
 			}
 			prev = curVersion
-			lines := make([][]string, 0, srv.Peers.Len()+2) // +2 lines; note len may actually change but it's ok.
+			// +2 for header and our line; note that peer len in between this
+			// and the loop may actually change but it's ok.
+			lines := make([][]string, 0, srv.Peers.Len()+2)
 			lines = append(lines, ourLine, headerLine)
 			idx := 1
 			for peer, peerData := range srv.Peers.AllSorted(tsnet.PeerSort) {

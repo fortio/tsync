@@ -162,14 +162,24 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 	// Calculate total width
 	maxw := calculateTableWidth(colWidths, ncols, columnSpacing, hasColumnBorders, hasOuterBorder)
 
-	// Build table lines
-	lines := make([]string, 0, nrows+3) // preallocate for data rows + potential border rows
+	// Calculate exact number of lines needed
+	numLines := nrows
+	if borderStyle == BorderFull {
+		numLines = 2*nrows + 1 // data rows + row separators + top/bottom borders
+	} else if hasOuterBorder {
+		numLines = nrows + 2 // data rows + top/bottom borders
+	}
+
+	// Build table lines using direct indexing to catch capacity errors
+	lines := make([]string, numLines)
 	var sb strings.Builder
+	lineIdx := 0
 
 	// Add top border if needed
 	if hasOuterBorder {
-		lines = append(lines, drawHorizontalBorder(ncols, colWidths, columnSpacing,
-			ansipixels.SquareTopLeft, ansipixels.TopT, ansipixels.SquareTopRight))
+		lines[lineIdx] = drawHorizontalBorder(ncols, colWidths, columnSpacing,
+			ansipixels.SquareTopLeft, ansipixels.TopT, ansipixels.SquareTopRight)
+		lineIdx++
 	}
 
 	// Add data rows
@@ -178,8 +188,9 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 		// Add row separator for full borders (except before first row)
 		if borderStyle == BorderFull && i > 0 {
-			lines = append(lines, drawHorizontalBorder(ncols, colWidths, columnSpacing,
-				ansipixels.LeftT, ansipixels.MiddleCross, ansipixels.RightT))
+			lines[lineIdx] = drawHorizontalBorder(ncols, colWidths, columnSpacing,
+				ansipixels.LeftT, ansipixels.MiddleCross, ansipixels.RightT)
+			lineIdx++
 		}
 
 		// Add left border if needed
@@ -206,14 +217,15 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 			sb.WriteString(ansipixels.Vertical)
 		}
 
-		lines = append(lines, sb.String())
+		lines[lineIdx] = sb.String()
+		lineIdx++
 		sb.Reset()
 	}
 
 	// Add bottom border if needed
 	if hasOuterBorder {
-		lines = append(lines, drawHorizontalBorder(ncols, colWidths, columnSpacing,
-			ansipixels.SquareBottomLeft, ansipixels.BottomT, ansipixels.SquareBottomRight))
+		lines[lineIdx] = drawHorizontalBorder(ncols, colWidths, columnSpacing,
+			ansipixels.SquareBottomLeft, ansipixels.BottomT, ansipixels.SquareBottomRight)
 	}
 
 	return lines, maxw
