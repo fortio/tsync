@@ -324,7 +324,7 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 	return nil, nil, errors.New("no default route interface found")
 }
 
-const MessageFormat = "tsync1 %s %s e %d" // name, public key, epoch
+const MessageFormat = "tsync1 %q %s e %d" // name, public key, epoch
 
 func (s *Server) MessageSend(epoch int32) error {
 	_, err := fmt.Fprintf(s.broadcastSend, MessageFormat, s.Name, s.idStr, epoch)

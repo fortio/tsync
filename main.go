@@ -5,13 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
+	"strconv"
 	"sync/atomic"
 
 	"fortio.org/cli"
 	"fortio.org/log"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
+	"fortio.org/tsync/table"
 	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
@@ -46,12 +47,46 @@ func LoadIdentity() (*tcrypto.Identity, error) {
 	return id, nil
 }
 
-func PeerString(peer tsnet.Peer, peerData tsnet.PeerData) string {
-	return fmt.Sprintf("%s%s%s (%s%s%s %s%d%s) %s%s%s",
-		tcolor.BrightCyan.Foreground(), peer.Name, tcolor.Reset,
-		tcolor.BrightGreen.Foreground(), peer.IP, tcolor.Reset,
-		tcolor.Blue.Foreground(), peerData.Port, tcolor.Reset,
-		tcolor.BrightYellow.Foreground(), peerData.HumanHash, tcolor.Reset)
+var alignment = []table.Alignment{
+	table.Right,  // Id
+	table.Center, // Name
+	table.Left,   // Ip
+	table.Right,  // Port
+	table.Right,  // Human Hash
+}
+
+func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
+	return []string{
+		strconv.Itoa(idx),
+		Color16(tcolor.BrightCyan, peer.Name),
+		Color16(tcolor.BrightGreen, peer.IP),
+		Color16f(tcolor.Blue, "%d", peerData.Port),
+		Color16(tcolor.BrightYellow, peerData.HumanHash),
+	}
+}
+
+func OurLine(srv *tsnet.Server, ourIP, ourPort, humanID string) []string {
+	return []string{
+		"🏠",
+		Color16(tcolor.Cyan, srv.Name),
+		Color16(tcolor.Green, ourIP),
+		Color16(tcolor.Blue, ourPort),
+		Color16(tcolor.Yellow, humanID),
+	}
+}
+
+// Color16 returns a colored string.
+func Color16(color tcolor.BasicColor, s string) string {
+	return color.Foreground() + s + tcolor.Reset
+}
+
+// Color16f returns a colored string with printf-style formatting.
+func Color16f(color tcolor.BasicColor, format string, args ...any) string {
+	return Color16(color, fmt.Sprintf(format, args...))
+}
+
+func DarkGray(s string) string {
+	return Color16(tcolor.DarkGray, s)
 }
 
 func Main() int {
@@ -94,16 +129,17 @@ func Main() int {
 	log.Infof("Press Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
-	var buf strings.Builder
 	ourAddress := srv.OurAddress()
 	ourIP := ourAddress.IP.String()
-	ourPort := ourAddress.Port
-	ourLine := fmt.Sprintf("🏠\n%s%s%s (%s%s%s %s%d%s) %s%s%s",
-		tcolor.Cyan.Foreground(), srv.Name, tcolor.Reset,
-		tcolor.Green.Foreground(), ourIP, tcolor.Reset,
-		tcolor.Blue.Foreground(), ourPort, tcolor.Reset,
-		tcolor.Yellow.Foreground(), id.HumanID(), tcolor.Reset,
-	)
+	ourPort := strconv.Itoa(ourAddress.Port)
+	ourLine := OurLine(srv, ourIP, ourPort, id.HumanID())
+	headerLine := []string{
+		DarkGray("Id"),
+		"🔗 " + DarkGray("Name"),
+		DarkGray("Ip"),
+		DarkGray("Port"),
+		DarkGray("Hash"),
+	}
 	ap.OnResize = func() error {
 		prev = ^uint64(0) // force repaint
 		return nil
@@ -121,11 +157,16 @@ func Main() int {
 				ap.StartSyncMode()
 			}
 			prev = curVersion
+			// +2 for header and our line; note that peer len in between this
+			// and the loop may actually change but it's ok.
+			lines := make([][]string, 0, srv.Peers.Len()+2)
+			lines = append(lines, ourLine, headerLine)
+			idx := 1
 			for peer, peerData := range srv.Peers.AllSorted(tsnet.PeerSort) {
-				fmt.Fprintf(&buf, "\n%s", PeerString(peer, peerData))
+				lines = append(lines, PeerLine(idx, peer, peerData))
+				idx++
 			}
-			ap.WriteBoxed(1, "%s\n🔗%s", ourLine, buf.String())
-			buf.Reset()
+			table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
 		}
