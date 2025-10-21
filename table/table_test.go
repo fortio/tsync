@@ -350,7 +350,7 @@ func TestCreateTableLines_WithEmojisAndUnicode(t *testing.T) {
 
 func TestCreateTableLines_VisualAlignment(t *testing.T) {
 	ap := &ansipixels.AnsiPixels{}
-	
+
 	tests := []struct {
 		name          string
 		alignment     []Alignment
@@ -444,7 +444,7 @@ A         B`,
 		t.Run(tt.name, func(t *testing.T) {
 			lines, _ := CreateTableLines(ap, tt.alignment, tt.columnSpacing, tt.table)
 			result := "\n" + strings.Join(lines, "\n")
-			
+
 			if result != tt.expected {
 				t.Errorf("\nExpected:\n%s\n\nGot:\n%s", tt.expected, result)
 			}
