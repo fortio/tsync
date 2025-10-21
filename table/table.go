@@ -58,7 +58,7 @@ func CreateTableLines(ap *ansipixels.AnsiPixels, alignment []Alignment, columnSp
 	var sb strings.Builder
 	for i, row := range table {
 		rowWidth := allWidths[i]
-		// creat each line using width and specified alignment
+		// create each line using width and specified alignment
 		for j, cell := range row {
 			w := rowWidth[j]
 			delta := colWidths[j] - w
