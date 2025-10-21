@@ -133,6 +133,13 @@ func Main() int {
 	ourIP := ourAddress.IP.String()
 	ourPort := strconv.Itoa(ourAddress.Port)
 	ourLine := OurLine(srv, ourIP, ourPort, id.HumanID())
+	headerLine := []string{
+		DarkGray("Id"),
+		"🔗 " + DarkGray("Name"),
+		DarkGray("Ip"),
+		DarkGray("Port"),
+		DarkGray("Hash"),
+	}
 	ap.OnResize = func() error {
 		prev = ^uint64(0) // force repaint
 		return nil
@@ -151,13 +158,7 @@ func Main() int {
 			}
 			prev = curVersion
 			lines := make([][]string, 0, srv.Peers.Len()+2) // +2 lines; note len may actually change but it's ok.
-			lines = append(lines, ourLine, []string{
-				DarkGray("Id"),
-				"🔗 " + DarkGray("Name"),
-				DarkGray("Ip"),
-				DarkGray("Port"),
-				DarkGray("Hash"),
-			})
+			lines = append(lines, ourLine, headerLine)
 			idx := 1
 			for peer, peerData := range srv.Peers.AllSorted(tsnet.PeerSort) {
 				lines = append(lines, PeerLine(idx, peer, peerData))
