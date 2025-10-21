@@ -144,7 +144,7 @@ func Main() int {
 				ap.StartSyncMode()
 			}
 			prev = curVersion
-			lines := make([][]string, 0, srv.Peers.Len()+3) // note len may actually change.
+			lines := make([][]string, 0, srv.Peers.Len()+2) // +2 lines; note len may actually change but it's ok.
 			lines = append(lines, ourLine, []string{
 				tcolor.DarkGray.Foreground() + "Id" + tcolor.Reset,
 				"🔗 " + tcolor.DarkGray.Foreground() + "Name" + tcolor.Reset,
