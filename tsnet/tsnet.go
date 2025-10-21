@@ -293,12 +293,13 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 	// clear the port as it's the current port for this test and not something useful to return.
 	localAddr.Port = 0
 	localIP := localAddr.IP
-
+	log.Debugf("Local address used to reach %q is %v", target, localAddr)
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, iface := range interfaces {
+		log.Debugf("Checking interface %q flags %v", iface.Name, iface.Flags)
 		want := net.FlagUp | net.FlagMulticast | net.FlagRunning
 		if iface.Flags&want != want {
 			continue
@@ -312,6 +313,7 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 			continue
 		}
 		for _, addr := range addrs {
+			log.Debugf("  Checking addr %q", addr.String())
 			ipnet, ok := addr.(*net.IPNet)
 			if !ok || ipnet.IP == nil || ipnet.IP.To4() == nil {
 				continue
