@@ -47,14 +47,6 @@ func LoadIdentity() (*tcrypto.Identity, error) {
 	return id, nil
 }
 
-func PeerString(peer tsnet.Peer, peerData tsnet.PeerData) string {
-	return fmt.Sprintf("%s%s%s (%s%s%s %s%d%s) %s%s%s",
-		tcolor.BrightCyan.Foreground(), peer.Name, tcolor.Reset,
-		tcolor.BrightGreen.Foreground(), peer.IP, tcolor.Reset,
-		tcolor.Blue.Foreground(), peerData.Port, tcolor.Reset,
-		tcolor.BrightYellow.Foreground(), peerData.HumanHash, tcolor.Reset)
-}
-
 var alignment = []table.Alignment{
 	table.Right,  // Id
 	table.Center, // Name
@@ -66,21 +58,35 @@ var alignment = []table.Alignment{
 func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
 	return []string{
 		strconv.Itoa(idx),
-		tcolor.BrightCyan.Foreground() + peer.Name + tcolor.Reset,
-		tcolor.BrightGreen.Foreground() + peer.IP + tcolor.Reset,
-		fmt.Sprintf("%s%d%s", tcolor.Blue.Foreground(), peerData.Port, tcolor.Reset),
-		tcolor.BrightYellow.Foreground() + peerData.HumanHash + tcolor.Reset,
+		Color16(tcolor.BrightCyan, peer.Name),
+		Color16(tcolor.BrightGreen, peer.IP),
+		Color16f(tcolor.Blue, "%d", peerData.Port),
+		Color16(tcolor.BrightYellow, peerData.HumanHash),
 	}
 }
 
 func OurLine(srv *tsnet.Server, ourIP, ourPort, humanID string) []string {
 	return []string{
 		"🏠",
-		tcolor.Cyan.Foreground() + srv.Name + tcolor.Reset,
-		tcolor.Green.Foreground() + ourIP + tcolor.Reset,
-		tcolor.Blue.Foreground() + ourPort + tcolor.Reset,
-		tcolor.Yellow.Foreground() + humanID + tcolor.Reset,
+		Color16(tcolor.Cyan, srv.Name),
+		Color16(tcolor.Green, ourIP),
+		Color16(tcolor.Blue, ourPort),
+		Color16(tcolor.Yellow, humanID),
 	}
+}
+
+// Color16 returns a colored string.
+func Color16(color tcolor.BasicColor, s string) string {
+	return color.Foreground() + s + tcolor.Reset
+}
+
+// Color16f returns a colored string with printf-style formatting.
+func Color16f(color tcolor.BasicColor, format string, args ...any) string {
+	return Color16(color, fmt.Sprintf(format, args...))
+}
+
+func DarkGray(s string) string {
+	return Color16(tcolor.DarkGray, s)
 }
 
 func Main() int {
@@ -146,11 +152,11 @@ func Main() int {
 			prev = curVersion
 			lines := make([][]string, 0, srv.Peers.Len()+2) // +2 lines; note len may actually change but it's ok.
 			lines = append(lines, ourLine, []string{
-				tcolor.DarkGray.Foreground() + "Id" + tcolor.Reset,
-				"🔗 " + tcolor.DarkGray.Foreground() + "Name" + tcolor.Reset,
-				tcolor.DarkGray.Foreground() + "Ip" + tcolor.Reset,
-				tcolor.DarkGray.Foreground() + "Port" + tcolor.Reset,
-				tcolor.DarkGray.Foreground() + "Hash" + tcolor.Reset,
+				DarkGray("Id"),
+				"🔗 " + DarkGray("Name"),
+				DarkGray("Ip"),
+				DarkGray("Port"),
+				DarkGray("Hash"),
 			})
 			idx := 1
 			for peer, peerData := range srv.Peers.AllSorted(tsnet.PeerSort) {
