@@ -51,16 +51,24 @@ func WriteTable(
 	return width
 }
 
-//nolint:gocognit,funlen // it is indeed a bit complex.
-func CreateTableLines(ap *ansipixels.AnsiPixels,
-	alignment []Alignment,
-	columnSpacing int,
-	table [][]string,
-	borderStyle BorderStyle,
-) ([]string, int) {
+// drawHorizontalBorder creates a horizontal border line with the specified corner/junction characters.
+func drawHorizontalBorder(ncols int, colWidths []int, columnSpacing int, left, middle, right string) string {
+	var sb strings.Builder
+	sb.WriteString(left)
+	for j := range ncols {
+		sb.WriteString(strings.Repeat(ansipixels.Horizontal, colWidths[j]+2*columnSpacing))
+		if j < ncols-1 {
+			sb.WriteString(middle)
+		}
+	}
+	sb.WriteString(right)
+	return sb.String()
+}
+
+// calculateColumnWidths computes the maximum width needed for each column
+// and returns both the column widths and all individual cell widths.
+func calculateColumnWidths(ap *ansipixels.AnsiPixels, table [][]string, ncols int) ([]int, [][]int) {
 	nrows := len(table)
-	ncols := len(alignment)
-	// get the max width of each column
 	colWidths := make([]int, ncols)
 	allWidths := make([][]int, 0, nrows)
 	for _, row := range table {
@@ -77,12 +85,11 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 		}
 		allWidths = append(allWidths, allWidthsRow)
 	}
+	return colWidths, allWidths
+}
 
-	// Determine spacing between columns based on border style
-	hasColumnBorders := borderStyle == BorderColumns || borderStyle == BorderOuterColumns || borderStyle == BorderFull
-	hasOuterBorder := borderStyle == BorderOuterColumns || borderStyle == BorderFull
-
-	// Calculate total width
+// calculateTableWidth computes the total width of the table including borders and spacing.
+func calculateTableWidth(colWidths []int, ncols, columnSpacing int, hasColumnBorders, hasOuterBorder bool) int {
 	maxw := 0
 	for _, w := range colWidths {
 		maxw += w
@@ -102,28 +109,67 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 	if hasOuterBorder {
 		maxw += 2 // left and right borders
 	}
+	return maxw
+}
+
+// formatCell formats a single cell with the specified alignment and padding.
+func formatCell(sb *strings.Builder, cell string, cellWidth, columnWidth, columnSpacing int,
+	align Alignment, hasColumnBorders bool,
+) {
+	delta := columnWidth - cellWidth
+
+	// Add padding before content
+	if hasColumnBorders {
+		sb.WriteString(strings.Repeat(" ", columnSpacing))
+	}
+
+	// Add aligned content
+	switch align {
+	case Left:
+		sb.WriteString(cell)
+		sb.WriteString(strings.Repeat(" ", delta))
+	case Center:
+		sb.WriteString(strings.Repeat(" ", delta/2))
+		sb.WriteString(cell)
+		sb.WriteString(strings.Repeat(" ", delta/2+delta%2))
+	case Right:
+		sb.WriteString(strings.Repeat(" ", delta))
+		sb.WriteString(cell)
+	}
+
+	// Add padding after content
+	if hasColumnBorders {
+		sb.WriteString(strings.Repeat(" ", columnSpacing))
+	}
+}
+
+func CreateTableLines(ap *ansipixels.AnsiPixels,
+	alignment []Alignment,
+	columnSpacing int,
+	table [][]string,
+	borderStyle BorderStyle,
+) ([]string, int) {
+	nrows := len(table)
+	ncols := len(alignment)
+
+	// Calculate column widths
+	colWidths, allWidths := calculateColumnWidths(ap, table, ncols)
+
+	// Determine spacing between columns based on border style
+	hasColumnBorders := borderStyle == BorderColumns || borderStyle == BorderOuterColumns || borderStyle == BorderFull
+	hasOuterBorder := borderStyle == BorderOuterColumns || borderStyle == BorderFull
+
+	// Calculate total width
+	maxw := calculateTableWidth(colWidths, ncols, columnSpacing, hasColumnBorders, hasOuterBorder)
 
 	// Build table lines
 	lines := make([]string, 0, nrows+3) // preallocate for data rows + potential border rows
 	var sb strings.Builder
 
-	// Helper function to draw horizontal borders
-	drawHorizontalBorder := func(left, middle, right string) {
-		sb.WriteString(left)
-		for j := range ncols {
-			sb.WriteString(strings.Repeat(ansipixels.Horizontal, colWidths[j]+2*columnSpacing))
-			if j < ncols-1 {
-				sb.WriteString(middle)
-			}
-		}
-		sb.WriteString(right)
-		lines = append(lines, sb.String())
-		sb.Reset()
-	}
-
 	// Add top border if needed
 	if hasOuterBorder {
-		drawHorizontalBorder(ansipixels.SquareTopLeft, ansipixels.TopT, ansipixels.SquareTopRight)
+		lines = append(lines, drawHorizontalBorder(ncols, colWidths, columnSpacing,
+			ansipixels.SquareTopLeft, ansipixels.TopT, ansipixels.SquareTopRight))
 	}
 
 	// Add data rows
@@ -132,7 +178,8 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 		// Add row separator for full borders (except before first row)
 		if borderStyle == BorderFull && i > 0 {
-			drawHorizontalBorder(ansipixels.LeftT, ansipixels.MiddleCross, ansipixels.RightT)
+			lines = append(lines, drawHorizontalBorder(ncols, colWidths, columnSpacing,
+				ansipixels.LeftT, ansipixels.MiddleCross, ansipixels.RightT))
 		}
 
 		// Add left border if needed
@@ -142,32 +189,7 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 		// Build the data row
 		for j, cell := range row {
-			w := rowWidth[j]
-			delta := colWidths[j] - w
-
-			// Add padding before content
-			if hasColumnBorders {
-				sb.WriteString(strings.Repeat(" ", columnSpacing))
-			}
-
-			// Add aligned content
-			switch alignment[j] {
-			case Left:
-				sb.WriteString(cell)
-				sb.WriteString(strings.Repeat(" ", delta))
-			case Center:
-				sb.WriteString(strings.Repeat(" ", delta/2))
-				sb.WriteString(cell)
-				sb.WriteString(strings.Repeat(" ", delta/2+delta%2))
-			case Right:
-				sb.WriteString(strings.Repeat(" ", delta))
-				sb.WriteString(cell)
-			}
-
-			// Add padding after content
-			if hasColumnBorders {
-				sb.WriteString(strings.Repeat(" ", columnSpacing))
-			}
+			formatCell(&sb, cell, rowWidth[j], colWidths[j], columnSpacing, alignment[j], hasColumnBorders)
 
 			// Add column separator or spacing
 			if j < ncols-1 {
@@ -190,7 +212,8 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 	// Add bottom border if needed
 	if hasOuterBorder {
-		drawHorizontalBorder(ansipixels.SquareBottomLeft, ansipixels.BottomT, ansipixels.SquareBottomRight)
+		lines = append(lines, drawHorizontalBorder(ncols, colWidths, columnSpacing,
+			ansipixels.SquareBottomLeft, ansipixels.BottomT, ansipixels.SquareBottomRight))
 	}
 
 	return lines, maxw
