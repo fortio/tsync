@@ -51,7 +51,7 @@ func WriteTable(
 	return width
 }
 
-//nolint:gocognit,gocyclo,funlen // it is indeed a bit complex.
+//nolint:gocognit,funlen // it is indeed a bit complex.
 func CreateTableLines(ap *ansipixels.AnsiPixels,
 	alignment []Alignment,
 	columnSpacing int,
@@ -84,41 +84,46 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 	// Calculate total width
 	maxw := 0
-	if hasColumnBorders {
-		// With borders: width of each column + padding on both sides + separators
-		for _, w := range colWidths {
-			maxw += w + 2*columnSpacing
+	for _, w := range colWidths {
+		maxw += w
+		if hasColumnBorders {
+			maxw += 2 * columnSpacing
 		}
-		maxw += (ncols - 1) // separators between columns
-		if hasOuterBorder {
-			maxw += 2 // left and right borders
-		}
-	} else {
-		// Without borders: just column widths + spacing between them
-		for _, w := range colWidths {
-			maxw += w
-		}
-		if ncols > 1 {
+	}
+	// Add spacing/separators between columns
+	if ncols > 1 {
+		if hasColumnBorders {
+			maxw += (ncols - 1) // vertical separators between columns
+		} else {
 			maxw += columnSpacing * (ncols - 1)
 		}
+	}
+	// Add outer borders if present
+	if hasOuterBorder {
+		maxw += 2 // left and right borders
 	}
 
 	// Build table lines
 	lines := make([]string, 0, nrows+3) // preallocate for data rows + potential border rows
 	var sb strings.Builder
 
-	// Add top border if needed
-	if hasOuterBorder {
-		sb.WriteString(ansipixels.SquareTopLeft)
+	// Helper function to draw horizontal borders
+	drawHorizontalBorder := func(left, middle, right string) {
+		sb.WriteString(left)
 		for j := range ncols {
 			sb.WriteString(strings.Repeat(ansipixels.Horizontal, colWidths[j]+2*columnSpacing))
 			if j < ncols-1 {
-				sb.WriteString(ansipixels.TopT)
+				sb.WriteString(middle)
 			}
 		}
-		sb.WriteString(ansipixels.SquareTopRight)
+		sb.WriteString(right)
 		lines = append(lines, sb.String())
 		sb.Reset()
+	}
+
+	// Add top border if needed
+	if hasOuterBorder {
+		drawHorizontalBorder(ansipixels.SquareTopLeft, ansipixels.TopT, ansipixels.SquareTopRight)
 	}
 
 	// Add data rows
@@ -127,16 +132,7 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 		// Add row separator for full borders (except before first row)
 		if borderStyle == BorderFull && i > 0 {
-			sb.WriteString(ansipixels.LeftT)
-			for j := range ncols {
-				sb.WriteString(strings.Repeat(ansipixels.Horizontal, colWidths[j]+2*columnSpacing))
-				if j < ncols-1 {
-					sb.WriteString(ansipixels.MiddleCross)
-				}
-			}
-			sb.WriteString(ansipixels.RightT)
-			lines = append(lines, sb.String())
-			sb.Reset()
+			drawHorizontalBorder(ansipixels.LeftT, ansipixels.MiddleCross, ansipixels.RightT)
 		}
 
 		// Add left border if needed
@@ -175,11 +171,11 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 			// Add column separator or spacing
 			if j < ncols-1 {
+				separator := strings.Repeat(" ", columnSpacing)
 				if hasColumnBorders {
-					sb.WriteString(ansipixels.Vertical)
-				} else {
-					sb.WriteString(strings.Repeat(" ", columnSpacing))
+					separator = ansipixels.Vertical
 				}
+				sb.WriteString(separator)
 			}
 		}
 
@@ -194,16 +190,7 @@ func CreateTableLines(ap *ansipixels.AnsiPixels,
 
 	// Add bottom border if needed
 	if hasOuterBorder {
-		sb.WriteString(ansipixels.SquareBottomLeft)
-		for j := range ncols {
-			sb.WriteString(strings.Repeat(ansipixels.Horizontal, colWidths[j]+2*columnSpacing))
-			if j < ncols-1 {
-				sb.WriteString(ansipixels.BottomT)
-			}
-		}
-		sb.WriteString(ansipixels.SquareBottomRight)
-		lines = append(lines, sb.String())
-		sb.Reset()
+		drawHorizontalBorder(ansipixels.SquareBottomLeft, ansipixels.BottomT, ansipixels.SquareBottomRight)
 	}
 
 	return lines, maxw
