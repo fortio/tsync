@@ -269,32 +269,32 @@ func TestCreateTableLines_CenterAlignmentOddEven(t *testing.T) {
 	alignment := []Alignment{Center}
 	columnSpacing := 0
 
-	// Test odd difference (5 char column, 3 char content = 2 char delta)
-	tableOdd := [][]string{
+	// Test with even delta: 5 char column width - 3 char content = 2 char delta (even)
+	tableEvenDelta := [][]string{
 		{"ABCDE"},
 		{"ABC"},
 	}
 
-	linesOdd, _ := CreateTableLines(ap, alignment, columnSpacing, tableOdd, BorderNone)
+	linesEvenDelta, _ := CreateTableLines(ap, alignment, columnSpacing, tableEvenDelta, BorderNone)
 
-	// "ABC" centered in 5 chars should be " ABC " (1 space left, 1 space right)
-	abcLine := linesOdd[1]
+	// "ABC" centered in 5 chars with delta=2 should be " ABC " (1 space left, 1 space right)
+	abcLine := linesEvenDelta[1]
 	if !strings.HasPrefix(abcLine, " ABC ") {
 		t.Errorf("Center alignment with even delta failed: expected ' ABC ', got %q", abcLine)
 	}
 
-	// Test even difference (6 char column, 3 char content = 3 char delta)
-	tableEven := [][]string{
+	// Test with odd delta: 6 char column width - 3 char content = 3 char delta (odd)
+	tableOddDelta := [][]string{
 		{"ABCDEF"},
 		{"ABC"},
 	}
 
-	linesEven, _ := CreateTableLines(ap, alignment, columnSpacing, tableEven, BorderNone)
+	linesOddDelta, _ := CreateTableLines(ap, alignment, columnSpacing, tableOddDelta, BorderNone)
 
-	// "ABC" centered in 6 chars should be " ABC  " (1 space left, 2 spaces right due to odd delta)
-	abcLineEven := linesEven[1]
-	if !strings.HasPrefix(abcLineEven, " ABC  ") {
-		t.Errorf("Center alignment with odd delta failed: expected ' ABC  ', got %q", abcLineEven)
+	// "ABC" centered in 6 chars with delta=3 should be " ABC  " (1 space left, 2 spaces right due to odd delta)
+	abcLineOdd := linesOddDelta[1]
+	if !strings.HasPrefix(abcLineOdd, " ABC  ") {
+		t.Errorf("Center alignment with odd delta failed: expected ' ABC  ', got %q", abcLineOdd)
 	}
 }
 
