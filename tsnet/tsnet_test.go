@@ -69,36 +69,46 @@ func TestPeerDiscovery(t *testing.T) {
 
 	// Wait for peer discovery (should happen within a few broadcast intervals)
 	t.Log("Waiting for peer discovery...")
-	time.Sleep(1400 * time.Millisecond)
-
-	// Check that Host A discovered Host B
 	var peerB tsnet.Peer
-	foundB := false
-	for peer := range serverA.Peers.All() {
-		if peer.Name == "HostB" {
-			peerB = peer
-			foundB = true
-			t.Logf("HostA discovered HostB: %v", peer)
-			break
-		}
-	}
-	if !foundB {
-		t.Fatalf("HostA did not discover HostB")
-	}
-
-	// Check that Host B discovered Host A
 	var peerA tsnet.Peer
+	foundB := false
 	foundA := false
-	for peer := range serverB.Peers.All() {
-		if peer.Name == "HostA" {
-			peerA = peer
-			foundA = true
-			t.Logf("HostB discovered HostA: %v", peer)
-			break
+
+	// Poll for discovery with timeout from context
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for !foundB || !foundA {
+		select {
+		case <-ctx.Done():
+			if !foundB {
+				t.Fatalf("HostA did not discover HostB within timeout")
+			}
+			if !foundA {
+				t.Fatalf("HostB did not discover HostA within timeout")
+			}
+		case <-ticker.C:
+			if !foundB {
+				for peer := range serverA.Peers.All() {
+					if peer.Name == "HostB" {
+						peerB = peer
+						foundB = true
+						t.Logf("HostA discovered HostB: %v", peer)
+						break
+					}
+				}
+			}
+			if !foundA {
+				for peer := range serverB.Peers.All() {
+					if peer.Name == "HostA" {
+						peerA = peer
+						foundA = true
+						t.Logf("HostB discovered HostA: %v", peer)
+						break
+					}
+				}
+			}
 		}
-	}
-	if !foundA {
-		t.Fatalf("HostB did not discover HostA")
 	}
 
 	t.Logf("Peer discovery successful! Both hosts discovered each other. %v <-> %v", peerB, peerA)
@@ -160,7 +170,28 @@ func TestMultiplePeersDiscovery(t *testing.T) {
 
 	// Wait for discovery
 	t.Log("Waiting for peer discovery...")
-	time.Sleep(2000 * time.Millisecond)
+
+	// Poll until all peers discover each other
+	expected := numPeers - 1 // All others except itself
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	allDiscovered := false
+	for !allDiscovered {
+		select {
+		case <-ctx.Done():
+			t.Fatal("Timeout waiting for all peers to discover each other")
+		case <-ticker.C:
+			allDiscovered = true
+			for i, srv := range servers {
+				if srv.Peers.Len() != expected {
+					allDiscovered = false
+					t.Logf("Host%d has %d/%d peers", i, srv.Peers.Len(), expected)
+					break
+				}
+			}
+		}
+	}
 
 	// Each peer should discover all other peers
 	for i, srv := range servers {

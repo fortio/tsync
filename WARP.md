@@ -33,6 +33,9 @@ go test ./...
 # Run tests with verbose output
 go test -v ./...
 
+# Run tests with race detector (important for concurrent code)
+go test -race ./...
+
 # Run tests in a specific package
 go test ./tcrypto
 
