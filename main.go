@@ -105,7 +105,11 @@ func Main() int {
 	if err := ap.Open(); err != nil {
 		return 1 // error already logged
 	}
-	defer ap.Restore()
+	ap.MouseClickOn()
+	defer func() {
+		ap.MouseClickOff()
+		ap.Restore()
+	}()
 	id, err := LoadIdentity()
 	if err != nil {
 		return log.FErrf("Failed to load or create identity: %v", err)

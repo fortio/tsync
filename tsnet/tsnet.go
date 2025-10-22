@@ -53,9 +53,7 @@ type ConnectionStatus int
 const (
 	NotLinked ConnectionStatus = iota
 	Connecting
-	ConnSent
 	Connected
-	Disconnected
 	Failed
 )
 
@@ -86,7 +84,6 @@ type PeerData struct {
 	Epoch     int32
 	LastSeen  time.Time
 	Status    ConnectionStatus
-	Addr      *net.UDPAddr // Peer's unicast address
 }
 
 func (c *Config) NewServer() *Server {
@@ -437,18 +434,12 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 	// Get peer's address from discovery data
 	peerData, exists := s.Peers.Get(peer)
 	if !exists {
-		return fmt.Errorf("peer %v not found in peer list", peer)
+		return fmt.Errorf("peer %v not found (anymore) in peer list", peer)
 	}
-
 	directPeerAddr := &net.UDPAddr{
 		IP:   net.ParseIP(peer.IP),
 		Port: peerData.Port, // use the same port as discovery
 	}
-
-	peerData.Addr = directPeerAddr
-	peerData.Status = Connecting
-	s.Peers.Set(peer, peerData)
-
 	// Send connection request using shared socket
 	message := fmt.Sprintf(ConnectMessageFormat, s.Name, peer.Name)
 	_, err := s.dualUDPSock.WriteToUDP([]byte(message), directPeerAddr)
@@ -457,11 +448,9 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 		s.Peers.Set(peer, peerData)
 		return err
 	}
-
-	// Update status to sent
-	peerData.Status = ConnSent
+	// Update status to sent = connecting
+	peerData.Status = Connecting
 	s.Peers.Set(peer, peerData)
-
 	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
 	return nil
 }
