@@ -58,8 +58,19 @@ var alignment = []table.Alignment{
 }
 
 func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
+	idxStr := strconv.Itoa(idx)
+	switch peerData.Status {
+	case tsnet.NotLinked:
+		// leave uncolored
+	case tsnet.Connecting:
+		idxStr = tcolor.Inverse + Color16(tcolor.BrightYellow, idxStr)
+	case tsnet.Failed:
+		idxStr = tcolor.Inverse + Color16(tcolor.BrightRed, idxStr)
+	case tsnet.Connected:
+		idxStr = tcolor.Inverse + Color16(tcolor.BrightGreen, idxStr)
+	}
 	return []string{
-		strconv.Itoa(idx),
+		idxStr,
 		Color16(tcolor.BrightCyan, peer.Name),
 		Color16(tcolor.BrightGreen, peer.IP),
 		Color16f(tcolor.Blue, "%d", peerData.Port),
@@ -91,6 +102,30 @@ func DarkGray(s string) string {
 	return Color16(tcolor.DarkGray, s)
 }
 
+func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.PeerData) {
+	log.Infof("Initiating connection to peer %q at %s:%d", peer.Name, peer.IP, peerData.Port)
+	if connErr := srv.ConnectToPeer(peer); connErr != nil {
+		log.Errf("Failed to connect to peer %s: %v", peer.Name, connErr)
+	}
+}
+
+// MouseInsideBox returns whether the mouse is inside the box and the index of the line inside the box.
+func MouseInsideBox(ap *ansipixels.AnsiPixels, tableWidth, numPeers int) (int, bool) {
+	tableWidth -= 2                       // remove the borders
+	startTable := (ap.W-tableWidth)/2 + 1 // mouse coordinates start at 1
+	endTable := startTable + tableWidth
+	log.LogVf("MouseInsideBox: ap.Mx=%d, ap.My=%d, tableWidth=%d, startTable=%d, endTable=%d, numPeers=%d",
+		ap.Mx, ap.My, tableWidth, startTable, endTable, numPeers)
+	if ap.Mx < startTable || ap.Mx >= endTable {
+		return -1, false
+	}
+	line := ap.My - 4 // accounts for border, our line and header and mouse coordinates starting at 1
+	if line >= 0 && line < numPeers {
+		return line, true
+	}
+	return -1, false
+}
+
 func Main() int {
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
 	// echo -n "ts" | od -d -> 29556
@@ -105,7 +140,11 @@ func Main() int {
 	if err := ap.Open(); err != nil {
 		return 1 // error already logged
 	}
-	defer ap.Restore()
+	ap.MouseClickOn()
+	defer func() {
+		ap.MouseClickOff()
+		ap.Restore()
+	}()
 	id, err := LoadIdentity()
 	if err != nil {
 		return log.FErrf("Failed to load or create identity: %v", err)
@@ -147,6 +186,19 @@ func Main() int {
 		return nil
 	}
 	var peersSnapshot []smap.KV[tsnet.Peer, tsnet.PeerData]
+	tableWidth := 0
+	ap.OnMouse = func() {
+		if !ap.LeftClick() || !ap.MouseRelease() {
+			return
+		}
+		if peerLine, ok := MouseInsideBox(ap, tableWidth, len(peersSnapshot)); ok {
+			peer := peersSnapshot[peerLine]
+			log.Infof("Left click (release) at %d,%d -> line %d - connecting to %q", ap.Mx, ap.My, peerLine+1, peer.Key.Name)
+			InitiatePeerConnection(srv, peer.Key, peer.Value)
+		} else {
+			log.Infof("Left click (release) at %d,%d -> outside peer list", ap.Mx, ap.My)
+		}
+	}
 	err = ap.FPSTicks(func() bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
@@ -169,7 +221,7 @@ func Main() int {
 				lines = append(lines, PeerLine(idx, kv.Key, kv.Value))
 				idx++
 			}
-			table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
+			tableWidth = table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
 		}
@@ -183,10 +235,7 @@ func Main() int {
 			maxPeerIdx := len(peersSnapshot)
 			if connectToPeerIdx <= maxPeerIdx {
 				peer := peersSnapshot[connectToPeerIdx-1]
-				log.Infof("Initiating connection to peer %q at %s:%d", peer.Key.Name, peer.Key.IP, peer.Value.Port)
-				if connErr := srv.ConnectToPeer(peer.Key); connErr != nil {
-					log.Errf("Failed to connect to peer %s: %v", peer.Key.Name, connErr)
-				}
+				InitiatePeerConnection(srv, peer.Key, peer.Value)
 			} else {
 				log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
 			}

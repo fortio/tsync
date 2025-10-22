@@ -51,19 +51,15 @@ type Config struct {
 type ConnectionStatus int
 
 const (
-	Connecting ConnectionStatus = iota + 1
-	ConnSent
+	// NotLinked is the initial state once discovered.
+	NotLinked ConnectionStatus = iota
+	// Connecting is the state when a connection is being established.
+	Connecting
+	// Connected is the state when a connection has been established.
 	Connected
-	Disconnected
+	// Failed is the state when a connection has failed.
 	Failed
 )
-
-type Connection struct {
-	Peer      Peer
-	Status    ConnectionStatus
-	CreatedAt time.Time
-	Addr      *net.UDPAddr // Peer's unicast address
-}
 
 type Server struct {
 	// Our copy of the input config.
@@ -77,8 +73,7 @@ type Server struct {
 	wg              sync.WaitGroup
 	Peers           *smap.Map[Peer, PeerData]
 	idStr           string
-	epoch           atomic.Int32                // set to negative when stopped, panics after 2B ticks/if it wraps.
-	connections     *smap.Map[Peer, Connection] // peer -> Connection
+	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
 }
 
 type Peer struct {
@@ -92,14 +87,11 @@ type PeerData struct {
 	Port      int
 	Epoch     int32
 	LastSeen  time.Time
+	Status    ConnectionStatus
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{
-		Config:      *c,
-		Peers:       smap.New[Peer, PeerData](),
-		connections: smap.New[Peer, Connection](),
-	}
+	return &Server{Config: *c, Peers: smap.New[Peer, PeerData]()}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -236,11 +228,6 @@ func (s *Server) OurAddress() *net.UDPAddr {
 	return s.ourSendAddr
 }
 
-// Connections returns the connections map for testing/inspection.
-func (s *Server) Connections() *smap.Map[Peer, Connection] {
-	return s.connections
-}
-
 func (s *Server) change(version uint64) {
 	if s.OnChange != nil {
 		s.OnChange(version)
@@ -323,11 +310,14 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 			}
 			if v, ok := s.Peers.Get(peer); ok {
 				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
-				// transfer the human hash (same pub key so same human hash)
+				// Transfer the human hash (same pub key so same human hash)
 				data.HumanHash = v.HumanHash
+				// as well as the status
+				data.Status = v.Status
 				// Check if this is an updated port
 				if v.Port != data.Port {
 					log.Infof("Peer %q port changed from %d to %d", peer, v.Port, data.Port)
+					data.Status = NotLinked
 				}
 				// Update last seen and epoch
 				s.change(s.Peers.Set(peer, data))
@@ -451,35 +441,23 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 	// Get peer's address from discovery data
 	peerData, exists := s.Peers.Get(peer)
 	if !exists {
-		return fmt.Errorf("peer %v not found in peer list", peer)
+		return fmt.Errorf("peer %v not found (anymore) in peer list", peer)
 	}
-
 	directPeerAddr := &net.UDPAddr{
 		IP:   net.ParseIP(peer.IP),
 		Port: peerData.Port, // use the same port as discovery
 	}
-
-	// Create connection entry
-	conn := Connection{
-		Peer:      peer,
-		Status:    Connecting,
-		CreatedAt: time.Now(),
-		Addr:      directPeerAddr,
-	}
-	s.connections.Set(peer, conn)
-
 	// Send connection request using shared socket
 	message := fmt.Sprintf(ConnectMessageFormat, s.Name, peer.Name)
 	_, err := s.dualUDPSock.WriteToUDP([]byte(message), directPeerAddr)
 	if err != nil {
-		s.connections.Delete(peer)
+		peerData.Status = Failed
+		s.Peers.Set(peer, peerData)
 		return err
 	}
-
-	// Update status to sent
-	conn.Status = ConnSent
-	s.connections.Set(peer, conn)
-
+	// Update status to sent = connecting
+	peerData.Status = Connecting
+	s.Peers.Set(peer, peerData)
 	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
 	return nil
 }
