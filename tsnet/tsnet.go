@@ -208,7 +208,7 @@ func (s *Server) runAdv(ctx context.Context) {
 				return
 			}
 			epoch = newEpoch
-			err := s.MessageSend(epoch)
+			err := s.MCastMessageSend(epoch)
 			if err != nil {
 				log.Errf("Error sending UDP packet: %v", err)
 			}
@@ -402,7 +402,7 @@ const (
 	DataMessageFormat      = "data1 %q %s"       // target_name, signed_data
 )
 
-func (s *Server) MessageSend(epoch int32) error {
+func (s *Server) MCastMessageSend(epoch int32) error {
 	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch)
 	_, err := s.dualUDPSock.WriteToUDP([]byte(payload), s.destAddr)
 	return err
