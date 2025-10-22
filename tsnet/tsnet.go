@@ -308,6 +308,8 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
 				// transfer the human hash (same pub key so same human hash)
 				data.HumanHash = v.HumanHash
+				// And the status
+				data.Status = v.Status
 				// Check if this is an updated port
 				if v.Port != data.Port {
 					log.Infof("Peer %q port changed from %d to %d", peer, v.Port, data.Port)

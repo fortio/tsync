@@ -58,8 +58,19 @@ var alignment = []table.Alignment{
 }
 
 func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
+	idxStr := strconv.Itoa(idx)
+	switch peerData.Status {
+	case tsnet.NotLinked:
+		// leave uncolored
+	case tsnet.Connecting:
+		idxStr = tcolor.Inverse + Color16(tcolor.BrightYellow, idxStr)
+	case tsnet.Failed:
+		idxStr = tcolor.Inverse + Color16(tcolor.BrightRed, idxStr)
+	case tsnet.Connected:
+		idxStr = tcolor.Inverse + Color16(tcolor.BrightGreen, idxStr)
+	}
 	return []string{
-		strconv.Itoa(idx),
+		idxStr,
 		Color16(tcolor.BrightCyan, peer.Name),
 		Color16(tcolor.BrightGreen, peer.IP),
 		Color16f(tcolor.Blue, "%d", peerData.Port),
@@ -89,6 +100,13 @@ func Color16f(color tcolor.BasicColor, format string, args ...any) string {
 
 func DarkGray(s string) string {
 	return Color16(tcolor.DarkGray, s)
+}
+
+func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.PeerData) {
+	log.Infof("Initiating connection to peer %q at %s:%d", peer.Name, peer.IP, peerData.Port)
+	if connErr := srv.ConnectToPeer(peer); connErr != nil {
+		log.Errf("Failed to connect to peer %s: %v", peer.Name, connErr)
+	}
 }
 
 func Main() int {
@@ -151,6 +169,19 @@ func Main() int {
 		return nil
 	}
 	var peersSnapshot []smap.KV[tsnet.Peer, tsnet.PeerData]
+	ap.OnMouse = func() {
+		if !ap.LeftClick() || !ap.MouseRelease() {
+			return
+		}
+		line := ap.My - 4 // account for our line and header
+		if line >= 0 && line < len(peersSnapshot) {
+			peer := peersSnapshot[line]
+			log.Infof("Left click (release) at %d,%d -> line %d - connecting to %q", ap.Mx, ap.My, line+1, peer.Key.Name)
+			InitiatePeerConnection(srv, peer.Key, peer.Value)
+		} else {
+			log.Infof("Left click (release) at %d,%d -> line %d - no peer", ap.Mx, ap.My, line+1)
+		}
+	}
 	err = ap.FPSTicks(func() bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
@@ -187,10 +218,7 @@ func Main() int {
 			maxPeerIdx := len(peersSnapshot)
 			if connectToPeerIdx <= maxPeerIdx {
 				peer := peersSnapshot[connectToPeerIdx-1]
-				log.Infof("Initiating connection to peer %q at %s:%d", peer.Key.Name, peer.Key.IP, peer.Value.Port)
-				if connErr := srv.ConnectToPeer(peer.Key); connErr != nil {
-					log.Errf("Failed to connect to peer %s: %v", peer.Key.Name, connErr)
-				}
+				InitiatePeerConnection(srv, peer.Key, peer.Value)
 			} else {
 				log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
 			}
