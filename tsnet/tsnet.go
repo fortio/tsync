@@ -76,7 +76,7 @@ type Server struct {
 	Peers           *smap.Map[Peer, PeerData]
 	idStr           string
 	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
-	// Direct peer connections - separate unicast listener
+	// Direct peer connections receiving socket (happens to be the same as broadcastSend to use a single port).
 	unicastListen *net.UDPConn
 	connections   *smap.Map[Peer, Connection] // peer -> Connection
 }
@@ -145,7 +145,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.broadcastListen.Close()
 		return err
 	}
-	s.broadcastSend = s.unicastListen // reuse same socket for sending and receiving unicast
+	s.broadcastSend = s.unicastListen // reuse same socket for sending to broadcast and receiving unicast
 	s.ourSendAddr = s.broadcastSend.LocalAddr().(*net.UDPAddr)
 	log.Infof("Sockets created - unicast: %s, multicast listen: %s",
 		s.ourSendAddr, s.broadcastListen.LocalAddr())
@@ -154,7 +154,7 @@ func (s *Server) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
 	s.wg.Add(3) // broadcast sender, multicast receiver, and unicast receiver
 	go s.runAdv(ctx)
-	go s.runReceive(ctx)
+	go s.runMulticastReceive(ctx)
 	go s.runUnicastReceive(ctx)
 	return nil
 }
@@ -176,7 +176,6 @@ func (s *Server) Stop() {
 		s.unicastListen.Close()
 	}
 	s.wg.Wait()
-	// broadcastSend is same as unicastListen, already closed above
 	// Close all active connections
 	for _, conn := range s.connections.All() {
 		if conn.Conn != nil {
@@ -260,7 +259,6 @@ func (s *Server) runUnicastReceive(ctx context.Context) {
 	buf := make([]byte, BufSize)
 	log.Infof("Starting unicast receiver %q on %s with %d bytes buffer",
 		s.Name, s.unicastListen.LocalAddr(), BufSize)
-	ourAddr := s.ourSendAddr
 	for {
 		select {
 		case <-ctx.Done():
@@ -277,11 +275,7 @@ func (s *Server) runUnicastReceive(ctx context.Context) {
 				}
 				continue
 			}
-			// Ignore our own packets
-			if addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
-				log.Debugf("Ignoring our own unicast packet (%q)", buf[:n])
-				continue
-			}
+			// Unicast messages are always from other peers, never from ourselves
 			log.LogVf("Received unicast message %d bytes from %v: %q", n, addr, buf[:n])
 			// Process as direct message
 			s.handleDirectMessage(buf[:n], addr)
@@ -289,7 +283,7 @@ func (s *Server) runUnicastReceive(ctx context.Context) {
 	}
 }
 
-func (s *Server) runReceive(ctx context.Context) {
+func (s *Server) runMulticastReceive(ctx context.Context) {
 	defer s.wg.Done()
 	buf := make([]byte, BufSize)
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
@@ -317,11 +311,9 @@ func (s *Server) runReceive(ctx context.Context) {
 				continue
 			}
 			log.LogVf("Received %d bytes from %v: %q", n, addr, buf[:n])
-			name, pubKey, theirEpoch, err := s.MessageDecode(buf[:n])
+			name, pubKey, theirEpoch, err := s.MCastMessageDecode(buf[:n])
 			if err != nil {
 				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
-				// [CHECKME] If it's not a discovery message, try direct message
-				s.handleDirectMessage(buf[:n], addr)
 				continue
 			}
 			data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now()}
@@ -422,7 +414,7 @@ func (s *Server) MessageSend(epoch int32) error {
 	return err
 }
 
-func (s *Server) MessageDecode(buf []byte) (string, string, int32, error) {
+func (s *Server) MCastMessageDecode(buf []byte) (string, string, int32, error) {
 	var name string
 	var pubKeyStr string
 	var epoch int32
@@ -511,7 +503,7 @@ func (s *Server) handleDirectMessage(buf []byte, addr *net.UDPAddr) {
 	// Try to parse as connection request
 	var requesterName, targetName string
 	if n, err := fmt.Sscanf(msgStr, ConnectMessageFormat, &requesterName, &targetName); err == nil && n == 2 {
-		s.handleConnectionRequest(requesterName, targetName, addr)
+		s.handleConnectionRequest(requesterName, targetName)
 		return
 	}
 
@@ -519,7 +511,7 @@ func (s *Server) handleDirectMessage(buf []byte, addr *net.UDPAddr) {
 }
 
 // handleConnectionRequest processes incoming connection requests.
-func (s *Server) handleConnectionRequest(requesterName, targetName string, addr *net.UDPAddr) {
+func (s *Server) handleConnectionRequest(requesterName, targetName string) {
 	log.Infof("Received connection request from %s to %s", requesterName, targetName)
 
 	// Check if the target name matches our name
