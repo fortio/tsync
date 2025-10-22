@@ -62,7 +62,7 @@ type Connection struct {
 	Peer      Peer
 	Status    ConnectionStatus
 	CreatedAt time.Time
-	Conn      *net.UDPConn
+	Addr      *net.UDPAddr // Peer's unicast address
 }
 
 type Server struct {
@@ -176,12 +176,6 @@ func (s *Server) Stop() {
 	s.broadcastListen.Close() // needed or write will block forever
 	s.dualUDPSock.Close()
 	s.wg.Wait()
-	// Close all active connections
-	for _, conn := range s.connections.All() {
-		if conn.Conn != nil {
-			conn.Conn.Close()
-		}
-	}
 }
 
 func (s *Server) Stopped() bool {
@@ -454,15 +448,7 @@ func PeerKVSort(a, b smap.KV[Peer, PeerData]) int {
 
 // ConnectToPeer initiates a connection to the specified peer.
 func (s *Server) ConnectToPeer(peer Peer) error {
-	// Create connection entry
-	conn := Connection{
-		Peer:      peer,
-		Status:    Connecting,
-		CreatedAt: time.Now(),
-	}
-	s.connections.Set(peer, conn)
-
-	// Send connection request to peer's direct port
+	// Get peer's address from discovery data
 	peerData, exists := s.Peers.Get(peer)
 	if !exists {
 		return fmt.Errorf("peer %v not found in peer list", peer)
@@ -473,26 +459,26 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 		Port: peerData.Port, // use the same port as discovery
 	}
 
-	// Create UDP connection for direct communication
-	udpConn, err := net.DialUDP("udp4", nil, directPeerAddr)
-	if err != nil {
-		return err
+	// Create connection entry
+	conn := Connection{
+		Peer:      peer,
+		Status:    Connecting,
+		CreatedAt: time.Now(),
+		Addr:      directPeerAddr,
 	}
-
-	// Update connection with UDP conn
-	conn.Conn = udpConn
-	conn.Status = ConnSent
-	// Re-set/replace, using the thread safety of the map for making this update race safe.
 	s.connections.Set(peer, conn)
 
-	// Send connection request
+	// Send connection request using shared socket
 	message := fmt.Sprintf(ConnectMessageFormat, s.Name, peer.Name)
-	_, err = udpConn.Write([]byte(message))
+	_, err := s.dualUDPSock.WriteToUDP([]byte(message), directPeerAddr)
 	if err != nil {
-		udpConn.Close()
 		s.connections.Delete(peer)
 		return err
 	}
+
+	// Update status to sent
+	conn.Status = ConnSent
+	s.connections.Set(peer, conn)
 
 	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
 	return nil
