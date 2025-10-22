@@ -3,6 +3,8 @@ package tsnet_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -16,7 +18,15 @@ const (
 	testPort          = tsnet.DefaultDiscoveryPort + 1 // Use different port than default to avoid conflicts
 )
 
+func NoMCastOnMacInCI(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("CI") != "" {
+		t.Skip("Skipping multicast test on macOS in CI (no multicast support)")
+	}
+}
+
 func TestPeerDiscovery(t *testing.T) {
+	NoMCastOnMacInCI(t)
+
 	log.SetLogLevel(log.Info) // Set to Debug for more verbose output during test debugging
 
 	// Create identities for both hosts
@@ -134,7 +144,7 @@ func TestPeerDiscovery(t *testing.T) {
 }
 
 func TestMultiplePeersDiscovery(t *testing.T) {
-	log.SetLogLevel(log.Info)
+	NoMCastOnMacInCI(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
