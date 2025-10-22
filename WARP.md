@@ -2,7 +2,7 @@
 
 This file provides guidance to WARP (warp.dev) when working with code in this repository.
 
-**Last updated**: v0.8.0 (commit 12564c16a0f725e447aa2880e57b30ff282dc112)
+**Last updated**: v0.9.1 (commit 4f8ad47cb134b65e5bacc469c907906f9a095094)
 
 ## Project Overview
 
@@ -71,11 +71,14 @@ go test -v -cover ./...
 - Implements tabular display of peers with proper formatting and alignment
 
 **Network Layer (`tsnet/`)**
-- `Server`: Core networking component handling multicast UDP discovery
+- `Server`: Core networking component handling multicast UDP discovery and direct peer communication
 - Peer discovery via multicast broadcasts (default 239.255.116.115:29556)
 - Interface detection to find the correct network interface for multicast
 - Automatic peer cleanup based on configurable timeout (10s default)
 - Uses epoch-based messaging to detect and handle duplicate instances
+- Single shared UDP socket (`dualUDPSock`) for both multicast/broadcast sending and unicast peer-to-peer communication
+- Multicast loopback enabled for Windows compatibility (processes can see their own broadcasts)
+- Connection state tracking per peer without creating separate sockets
 
 **Cryptographic Identity (`tcrypto/`)**
 - Ed25519-based identity system for peer authentication
@@ -108,13 +111,20 @@ go test -v -cover ./...
 - Automatic interface detection by testing connectivity to 8.8.8.8:53
 - Enhanced interface debugging for troubleshooting network issues
 
+**Direct Connection Protocol**:
+- Format: `"connect1 %q %q"` (requester_name, target_name)
+- Uses the same socket as discovery for unicast communication
+- Connection state tracked in `connections` map without per-peer sockets
+- Efficient resource usage by reusing `dualUDPSock` for all peer communication
+
 **Key Features**:
-- Cross-platform multicast UDP networking
+- Cross-platform multicast UDP networking (with Windows loopback support)
 - Automatic duplicate detection (same name/IP/key)
 - Dynamic peer management with cleanup
 - Terminal UI with real-time tabular peer display
 - Interactive peer selection (keys 1-9 bind to discovered peers)
 - Stable peer snapshot system for consistent UI display
+- Direct peer-to-peer communication without creating per-peer sockets
 
 ### Data Flow
 
@@ -131,6 +141,7 @@ go test -v -cover ./...
 - `fortio.org/log`: Structured logging throughout
 - `fortio.org/terminal/ansipixels`: Terminal UI and color management
 - `fortio.org/smap`: Thread-safe map for peer storage with snapshot support
+- `golang.org/x/net/ipv4`: IPv4 multicast control (for loopback configuration)
 - Standard library: `crypto/ed25519`, `net` for networking, `slices` for sorting
 
 ## Coding Style Guidelines
@@ -165,9 +176,12 @@ This approach adds only 3 new lines instead of reformatting the entire struct.
 
 - The application is designed to work across Windows, macOS, and Linux
 - Windows requires special interface detection due to WSL virtual interfaces
-- All networking uses IPv4 UDP multicast
+- Windows requires multicast loopback to be explicitly enabled to see own broadcasts
+- All networking uses IPv4 UDP multicast and unicast
+- Single shared UDP socket for all communication reduces resource usage
 - Cryptographic operations use Ed25519 for performance and security
 - Terminal UI supports resize events and FPS-limited refresh with table-based layout
 - Docker support available but multicast may not work in all environments
 - Enhanced debugging available for interface detection and network troubleshooting
 - Peer interaction system allows direct connection attempts via numbered keys
+- CI tests skip multicast tests on macOS and Windows due to unreliable multicast in CI environments
