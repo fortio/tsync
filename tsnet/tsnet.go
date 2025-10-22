@@ -52,6 +52,7 @@ type ConnectionStatus int
 
 const (
 	Connecting ConnectionStatus = iota + 1
+	ConnSent
 	Connected
 	Disconnected
 	Failed
@@ -71,15 +72,13 @@ type Server struct {
 	ourSendAddr     *net.UDPAddr
 	destAddr        *net.UDPAddr
 	broadcastListen *net.UDPConn
-	broadcastSend   *net.UDPConn
+	dualUDPSock     *net.UDPConn // used for both sending (to multicast/unicast) and receiving (unicast)
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	Peers           *smap.Map[Peer, PeerData]
 	idStr           string
-	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
-	// Direct peer connections receiving socket (happens to be the same as broadcastSend to use a single port).
-	unicastListen *net.UDPConn
-	connections   *smap.Map[Peer, Connection] // peer -> Connection
+	epoch           atomic.Int32                // set to negative when stopped, panics after 2B ticks/if it wraps.
+	connections     *smap.Map[Peer, Connection] // peer -> Connection
 }
 
 type Peer struct {
@@ -146,13 +145,12 @@ func (s *Server) Start(ctx context.Context) error {
 	if err = p.SetMulticastLoopback(true); err != nil {
 		log.Warnf("Failed to enable multicast loopback: %v", err)
 	}
-	s.unicastListen, err = net.ListenUDP("udp4", localIP) // was net.DialUDP("udp4", localIP, s.destAddr)
+	s.dualUDPSock, err = net.ListenUDP("udp4", localIP) // was net.DialUDP("udp4", localIP, s.destAddr)
 	if err != nil {
 		s.broadcastListen.Close()
 		return err
 	}
-	s.broadcastSend = s.unicastListen // reuse same socket for sending to broadcast and receiving unicast
-	s.ourSendAddr = s.broadcastSend.LocalAddr().(*net.UDPAddr)
+	s.ourSendAddr = s.dualUDPSock.LocalAddr().(*net.UDPAddr)
 	log.Infof("Sockets created - unicast: %s, multicast listen: %s",
 		s.ourSendAddr, s.broadcastListen.LocalAddr())
 
@@ -176,11 +174,7 @@ func (s *Server) Stop() {
 	s.cancel()
 	s.cancel = nil
 	s.broadcastListen.Close() // needed or write will block forever
-	s.broadcastSend.Close()
-	// Note: unicastListen can/does point to the same socket, so don't close it again
-	if s.unicastListen != nil && s.unicastListen != s.broadcastSend {
-		s.unicastListen.Close()
-	}
+	s.dualUDPSock.Close()
 	s.wg.Wait()
 	// Close all active connections
 	for _, conn := range s.connections.All() {
@@ -264,7 +258,7 @@ func (s *Server) runUnicastReceive(ctx context.Context) {
 	defer s.wg.Done()
 	buf := make([]byte, BufSize)
 	log.Infof("Starting unicast receiver %q on %s with %d bytes buffer",
-		s.Name, s.unicastListen.LocalAddr(), BufSize)
+		s.Name, s.dualUDPSock.LocalAddr(), BufSize)
 	for {
 		select {
 		case <-ctx.Done():
@@ -272,7 +266,7 @@ func (s *Server) runUnicastReceive(ctx context.Context) {
 			return
 		default:
 			// we rely on Stop() closing the socket to unblock ReadFromUDP on exit.
-			n, addr, err := s.unicastListen.ReadFromUDP(buf)
+			n, addr, err := s.dualUDPSock.ReadFromUDP(buf)
 			if err != nil {
 				if ctx.Err() != nil {
 					log.Infof("Normal unicast read error on exit: %v", err)
@@ -416,7 +410,7 @@ const (
 
 func (s *Server) MessageSend(epoch int32) error {
 	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch)
-	_, err := s.broadcastSend.WriteToUDP([]byte(payload), s.destAddr)
+	_, err := s.dualUDPSock.WriteToUDP([]byte(payload), s.destAddr)
 	return err
 }
 
@@ -487,6 +481,8 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 
 	// Update connection with UDP conn
 	conn.Conn = udpConn
+	conn.Status = ConnSent
+	// Re-set/replace, using the thread safety of the map for making this update race safe.
 	s.connections.Set(peer, conn)
 
 	// Send connection request
