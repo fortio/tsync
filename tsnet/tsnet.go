@@ -16,6 +16,7 @@ import (
 	"fortio.org/log"
 	"fortio.org/smap"
 	"fortio.org/tsync/tcrypto"
+	"golang.org/x/net/ipv4"
 )
 
 const (
@@ -28,6 +29,7 @@ const (
 	TimeFormat                     = "15:04:05.000" // time only + millis.
 	DefaultPeerTimeout             = 10 * time.Second
 	epochStopMarker          int32 = -999
+	DefaultDiscoveryPort           = 29556 // "ts" in ascii.
 )
 
 type Config struct {
@@ -46,6 +48,23 @@ type Config struct {
 	PeerTimeout           time.Duration     // default to 10s if 0
 }
 
+type ConnectionStatus int
+
+const (
+	Connecting ConnectionStatus = iota + 1
+	ConnSent
+	Connected
+	Disconnected
+	Failed
+)
+
+type Connection struct {
+	Peer      Peer
+	Status    ConnectionStatus
+	CreatedAt time.Time
+	Addr      *net.UDPAddr // Peer's unicast address
+}
+
 type Server struct {
 	// Our copy of the input config.
 	Config
@@ -53,12 +72,13 @@ type Server struct {
 	ourSendAddr     *net.UDPAddr
 	destAddr        *net.UDPAddr
 	broadcastListen *net.UDPConn
-	broadcastSend   *net.UDPConn
+	dualUDPSock     *net.UDPConn // used for both sending (to multicast/unicast) and receiving (unicast)
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	Peers           *smap.Map[Peer, PeerData]
 	idStr           string
-	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
+	epoch           atomic.Int32                // set to negative when stopped, panics after 2B ticks/if it wraps.
+	connections     *smap.Map[Peer, Connection] // peer -> Connection
 }
 
 type Peer struct {
@@ -75,7 +95,11 @@ type PeerData struct {
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{Config: *c, Peers: smap.New[Peer, PeerData]()}
+	return &Server{
+		Config:      *c,
+		Peers:       smap.New[Peer, PeerData](),
+		connections: smap.New[Peer, Connection](),
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -116,17 +140,26 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.broadcastSend, err = net.DialUDP("udp4", localIP, s.destAddr)
+	// Enable multicast loopback so we can see our own packets (needed on Windows)
+	p := ipv4.NewPacketConn(s.broadcastListen)
+	if err = p.SetMulticastLoopback(true); err != nil {
+		log.Warnf("Failed to enable multicast loopback: %v", err)
+	}
+	s.dualUDPSock, err = net.ListenUDP("udp4", localIP) // was net.DialUDP("udp4", localIP, s.destAddr)
 	if err != nil {
 		s.broadcastListen.Close()
 		return err
 	}
-	s.ourSendAddr = s.broadcastSend.LocalAddr().(*net.UDPAddr)
+	s.ourSendAddr = s.dualUDPSock.LocalAddr().(*net.UDPAddr)
+	log.Infof("Sockets created - unicast: %s, multicast listen: %s",
+		s.ourSendAddr, s.broadcastListen.LocalAddr())
+
 	// get a cancelable context
 	ctx, s.cancel = context.WithCancel(ctx)
-	s.wg.Add(2)
+	s.wg.Add(3) // broadcast sender, multicast receiver, and unicast receiver
 	go s.runAdv(ctx)
-	go s.runReceive(ctx)
+	go s.runMulticastReceive(ctx)
+	go s.runUnicastReceive(ctx)
 	return nil
 }
 
@@ -141,8 +174,8 @@ func (s *Server) Stop() {
 	s.cancel()
 	s.cancel = nil
 	s.broadcastListen.Close() // needed or write will block forever
+	s.dualUDPSock.Close()
 	s.wg.Wait()
-	s.broadcastSend.Close()
 }
 
 func (s *Server) Stopped() bool {
@@ -151,7 +184,7 @@ func (s *Server) Stopped() bool {
 
 func (s *Server) runAdv(ctx context.Context) {
 	defer s.wg.Done()
-	// 1 sec tick + some random jitter
+	// broadcast interval + 1-1023 msec jitter
 	jitter := 1 + rand.IntN(1024) //nolint:gosec // not cryptographic
 	interval := s.BaseBroadcastInterval + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
@@ -203,13 +236,48 @@ func (s *Server) OurAddress() *net.UDPAddr {
 	return s.ourSendAddr
 }
 
+// Connections returns the connections map for testing/inspection.
+func (s *Server) Connections() *smap.Map[Peer, Connection] {
+	return s.connections
+}
+
 func (s *Server) change(version uint64) {
 	if s.OnChange != nil {
 		s.OnChange(version)
 	}
 }
 
-func (s *Server) runReceive(ctx context.Context) {
+// runUnicastReceive handles incoming unicast messages (direct peer connections).
+func (s *Server) runUnicastReceive(ctx context.Context) {
+	defer s.wg.Done()
+	buf := make([]byte, BufSize)
+	log.Infof("Starting unicast receiver %q on %s with %d bytes buffer",
+		s.Name, s.dualUDPSock.LocalAddr(), BufSize)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Infof("Exiting unicast receiver after %v", ctx.Err())
+			return
+		default:
+			// we rely on Stop() closing the socket to unblock ReadFromUDP on exit.
+			n, addr, err := s.dualUDPSock.ReadFromUDP(buf)
+			if err != nil {
+				if ctx.Err() != nil {
+					log.Infof("Normal unicast read error on exit: %v", err)
+				} else {
+					log.Errf("Error receiving unicast packet: %v", err)
+				}
+				continue
+			}
+			// Unicast messages are always from other peers, never from ourselves
+			log.LogVf("Received unicast message %d bytes from %v: %q", n, addr, buf[:n])
+			// Process as direct message
+			s.handleDirectMessage(buf[:n], addr)
+		}
+	}
+}
+
+func (s *Server) runMulticastReceive(ctx context.Context) {
 	defer s.wg.Done()
 	buf := make([]byte, BufSize)
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
@@ -237,7 +305,7 @@ func (s *Server) runReceive(ctx context.Context) {
 				continue
 			}
 			log.LogVf("Received %d bytes from %v: %q", n, addr, buf[:n])
-			name, pubKey, theirEpoch, err := s.MessageDecode(buf[:n])
+			name, pubKey, theirEpoch, err := s.MCastMessageDecode(buf[:n])
 			if err != nil {
 				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
 				continue
@@ -326,18 +394,25 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 	return nil, nil, errors.New("no default route interface found")
 }
 
-const MessageFormat = "tsync1 %q %s e %d" // name, public key, epoch
+const (
+	DiscoveryMessageFormat = "tsync1 %q %s e %d" // name, public key, epoch
+	ConnectMessageFormat   = "connect1 %q %q"    // requester_name, target_name
+	AcceptMessageFormat    = "accept1 %q"        // target_name
+	RejectMessageFormat    = "reject1 %q %q"     // target_name, reason
+	DataMessageFormat      = "data1 %q %s"       // target_name, signed_data
+)
 
 func (s *Server) MessageSend(epoch int32) error {
-	_, err := fmt.Fprintf(s.broadcastSend, MessageFormat, s.Name, s.idStr, epoch)
+	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch)
+	_, err := s.dualUDPSock.WriteToUDP([]byte(payload), s.destAddr)
 	return err
 }
 
-func (s *Server) MessageDecode(buf []byte) (string, string, int32, error) {
+func (s *Server) MCastMessageDecode(buf []byte) (string, string, int32, error) {
 	var name string
 	var pubKeyStr string
 	var epoch int32
-	n, err := fmt.Sscanf(string(buf), MessageFormat, &name, &pubKeyStr, &epoch)
+	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat, &name, &pubKeyStr, &epoch)
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -369,4 +444,67 @@ func PeerKVSort(a, b smap.KV[Peer, PeerData]) int {
 		return 0
 	}
 	return 1
+}
+
+// ConnectToPeer initiates a connection to the specified peer.
+func (s *Server) ConnectToPeer(peer Peer) error {
+	// Get peer's address from discovery data
+	peerData, exists := s.Peers.Get(peer)
+	if !exists {
+		return fmt.Errorf("peer %v not found in peer list", peer)
+	}
+
+	directPeerAddr := &net.UDPAddr{
+		IP:   net.ParseIP(peer.IP),
+		Port: peerData.Port, // use the same port as discovery
+	}
+
+	// Create connection entry
+	conn := Connection{
+		Peer:      peer,
+		Status:    Connecting,
+		CreatedAt: time.Now(),
+		Addr:      directPeerAddr,
+	}
+	s.connections.Set(peer, conn)
+
+	// Send connection request using shared socket
+	message := fmt.Sprintf(ConnectMessageFormat, s.Name, peer.Name)
+	_, err := s.dualUDPSock.WriteToUDP([]byte(message), directPeerAddr)
+	if err != nil {
+		s.connections.Delete(peer)
+		return err
+	}
+
+	// Update status to sent
+	conn.Status = ConnSent
+	s.connections.Set(peer, conn)
+
+	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
+	return nil
+}
+
+// handleDirectMessage processes incoming direct connection messages.
+func (s *Server) handleDirectMessage(buf []byte, addr *net.UDPAddr) {
+	msgStr := string(buf)
+
+	// Try to parse as connection request
+	var requesterName, targetName string
+	if n, err := fmt.Sscanf(msgStr, ConnectMessageFormat, &requesterName, &targetName); err == nil && n == 2 {
+		s.handleConnectionRequest(requesterName, targetName)
+		return
+	}
+
+	log.Warnf("Unknown direct message format from %v: %q", addr, msgStr)
+}
+
+// handleConnectionRequest processes incoming connection requests.
+func (s *Server) handleConnectionRequest(requesterName, targetName string) {
+	log.Infof("Received connection request from %s to %s", requesterName, targetName)
+
+	// Check if the target name matches our name
+	if targetName != s.Name {
+		log.Warnf("Connection request target name %q doesn't match our name %q", targetName, s.Name)
+		return
+	}
 }
