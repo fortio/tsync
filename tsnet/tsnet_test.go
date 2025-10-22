@@ -134,8 +134,8 @@ func TestPeerDiscovery(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Check that the connection was created on A's side
-	connA, exists := serverA.Connections().Get(peerB)
-	if !exists {
+	connA, exists := serverA.Peers.Get(peerB)
+	if !exists || connA.Status != tsnet.ConnSent {
 		t.Fatal("Connection from A to B not found in A's connection map")
 	}
 	t.Logf("✓ Connection created on A's side: status %v", connA.Status)
