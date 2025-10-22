@@ -347,9 +347,9 @@ func (s *Server) MessageDecode(buf []byte) (string, string, int32, error) {
 	return name, pubKeyStr, epoch, nil
 }
 
-// PeerSort sort function for smap.AllSorted.
+// PeerLess sort function for smap.AllSorted.
 // Sorts by IP, then name, then public key.
-func PeerSort(a, b Peer) bool {
+func PeerLess(a, b Peer) bool {
 	if a.IP != b.IP {
 		return a.IP < b.IP
 	}
@@ -357,4 +357,16 @@ func PeerSort(a, b Peer) bool {
 		return a.Name < b.Name
 	}
 	return a.PublicKey < b.PublicKey
+}
+
+// PeerKVSort sort function for slices.SortFunc of smap.KV[Peer, PeerData].
+// Sorts by IP, then name, then public key.
+func PeerKVSort(a, b smap.KV[Peer, PeerData]) int {
+	if PeerLess(a.Key, b.Key) {
+		return -1
+	}
+	if a.Key == b.Key { // not actually possible for KV snapshot from a map.
+		return 0
+	}
+	return 1
 }

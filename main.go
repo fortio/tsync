@@ -5,11 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"sync/atomic"
 
 	"fortio.org/cli"
 	"fortio.org/log"
+	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
 	"fortio.org/tsync/table"
@@ -144,6 +146,7 @@ func Main() int {
 		prev = ^uint64(0) // force repaint
 		return nil
 	}
+	var peersSnapshot []smap.KV[tsnet.Peer, tsnet.PeerData]
 	err = ap.FPSTicks(func() bool {
 		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
@@ -157,13 +160,13 @@ func Main() int {
 				ap.StartSyncMode()
 			}
 			prev = curVersion
-			// +2 for header and our line; note that peer len in between this
-			// and the loop may actually change but it's ok.
-			lines := make([][]string, 0, srv.Peers.Len()+2)
+			peersSnapshot = srv.Peers.KeysValuesSnapshot()
+			slices.SortFunc(peersSnapshot, tsnet.PeerKVSort)
+			lines := make([][]string, 0, len(peersSnapshot)+2)
 			lines = append(lines, ourLine, headerLine)
 			idx := 1
-			for peer, peerData := range srv.Peers.AllSorted(tsnet.PeerSort) {
-				lines = append(lines, PeerLine(idx, peer, peerData))
+			for _, kv := range peersSnapshot {
+				lines = append(lines, PeerLine(idx, kv.Key, kv.Value))
 				idx++
 			}
 			table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
@@ -175,11 +178,20 @@ func Main() int {
 		}
 		c := ap.Data[0]
 		switch c {
+		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			connectToPeerIdx := int(c - '0')
+			maxPeerIdx := len(peersSnapshot)
+			if connectToPeerIdx <= maxPeerIdx {
+				peer := peersSnapshot[connectToPeerIdx-1]
+				log.Infof("Connecting to peer %q at %s:%d", peer.Key.Name, peer.Key.IP, peer.Value.Port)
+			} else {
+				log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
+			}
 		case 'q', 'Q', 3: // Ctrl-C
 			log.Infof("Exiting on %q", c)
 			return false
 		default:
-			log.Infof("Got %q", c)
+			log.Infof("Input %q", c)
 		}
 		return true
 	})
