@@ -143,7 +143,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	// Enable multicast loopback so we can see our own packets (needed on Windows)
 	p := ipv4.NewPacketConn(s.broadcastListen)
-	if err := p.SetMulticastLoopback(true); err != nil {
+	if err = p.SetMulticastLoopback(true); err != nil {
 		log.Warnf("Failed to enable multicast loopback: %v", err)
 	}
 	s.unicastListen, err = net.ListenUDP("udp4", localIP) // , s.destAddr)

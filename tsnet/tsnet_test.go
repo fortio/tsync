@@ -175,7 +175,7 @@ func TestMultiplePeersDiscovery(t *testing.T) {
 			t.Fatalf("Failed to start server %d: %v", i, err)
 		}
 		defer servers[i].Stop()
-		t.Logf("Started Host%d on port %d", i, 29570+i)
+		t.Logf("Started Host%d on port %d", i, servers[i].OurAddress().Port)
 	}
 
 	// Wait for discovery
