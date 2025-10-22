@@ -109,6 +109,23 @@ func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.P
 	}
 }
 
+// MouseInsideBox returns whether the mouse is inside the box and the index of the line inside the box.
+func MouseInsideBox(ap *ansipixels.AnsiPixels, tableWidth, numPeers int) (int, bool) {
+	tableWidth -= 2                       // remove the borders
+	startTable := (ap.W-tableWidth)/2 + 1 // mouse coordinates start at 1
+	endTable := startTable + tableWidth
+	log.LogVf("MouseInsideBox: ap.Mx=%d, ap.My=%d, tableWidth=%d, startTable=%d, endTable=%d, numPeers=%d",
+		ap.Mx, ap.My, tableWidth, startTable, endTable, numPeers)
+	if ap.Mx < startTable || ap.Mx >= endTable {
+		return -1, false
+	}
+	line := ap.My - 4 // accounts for border, our line and header and mouse coordinates starting at 1
+	if line >= 0 && line < numPeers {
+		return line, true
+	}
+	return -1, false
+}
+
 func Main() int {
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
 	// echo -n "ts" | od -d -> 29556
@@ -169,17 +186,17 @@ func Main() int {
 		return nil
 	}
 	var peersSnapshot []smap.KV[tsnet.Peer, tsnet.PeerData]
+	tableWidth := 0
 	ap.OnMouse = func() {
 		if !ap.LeftClick() || !ap.MouseRelease() {
 			return
 		}
-		line := ap.My - 4 // account for our line and header
-		if line >= 0 && line < len(peersSnapshot) {
-			peer := peersSnapshot[line]
-			log.Infof("Left click (release) at %d,%d -> line %d - connecting to %q", ap.Mx, ap.My, line+1, peer.Key.Name)
+		if peerLine, ok := MouseInsideBox(ap, tableWidth, len(peersSnapshot)); ok {
+			peer := peersSnapshot[peerLine]
+			log.Infof("Left click (release) at %d,%d -> line %d - connecting to %q", ap.Mx, ap.My, peerLine+1, peer.Key.Name)
 			InitiatePeerConnection(srv, peer.Key, peer.Value)
 		} else {
-			log.Infof("Left click (release) at %d,%d -> line %d - no peer", ap.Mx, ap.My, line+1)
+			log.Infof("Left click (release) at %d,%d -> outside peer list", ap.Mx, ap.My)
 		}
 	}
 	err = ap.FPSTicks(func() bool {
@@ -204,7 +221,7 @@ func Main() int {
 				lines = append(lines, PeerLine(idx, kv.Key, kv.Value))
 				idx++
 			}
-			table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
+			tableWidth = table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
 		}
