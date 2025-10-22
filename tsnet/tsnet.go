@@ -53,8 +53,10 @@ type ConnectionStatus int
 const (
 	// NotLinked is the initial state once discovered.
 	NotLinked ConnectionStatus = iota
-	// Connecting is the state when a connection is being established.
-	Connecting
+	// SentConn is the state when a connection is being established.
+	SentConn
+	// ReceivedConn is the state when a connection request has been received.
+	ReceivedConn
 	// Connected is the state when a connection has been established.
 	Connected
 	// Failed is the state when a connection has failed.
@@ -72,8 +74,14 @@ type Server struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	Peers           *smap.Map[Peer, PeerData]
+	Sources         *smap.Map[Source, Peer] // maps ip,port to peer
 	idStr           string
 	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
+}
+
+type Source struct {
+	IP   string
+	Port int
 }
 
 type Peer struct {
@@ -91,7 +99,11 @@ type PeerData struct {
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{Config: *c, Peers: smap.New[Peer, PeerData]()}
+	return &Server{
+		Config:  *c,
+		Peers:   smap.New[Peer, PeerData](),
+		Sources: smap.New[Source, Peer](),
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -212,15 +224,19 @@ func (s *Server) runAdv(ctx context.Context) {
 
 func (s *Server) PeersCleanup() {
 	var toDelete []Peer
+	var toDeleteSources []Source
 	now := time.Now()
 	for peer, data := range s.Peers.All() {
 		if now.Sub(data.LastSeen) > s.PeerTimeout {
 			toDelete = append(toDelete, peer)
+			src := Source{IP: peer.IP, Port: data.Port}
+			toDeleteSources = append(toDeleteSources, src)
 		}
 	}
 	if len(toDelete) > 0 {
 		log.Infof("Removing %d expired peers: %v", len(toDelete), toDelete)
 		s.Peers.Delete(toDelete...)
+		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
 	}
 }
 
@@ -318,6 +334,10 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				if v.Port != data.Port {
 					log.Infof("Peer %q port changed from %d to %d", peer, v.Port, data.Port)
 					data.Status = NotLinked
+					src := Source{IP: peer.IP, Port: v.Port} // old source to delete
+					s.Sources.Delete(src)
+					src.Port = data.Port
+					s.Sources.Set(src, peer)
 				}
 				// Update last seen and epoch
 				s.change(s.Peers.Set(peer, data))
@@ -330,6 +350,8 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				data.HumanHash = "BAD-PKEY"
 			}
 			nv := s.Peers.Set(peer, data)
+			src := Source{IP: peer.IP, Port: data.Port}
+			s.Sources.Set(src, peer)
 			log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
 				log.Any("Peer", peer), log.Any("Data", data))
 			s.change(nv)
@@ -456,30 +478,42 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 		return err
 	}
 	// Update status to sent = connecting
-	peerData.Status = Connecting
+	peerData.Status = SentConn
 	s.Peers.Set(peer, peerData)
 	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
 	return nil
 }
 
 // handleDirectMessage processes incoming direct connection messages.
-func (s *Server) handleDirectMessage(buf []byte, addr *net.UDPAddr) {
+func (s *Server) handleDirectMessage(buf []byte, from *net.UDPAddr) {
 	msgStr := string(buf)
 
 	// Try to parse as connection request
 	var requesterName, targetName string
 	if n, err := fmt.Sscanf(msgStr, ConnectMessageFormat, &requesterName, &targetName); err == nil && n == 2 {
-		s.handleConnectionRequest(requesterName, targetName)
+		s.handleConnectionRequest(from, requesterName, targetName)
 		return
 	}
 
-	log.Warnf("Unknown direct message format from %v: %q", addr, msgStr)
+	log.Warnf("Unknown direct message format from %v: %q", from, msgStr)
 }
 
 // handleConnectionRequest processes incoming connection requests.
-func (s *Server) handleConnectionRequest(requesterName, targetName string) {
-	log.Infof("Received connection request from %s to %s", requesterName, targetName)
-
+func (s *Server) handleConnectionRequest(from *net.UDPAddr, requesterName, targetName string) {
+	log.Infof("Received connection request from %v: %v to %v", from, requesterName, targetName)
+	src := Source{IP: from.IP.String(), Port: from.Port}
+	peer, exists := s.Sources.Get(src)
+	if !exists {
+		log.Errf("Connection request from unknown source %v (not in source to peer map)", src)
+		return
+	}
+	pData, found := s.Peers.Get(peer)
+	if !found {
+		log.Errf("Connection request from unknown peer %v (not in discovery map)", peer)
+		return
+	}
+	pData.Status = ReceivedConn
+	s.Peers.Set(peer, pData)
 	// Check if the target name matches our name
 	if targetName != s.Name {
 		log.Warnf("Connection request target name %q doesn't match our name %q", targetName, s.Name)

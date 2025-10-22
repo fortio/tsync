@@ -24,7 +24,7 @@ func NoMCastOnMacInCI(t *testing.T) {
 	}
 }
 
-func TestPeerDiscovery(t *testing.T) {
+func TestPeerDiscovery(t *testing.T) { //nolint:gocognit // it's a test.
 	NoMCastOnMacInCI(t)
 
 	log.SetLogLevel(log.Info) // Set to Debug for more verbose output during test debugging
@@ -135,10 +135,17 @@ func TestPeerDiscovery(t *testing.T) {
 
 	// Check that the connection was created on A's side
 	connA, exists := serverA.Peers.Get(peerB)
-	if !exists || connA.Status != tsnet.Connecting {
+	if !exists || connA.Status != tsnet.SentConn {
 		t.Fatal("Connection from A to B not found in A's connection map")
 	}
 	t.Logf("✓ Connection created on A's side: status %v", connA.Status)
+
+	// Check that the connection was received on B's side
+	connB, exists := serverB.Peers.Get(peerA)
+	if !exists || connB.Status != tsnet.ReceivedConn {
+		t.Fatal("Connection from A to B not found in B's connection map")
+	}
+	t.Logf("✓ Connection received on B's side: status %v", connB.Status)
 
 	t.Log("✓ Test completed successfully!")
 }
