@@ -94,7 +94,7 @@ func DarkGray(s string) string {
 func Main() int {
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
 	// echo -n "ts" | od -d -> 29556
-	fPort := flag.Int("port", 29556, "Port to use")
+	fPort := flag.Int("port", tsnet.DefaultDiscoveryPort, "Discovery port to use")
 	// 239.255."t"."s"
 	fMcast := flag.String("mcast", "239.255.116.115", "Multicast address to use for server discovery")
 	fTarget := flag.String("target", tsnet.DefaultTarget, "Test target udp ip:port to use to find the right interface and local ip")
@@ -183,7 +183,10 @@ func Main() int {
 			maxPeerIdx := len(peersSnapshot)
 			if connectToPeerIdx <= maxPeerIdx {
 				peer := peersSnapshot[connectToPeerIdx-1]
-				log.Infof("Connecting to peer %q at %s:%d", peer.Key.Name, peer.Key.IP, peer.Value.Port)
+				log.Infof("Initiating connection to peer %q at %s:%d", peer.Key.Name, peer.Key.IP, peer.Value.Port)
+				if connErr := srv.ConnectToPeer(peer.Key); connErr != nil {
+					log.Errf("Failed to connect to peer %s: %v", peer.Key.Name, connErr)
+				}
 			} else {
 				log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
 			}

@@ -47,13 +47,13 @@ go test -cover ./...
 The project uses standard Go tooling and GitHub Actions for CI/CD:
 ```bash
 # Format code
-go fmt ./...
+gofumpt -w *.go */*.go
 
-# Vet code for potential issues  
-go vet ./...
+# Run golangci-lint for comprehensive linting
+golangci-lint run
 
-# Run all standard checks (as done in CI)
-go test ./... && go vet ./... && go fmt -l . | wc -l
+# Run all tests
+go test -v -cover ./...
 ```
 
 ## Architecture Overview

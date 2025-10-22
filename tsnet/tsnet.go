@@ -28,6 +28,7 @@ const (
 	TimeFormat                     = "15:04:05.000" // time only + millis.
 	DefaultPeerTimeout             = 10 * time.Second
 	epochStopMarker          int32 = -999
+	DefaultDiscoveryPort           = 29556 // "ts" in ascii.
 )
 
 type Config struct {
@@ -46,6 +47,22 @@ type Config struct {
 	PeerTimeout           time.Duration     // default to 10s if 0
 }
 
+type ConnectionStatus int
+
+const (
+	Connecting ConnectionStatus = iota
+	Connected
+	Disconnected
+	Failed
+)
+
+type Connection struct {
+	Peer      Peer
+	Status    ConnectionStatus
+	CreatedAt time.Time
+	Conn      *net.UDPConn
+}
+
 type Server struct {
 	// Our copy of the input config.
 	Config
@@ -59,6 +76,9 @@ type Server struct {
 	Peers           *smap.Map[Peer, PeerData]
 	idStr           string
 	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
+	// Direct peer connections - separate unicast listener
+	unicastListen *net.UDPConn
+	connections   *smap.Map[Peer, Connection] // peer -> Connection
 }
 
 type Peer struct {
@@ -75,7 +95,11 @@ type PeerData struct {
 }
 
 func (c *Config) NewServer() *Server {
-	return &Server{Config: *c, Peers: smap.New[Peer, PeerData]()}
+	return &Server{
+		Config:      *c,
+		Peers:       smap.New[Peer, PeerData](),
+		connections: smap.New[Peer, Connection](),
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -122,11 +146,21 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	s.ourSendAddr = s.broadcastSend.LocalAddr().(*net.UDPAddr)
+	// Create unicast listener with ephemeral port for direct peer messages
+	s.unicastListen, err = net.ListenUDP("udp4", localIP)
+	if err != nil {
+		s.broadcastListen.Close()
+		return err
+	}
+	log.Infof("Sockets created - unicast: %s, multicast listen: %s",
+		s.ourSendAddr, s.broadcastListen.LocalAddr())
+
 	// get a cancelable context
 	ctx, s.cancel = context.WithCancel(ctx)
-	s.wg.Add(2)
+	s.wg.Add(3) // broadcast sender, multicast receiver, and unicast receiver
 	go s.runAdv(ctx)
 	go s.runReceive(ctx)
+	go s.runUnicastReceive(ctx)
 	return nil
 }
 
@@ -141,8 +175,17 @@ func (s *Server) Stop() {
 	s.cancel()
 	s.cancel = nil
 	s.broadcastListen.Close() // needed or write will block forever
+	if s.unicastListen != nil {
+		s.unicastListen.Close()
+	}
 	s.wg.Wait()
 	s.broadcastSend.Close()
+	// Close all active connections
+	for _, conn := range s.connections.All() {
+		if conn.Conn != nil {
+			conn.Conn.Close()
+		}
+	}
 }
 
 func (s *Server) Stopped() bool {
@@ -151,7 +194,7 @@ func (s *Server) Stopped() bool {
 
 func (s *Server) runAdv(ctx context.Context) {
 	defer s.wg.Done()
-	// 1 sec tick + some random jitter
+	// broadcast internal + 1-1023 msec jitter
 	jitter := 1 + rand.IntN(1024) //nolint:gosec // not cryptographic
 	interval := s.BaseBroadcastInterval + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
@@ -203,9 +246,49 @@ func (s *Server) OurAddress() *net.UDPAddr {
 	return s.ourSendAddr
 }
 
+// Connections returns the connections map for testing/inspection.
+func (s *Server) Connections() *smap.Map[Peer, Connection] {
+	return s.connections
+}
+
 func (s *Server) change(version uint64) {
 	if s.OnChange != nil {
 		s.OnChange(version)
+	}
+}
+
+// runUnicastReceive handles incoming unicast messages (direct peer connections).
+func (s *Server) runUnicastReceive(ctx context.Context) {
+	defer s.wg.Done()
+	buf := make([]byte, BufSize)
+	log.Infof("Starting unicast receiver %q on %s with %d bytes buffer",
+		s.Name, s.unicastListen.LocalAddr(), BufSize)
+	ourAddr := s.ourSendAddr
+	for {
+		select {
+		case <-ctx.Done():
+			log.Infof("Exiting unicast receiver after %v", ctx.Err())
+			return
+		default:
+			// we rely on Stop() closing the socket to unblock ReadFromUDP on exit.
+			n, addr, err := s.unicastListen.ReadFromUDP(buf)
+			if err != nil {
+				if ctx.Err() != nil {
+					log.Infof("Normal unicast read error on exit: %v", err)
+				} else {
+					log.Errf("Error receiving unicast packet: %v", err)
+				}
+				continue
+			}
+			// Ignore our own packets
+			if addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
+				log.Debugf("Ignoring our own unicast packet (%q)", buf[:n])
+				continue
+			}
+			log.LogVf("Received unicast message %d bytes from %v: %q", n, addr, buf[:n])
+			// Process as direct message
+			s.handleDirectMessage(buf[:n], addr)
+		}
 	}
 }
 
@@ -240,6 +323,8 @@ func (s *Server) runReceive(ctx context.Context) {
 			name, pubKey, theirEpoch, err := s.MessageDecode(buf[:n])
 			if err != nil {
 				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
+				// [CHECKME] If it's not a discovery message, try direct message
+				s.handleDirectMessage(buf[:n], addr)
 				continue
 			}
 			data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now()}
@@ -326,10 +411,16 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 	return nil, nil, errors.New("no default route interface found")
 }
 
-const MessageFormat = "tsync1 %q %s e %d" // name, public key, epoch
+const (
+	DiscoveryMessageFormat = "tsync1 %q %s e %d" // name, public key, epoch
+	ConnectMessageFormat   = "connect1 %q %q"    // requester_name, target_name
+	AcceptMessageFormat    = "accept1 %q"        // target_name
+	RejectMessageFormat    = "reject1 %q %q"     // target_name, reason
+	DataMessageFormat      = "data1 %q %s"       // target_name, signed_data
+)
 
 func (s *Server) MessageSend(epoch int32) error {
-	_, err := fmt.Fprintf(s.broadcastSend, MessageFormat, s.Name, s.idStr, epoch)
+	_, err := fmt.Fprintf(s.broadcastSend, DiscoveryMessageFormat, s.Name, s.idStr, epoch)
 	return err
 }
 
@@ -337,7 +428,7 @@ func (s *Server) MessageDecode(buf []byte) (string, string, int32, error) {
 	var name string
 	var pubKeyStr string
 	var epoch int32
-	n, err := fmt.Sscanf(string(buf), MessageFormat, &name, &pubKeyStr, &epoch)
+	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat, &name, &pubKeyStr, &epoch)
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -369,4 +460,73 @@ func PeerKVSort(a, b smap.KV[Peer, PeerData]) int {
 		return 0
 	}
 	return 1
+}
+
+// ConnectToPeer initiates a connection to the specified peer.
+func (s *Server) ConnectToPeer(peer Peer) error {
+	// Create connection entry
+	conn := Connection{
+		Peer:      peer,
+		Status:    Connecting,
+		CreatedAt: time.Now(),
+	}
+	s.connections.Set(peer, conn)
+
+	// Send connection request to peer's direct port
+	peerData, exists := s.Peers.Get(peer)
+	if !exists {
+		return fmt.Errorf("peer %v not found in peer list", peer)
+	}
+
+	directPeerAddr := &net.UDPAddr{
+		IP:   net.ParseIP(peer.IP),
+		Port: peerData.Port, // use the same port as discovery
+	}
+
+	// Create UDP connection for direct communication
+	udpConn, err := net.DialUDP("udp4", nil, directPeerAddr)
+	if err != nil {
+		return err
+	}
+
+	// Update connection with UDP conn
+	conn.Conn = udpConn
+	s.connections.Set(peer, conn)
+
+	// Send connection request
+	message := fmt.Sprintf(ConnectMessageFormat, s.Name, peer.Name)
+	_, err = udpConn.Write([]byte(message))
+	if err != nil {
+		udpConn.Close()
+		s.connections.Delete(peer)
+		return err
+	}
+
+	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
+	return nil
+}
+
+// handleDirectMessage processes incoming direct connection messages.
+func (s *Server) handleDirectMessage(buf []byte, addr *net.UDPAddr) {
+	msgStr := string(buf)
+
+	// Try to parse as connection request
+	var requesterName, targetName string
+	if n, err := fmt.Sscanf(msgStr, ConnectMessageFormat, &requesterName, &targetName); err == nil && n == 2 {
+		s.handleConnectionRequest(requesterName, targetName, addr)
+		return
+	}
+
+	log.Warnf("Unknown direct message format from %v: %q", addr, msgStr)
+}
+
+// handleConnectionRequest processes incoming connection requests.
+func (s *Server) handleConnectionRequest(requesterName, targetName string, addr *net.UDPAddr) {
+	log.Infof("Received connection request from %s to %s", requesterName, targetName)
+
+	// Check if the target name matches our name
+	if targetName != s.Name {
+		log.Warnf("Connection request target name %q doesn't match our name %q", targetName, s.Name)
+		return
+	}
 }
