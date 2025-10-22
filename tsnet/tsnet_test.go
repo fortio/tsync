@@ -19,8 +19,8 @@ const (
 )
 
 func NoMCastOnMacInCI(t *testing.T) {
-	if os.Getenv("CI") != "" && runtime.GOOS != "linux" {
-		t.Skip("Skipping multicast test on non-Linux in CI (no multicast support)")
+	if os.Getenv("CI") != "" && runtime.GOOS == "darwin" {
+		t.Skip("Skipping multicast test on macOS in CI (no multicast support)")
 	}
 }
 
