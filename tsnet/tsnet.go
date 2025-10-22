@@ -16,6 +16,7 @@ import (
 	"fortio.org/log"
 	"fortio.org/smap"
 	"fortio.org/tsync/tcrypto"
+	"golang.org/x/net/ipv4"
 )
 
 const (
@@ -139,6 +140,11 @@ func (s *Server) Start(ctx context.Context) error {
 	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.destAddr)
 	if err != nil {
 		return err
+	}
+	// Enable multicast loopback so we can see our own packets (needed on Windows)
+	p := ipv4.NewPacketConn(s.broadcastListen)
+	if err := p.SetMulticastLoopback(true); err != nil {
+		log.Warnf("Failed to enable multicast loopback: %v", err)
 	}
 	s.unicastListen, err = net.ListenUDP("udp4", localIP) // , s.destAddr)
 	if err != nil {
