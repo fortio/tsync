@@ -62,8 +62,10 @@ func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
 	switch peerData.Status {
 	case tsnet.NotLinked:
 		// leave uncolored
-	case tsnet.Connecting:
+	case tsnet.SentConn:
 		idxStr = tcolor.Inverse + Color16(tcolor.BrightYellow, idxStr)
+	case tsnet.ReceivedConn:
+		idxStr = tcolor.Inverse + Color16(tcolor.BrightBlue, idxStr)
 	case tsnet.Failed:
 		idxStr = tcolor.Inverse + Color16(tcolor.BrightRed, idxStr)
 	case tsnet.Connected:
