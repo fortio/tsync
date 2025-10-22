@@ -170,11 +170,13 @@ func (s *Server) Stop() {
 	s.cancel()
 	s.cancel = nil
 	s.broadcastListen.Close() // needed or write will block forever
+	s.broadcastSend.Close()
+	// Note: unicastListen can/does point to the same socket, so don't close it again
 	if s.unicastListen != nil && s.unicastListen != s.broadcastSend {
 		s.unicastListen.Close()
 	}
 	s.wg.Wait()
-	s.broadcastSend.Close()
+	// broadcastSend is same as unicastListen, already closed above
 	// Close all active connections
 	for _, conn := range s.connections.All() {
 		if conn.Conn != nil {
