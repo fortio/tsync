@@ -179,12 +179,13 @@ func Main() int {
 		c := ap.Data[0]
 		switch c {
 		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
-			connectToPeerIdx, _ := strconv.Atoi(string(c))
-			if connectToPeerIdx > 0 && connectToPeerIdx <= len(peersSnapshot) {
+			connectToPeerIdx := int(c - '0')
+			maxPeerIdx := len(peersSnapshot)
+			if connectToPeerIdx <= maxPeerIdx {
 				peer := peersSnapshot[connectToPeerIdx-1]
 				log.Infof("Connecting to peer %q at %s:%d", peer.Key.Name, peer.Key.IP, peer.Value.Port)
 			} else {
-				log.Warnf("No peer with index %d to connect to", connectToPeerIdx)
+				log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
 			}
 		case 'q', 'Q', 3: // Ctrl-C
 			log.Infof("Exiting on %q", c)
