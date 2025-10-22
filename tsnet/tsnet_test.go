@@ -206,7 +206,6 @@ func TestMultiplePeersDiscovery(t *testing.T) {
 	// Each peer should discover all other peers
 	for i, srv := range servers {
 		peerCount := srv.Peers.Len()
-		expected := numPeers - 1 // All others except itself
 		if peerCount != expected {
 			t.Errorf("Host%d discovered %d peers, expected %d", i, peerCount, expected)
 			for peer := range srv.Peers.All() {
