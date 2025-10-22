@@ -358,3 +358,12 @@ func PeerSort(a, b Peer) bool {
 	}
 	return a.PublicKey < b.PublicKey
 }
+
+// PeerKVSort sort function for slices.SortFunc of smap.KV[Peer, PeerData].
+// Sorts by IP, then name, then public key.
+func PeerKVSort(a, b smap.KV[Peer, PeerData]) int {
+	if PeerSort(a.Key, b.Key) {
+		return -1
+	}
+	return 1
+}
