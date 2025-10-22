@@ -102,6 +102,25 @@ func TestPeerDiscovery(t *testing.T) {
 	}
 
 	t.Logf("Peer discovery successful! Both hosts discovered each other. %v <-> %v", peerB, peerA)
+
+	// Now test direct connection from A to B
+	t.Log("Testing direct connection from HostA to HostB...")
+	err = serverA.ConnectToPeer(peerB)
+	if err != nil {
+		t.Fatalf("Failed to initiate connection from A to B: %v", err)
+	}
+
+	// Wait a bit for the connection message to be received
+	time.Sleep(200 * time.Millisecond)
+
+	// Check that the connection was created on A's side
+	connA, exists := serverA.Connections().Get(peerB)
+	if !exists {
+		t.Fatal("Connection from A to B not found in A's connection map")
+	}
+	t.Logf("✓ Connection created on A's side: status %v", connA.Status)
+
+	t.Log("✓ Test completed successfully!")
 }
 
 func TestMultiplePeersDiscovery(t *testing.T) {

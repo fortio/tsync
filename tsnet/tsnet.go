@@ -50,7 +50,7 @@ type Config struct {
 type ConnectionStatus int
 
 const (
-	Connecting ConnectionStatus = iota
+	Connecting ConnectionStatus = iota + 1
 	Connected
 	Disconnected
 	Failed
@@ -140,18 +140,13 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.broadcastSend, err = net.DialUDP("udp4", localIP, s.destAddr)
+	s.unicastListen, err = net.ListenUDP("udp4", localIP) // , s.destAddr)
 	if err != nil {
 		s.broadcastListen.Close()
 		return err
 	}
+	s.broadcastSend = s.unicastListen // reuse same socket for sending and receiving unicast
 	s.ourSendAddr = s.broadcastSend.LocalAddr().(*net.UDPAddr)
-	// Create unicast listener with ephemeral port for direct peer messages
-	s.unicastListen, err = net.ListenUDP("udp4", localIP)
-	if err != nil {
-		s.broadcastListen.Close()
-		return err
-	}
 	log.Infof("Sockets created - unicast: %s, multicast listen: %s",
 		s.ourSendAddr, s.broadcastListen.LocalAddr())
 
@@ -175,7 +170,7 @@ func (s *Server) Stop() {
 	s.cancel()
 	s.cancel = nil
 	s.broadcastListen.Close() // needed or write will block forever
-	if s.unicastListen != nil {
+	if s.unicastListen != nil && s.unicastListen != s.broadcastSend {
 		s.unicastListen.Close()
 	}
 	s.wg.Wait()
@@ -420,7 +415,8 @@ const (
 )
 
 func (s *Server) MessageSend(epoch int32) error {
-	_, err := fmt.Fprintf(s.broadcastSend, DiscoveryMessageFormat, s.Name, s.idStr, epoch)
+	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch)
+	_, err := s.broadcastSend.WriteToUDP([]byte(payload), s.destAddr)
 	return err
 }
 

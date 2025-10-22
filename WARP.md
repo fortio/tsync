@@ -80,6 +80,11 @@ go test -v -cover ./...
 - `HumanHash`: Creates human-readable fingerprints from public keys
 - Message signing and verification capabilities
 - File-based identity persistence in `~/.tsync/`
+- **Security Architecture**: All encryption/security is handled in `tcrypto`, NOT in `tsnet`
+  - Ephemeral keys for secure connections
+  - HKDF (HMAC-based Key Derivation Function) for key derivation
+  - Human hash verification before link validation (TOFU - Trust On First Use)
+  - `tsnet` remains focused on networking; `tcrypto` handles all cryptographic operations
 
 **Table Rendering (`table/`)**
 - Custom table rendering system for terminal UI display
@@ -112,7 +117,7 @@ go test -v -cover ./...
 
 1. **Startup**: Load/create Ed25519 identity from `~/.tsync/`
 2. **Network Init**: Detect correct interface, bind multicast listeners
-3. **Discovery Loop**: Broadcast identity, receive peer messages  
+3. **Discovery Loop**: Broadcast identity, receive peer messages
 4. **UI Loop**: Display peers in tabular format, handle user input (including peer connections)
 5. **Peer Interaction**: Keys 1-9 trigger connection attempts to corresponding peers
 6. **Cleanup**: Remove expired peers, graceful shutdown on exit
@@ -124,6 +129,34 @@ go test -v -cover ./...
 - `fortio.org/terminal/ansipixels`: Terminal UI and color management
 - `fortio.org/smap`: Thread-safe map for peer storage with snapshot support
 - Standard library: `crypto/ed25519`, `net` for networking, `slices` for sorting
+
+## Coding Style Guidelines
+
+### Minimizing Diffs
+When making changes to the codebase, follow these practices to minimize diffs and improve code review:
+
+- **Add new struct fields at the end**: Place new fields at the bottom of struct definitions to avoid changing indentation of existing fields
+- **Use comment separators**: Add a comment line before new logical sections (e.g., `// Direct peer connections`)
+- **Preserve existing indentation**: Don't reformat existing code unless necessary
+- **Incremental changes**: Make small, focused commits that change only what's needed
+- **Order matters**: When adding new code, consider placement that minimizes line number changes
+
+**Example of good practice**:
+```go
+type Server struct {
+    // Existing fields (unchanged)
+    Config
+    ourSendAddr *net.UDPAddr
+    destAddr    *net.UDPAddr
+    // ... other existing fields ...
+
+    // Direct peer connections - new section
+    unicastListen *net.UDPConn
+    connections   *smap.Map[Peer, Connection]
+}
+```
+
+This approach adds only 3 new lines instead of reformatting the entire struct.
 
 ## Development Notes
 
