@@ -146,7 +146,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err = p.SetMulticastLoopback(true); err != nil {
 		log.Warnf("Failed to enable multicast loopback: %v", err)
 	}
-	s.unicastListen, err = net.ListenUDP("udp4", localIP) // , s.destAddr)
+	s.unicastListen, err = net.ListenUDP("udp4", localIP) // was net.DialUDP("udp4", localIP, s.destAddr)
 	if err != nil {
 		s.broadcastListen.Close()
 		return err
@@ -196,7 +196,7 @@ func (s *Server) Stopped() bool {
 
 func (s *Server) runAdv(ctx context.Context) {
 	defer s.wg.Done()
-	// broadcast internal + 1-1023 msec jitter
+	// broadcast interval + 1-1023 msec jitter
 	jitter := 1 + rand.IntN(1024) //nolint:gosec // not cryptographic
 	interval := s.BaseBroadcastInterval + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
