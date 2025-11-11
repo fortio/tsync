@@ -14,7 +14,6 @@ import (
 	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
-	"fortio.org/tsync/table"
 	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
@@ -49,12 +48,12 @@ func LoadIdentity() (*tcrypto.Identity, error) {
 	return id, nil
 }
 
-var alignment = []table.Alignment{
-	table.Right,  // Id
-	table.Center, // Name
-	table.Left,   // Ip
-	table.Right,  // Port
-	table.Right,  // Human Hash
+var alignment = []ansipixels.Alignment{
+	ansipixels.Right,  // Id
+	ansipixels.Center, // Name
+	ansipixels.Left,   // Ip
+	ansipixels.Right,  // Port
+	ansipixels.Right,  // Human Hash
 }
 
 func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
@@ -223,7 +222,7 @@ func Main() int {
 				lines = append(lines, PeerLine(idx, kv.Key, kv.Value))
 				idx++
 			}
-			tableWidth = table.WriteTable(ap, 0, alignment, 1, lines, table.BorderOuterColumns)
+			tableWidth = ap.WriteTable(0, alignment, 1, lines, ansipixels.BorderOuterColumns)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
 		}

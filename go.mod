@@ -3,10 +3,10 @@ module fortio.org/tsync
 go 1.24.0
 
 require (
-	fortio.org/cli v1.12.2
-	fortio.org/log v1.18.1
+	fortio.org/cli v1.12.3
+	fortio.org/log v1.18.3
 	fortio.org/smap v1.1.0
-	fortio.org/terminal v0.60.2
+	fortio.org/terminal v0.61.0
 	golang.org/x/net v0.46.0
 )
 
