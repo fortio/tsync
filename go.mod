@@ -6,7 +6,7 @@ require (
 	fortio.org/cli v1.12.3
 	fortio.org/log v1.18.3
 	fortio.org/smap v1.1.0
-	fortio.org/terminal v0.63.3
+	fortio.org/terminal v0.63.4
 	golang.org/x/net v0.49.0
 )
 
