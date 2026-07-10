@@ -7,7 +7,7 @@ require (
 	fortio.org/log v1.18.3
 	fortio.org/smap v1.1.0
 	fortio.org/terminal v0.65.3
-	golang.org/x/net v0.52.0
+	golang.org/x/net v0.57.0
 )
 
 require (
