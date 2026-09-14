@@ -1,13 +1,13 @@
 module fortio.org/tsync
 
-go 1.25.0
+go 1.26.0
 
 require (
 	fortio.org/cli v1.12.3
 	fortio.org/log v1.18.3
 	fortio.org/smap v1.1.0
 	fortio.org/terminal v0.65.4
-	golang.org/x/net v0.58.0
+	golang.org/x/net v0.59.0
 )
 
 require (
@@ -19,6 +19,6 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20250406160420-959f8f3db0fb // indirect
 	golang.org/x/image v0.44.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
 )
