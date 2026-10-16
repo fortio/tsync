@@ -89,6 +89,9 @@ func TestValidateNameAndDecode(t *testing.T) {
 	if d, err = s.MCastMessageDecode([]byte(`tsync1 "old" p.key e 3`)); err != nil || d.RunID != "" || d.Epoch != 3 {
 		t.Errorf("older version discovery message: %+v %v", d, err)
 	}
+	if (PeerData{}).Compatible() || !(PeerData{RunID: "x"}).Compatible() {
+		t.Errorf("Compatible() wrong")
+	}
 	if _, err = s.MCastMessageDecode([]byte(`tsync1 "x" p.key`)); err == nil {
 		t.Errorf("truncated discovery message accepted")
 	}

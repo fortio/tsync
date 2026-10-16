@@ -86,6 +86,9 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 	if peerData.Status == ReceivedConn {
 		return s.acceptLocked(peer, peerData)
 	}
+	if !peerData.Compatible() {
+		return fmt.Errorf("%s runs an older, incompatible tsync version: upgrade it to connect", peer.Name)
+	}
 	if peerData.Status == Connected {
 		log.Infof("Already connected to %s, reconnecting", peer.Name)
 	}
@@ -110,7 +113,8 @@ func (s *Server) connectLocked(peer Peer, peerData PeerData) error {
 
 // autoConnectLocked connects to peer if it's trusted, not linked and we didn't try recently.
 func (s *Server) autoConnectLocked(peer Peer, peerData PeerData, now time.Time) {
-	if s.NoAutoConnect || (peerData.Status != NotLinked && peerData.Status != Failed) || !s.isTrustedLocked(peer) {
+	if s.NoAutoConnect || (peerData.Status != NotLinked && peerData.Status != Failed) ||
+		!peerData.Compatible() || !s.isTrustedLocked(peer) {
 		return
 	}
 	if now.Sub(s.lastAuto[peer]) < AutoConnectInterval {

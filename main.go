@@ -75,6 +75,9 @@ func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData, linked bool) []
 	if linked {
 		name = "🔗 " + name
 	}
+	if !peerData.Compatible() {
+		name += " (old version)"
+	}
 	return []string{
 		idxStr,
 		Color16(tcolor.BrightCyan, name),

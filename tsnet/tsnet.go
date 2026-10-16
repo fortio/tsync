@@ -39,6 +39,11 @@ const (
 	DefaultDiscoveryPort           = 29556 // "ts" in ascii.
 )
 
+// Compatible returns false for peers running an older tsync version we can't connect with.
+func (pd PeerData) Compatible() bool {
+	return pd.RunID != ""
+}
+
 type Config struct {
 	// Name to use, if empty hostname will be used.
 	Name  string
@@ -137,7 +142,7 @@ type PeerData struct {
 	Epoch     int32
 	LastSeen  time.Time
 	Status    ConnectionStatus
-	RunID     string // random id of the peer's current run (from its discovery messages).
+	RunID     string // random id of the peer's current run (from its discovery messages), empty for old versions.
 	// Last clipboard received from that peer.
 	Clip     string
 	ClipTime time.Time
@@ -467,6 +472,9 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	s.Sources.Set(src, peer)
 	log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
 		log.Any("Peer", peer), log.Any("Data", data))
+	if !data.Compatible() {
+		log.Warnf("%s (%s) runs an older, incompatible tsync version: upgrade it to connect", peer.Name, peer.IP)
+	}
 	s.change(nv)
 	s.autoConnectLocked(peer, data, time.Now())
 }
