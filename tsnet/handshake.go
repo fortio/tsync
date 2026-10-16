@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"net"
+	"sync"
 
 	"fortio.org/log"
 	"fortio.org/tsync/tcrypto"
@@ -19,6 +20,9 @@ type link struct {
 	eph *tcrypto.Ephemeral // ours for the current handshake.
 	// session is set once Connected, or while ReceivedConn (verified but pending user acceptance).
 	session *tcrypto.Session
+	tcpPort int      // peer's TCP link port (from its handshake message).
+	conn    net.Conn // TCP link once up (set once).
+	writeMu sync.Mutex
 }
 
 func (s ConnectionStatus) String() string {
@@ -70,7 +74,7 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 	if err != nil {
 		return err
 	}
-	s.links[peer] = &link{eph: eph}
+	s.setLinkLocked(peer, &link{eph: eph})
 	if err = s.sendHandshakeLocked(ConnectMessageFormat, peer, peerData, eph); err != nil {
 		s.setStatusLocked(peer, peerData, Failed)
 		return err
@@ -87,12 +91,24 @@ func (s *Server) setStatusLocked(peer Peer, peerData PeerData, status Connection
 
 // dropLinkLocked forgets any handshake/session state for peer (eg peer restarted or expired).
 func (s *Server) dropLinkLocked(peer Peer) {
-	delete(s.links, peer)
+	s.setLinkLocked(peer, nil)
+}
+
+// setLinkLocked replaces (or deletes when l is nil) the peer's link, closing the previous TCP link if any.
+func (s *Server) setLinkLocked(peer Peer, l *link) {
+	if old := s.links[peer]; old != nil && old != l && old.conn != nil {
+		_ = old.conn.Close()
+	}
+	if l == nil {
+		delete(s.links, peer)
+		return
+	}
+	s.links[peer] = l
 }
 
 func (s *Server) sendHandshakeLocked(format string, peer Peer, peerData PeerData, eph *tcrypto.Ephemeral) error {
 	signed := s.Identity.SignEphemeral(eph, s.linkContext(peer, peerData))
-	return s.sendDirect(peer, peerData, fmt.Sprintf(format, s.Name, peer.Name, signed))
+	return s.sendDirect(peer, peerData, fmt.Sprintf(format, s.Name, peer.Name, s.tcpPort, signed))
 }
 
 func (s *Server) sendDirect(peer Peer, peerData PeerData, message string) error {
@@ -130,6 +146,9 @@ func (s *Server) connectedLocked(peer Peer, peerData PeerData) {
 	s.setStatusLocked(peer, peerData, Connected)
 	log.Infof("Connected to %s (%s %s)", peer.Name, peer.IP, peerData.HumanHash)
 	s.addTrustedLocked(peer)
+	if l := s.links[peer]; l != nil {
+		s.startDialLocked(peer, peerData, l)
+	}
 }
 
 func (s *Server) isTrustedLocked(peer Peer) bool {
@@ -154,12 +173,13 @@ func (s *Server) addTrustedLocked(peer Peer) {
 func (s *Server) handleDirectMessage(buf []byte, from *net.UDPAddr) {
 	msgStr := string(buf)
 	var fromName, toName, arg string
-	if n, err := fmt.Sscanf(msgStr, ConnectMessageFormat, &fromName, &toName, &arg); err == nil && n == 3 {
-		s.handleConnect(from, fromName, toName, arg)
+	var tcpPort int
+	if n, err := fmt.Sscanf(msgStr, ConnectMessageFormat, &fromName, &toName, &tcpPort, &arg); err == nil && n == 4 {
+		s.handleConnect(from, fromName, toName, tcpPort, arg)
 		return
 	}
-	if n, err := fmt.Sscanf(msgStr, AcceptMessageFormat, &fromName, &toName, &arg); err == nil && n == 3 {
-		s.handleAccept(from, fromName, toName, arg)
+	if n, err := fmt.Sscanf(msgStr, AcceptMessageFormat, &fromName, &toName, &tcpPort, &arg); err == nil && n == 4 {
+		s.handleAccept(from, fromName, toName, tcpPort, arg)
 		return
 	}
 	if n, err := fmt.Sscanf(msgStr, RejectMessageFormat, &fromName, &toName, &arg); err == nil && n == 3 {
@@ -194,7 +214,7 @@ func (s *Server) senderLocked(from *net.UDPAddr, fromName, toName string) (Peer,
 	return peer, peerData, pub, true
 }
 
-func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName, signed string) {
+func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName string, tcpPort int, signed string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	log.Infof("Received connection request from %v: %v to %v", from, fromName, toName)
@@ -220,7 +240,8 @@ func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName, signed strin
 		return
 	}
 	l.session = session
-	s.links[peer] = l
+	l.tcpPort = tcpPort
+	s.setLinkLocked(peer, l)
 	switch {
 	case simultaneous:
 		log.Infof("Simultaneous connection with %s", peer.Name)
@@ -240,7 +261,7 @@ func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName, signed strin
 	}
 }
 
-func (s *Server) handleAccept(from *net.UDPAddr, fromName, toName, signed string) {
+func (s *Server) handleAccept(from *net.UDPAddr, fromName, toName string, tcpPort int, signed string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	log.Infof("Received connection accept from %v: %v to %v", from, fromName, toName)
@@ -263,6 +284,7 @@ func (s *Server) handleAccept(from *net.UDPAddr, fromName, toName, signed string
 		return
 	}
 	l.session = session
+	l.tcpPort = tcpPort
 	s.connectedLocked(peer, peerData)
 }
 
