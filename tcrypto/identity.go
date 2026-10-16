@@ -2,6 +2,7 @@ package tcrypto
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"strings"
 )
 
@@ -23,6 +24,10 @@ func (id *Identity) SignMessage(message []byte) string {
 }
 
 func VerifySignedMessage(signedMessage string, pubKey ed25519.PublicKey) ([]byte, error) {
+	if len(pubKey) != ed25519.PublicKeySize {
+		// ed25519.Verify would panic.
+		return nil, NewSignatureInvalidErr(fmt.Sprintf("invalid public key size %d", len(pubKey)))
+	}
 	parts := strings.SplitN(signedMessage, "/", 2)
 	if len(parts) != 2 {
 		return nil, NewSignatureInvalidErr("invalid signed message format, missing '/' separator")
@@ -82,5 +87,21 @@ func IdentityPublicKeyString(s string) (ed25519.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(bytes) != ed25519.PublicKeySize {
+		return nil, NewEncodingErr(fmt.Sprintf("invalid public key size %d", len(bytes)))
+	}
 	return ed25519.PublicKey(bytes), nil
+}
+
+// ValidatePublicKeyString checks that s is a valid and canonically encoded
+// identity public key string (so it can't contain separators/whitespace).
+func ValidatePublicKeyString(s string) error {
+	pub, err := IdentityPublicKeyString(s)
+	if err != nil {
+		return err
+	}
+	if EncodeBytes(PublicKeyPrefix, pub) != s {
+		return NewEncodingErr("non canonical public key encoding")
+	}
+	return nil
 }
