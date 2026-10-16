@@ -9,4 +9,8 @@ lint: .golangci.yml
 .golangci.yml: Makefile
 	curl -fsS -o .golangci.yml https://raw.githubusercontent.com/fortio/workflows/main/golangci.yml
 
-.PHONY: all lint test
+# End to end TUI test, needs tmux (and local multicast so not run in CI).
+e2e:
+	./scripts/e2e_tmux.sh
+
+.PHONY: all lint test e2e
