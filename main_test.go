@@ -8,6 +8,15 @@ import (
 	"fortio.org/tsync/tsnet"
 )
 
+func TestSplitList(t *testing.T) {
+	if got := SplitList(" a, b:12 ,,c "); strings.Join(got, "|") != "a|b:12|c" {
+		t.Errorf("unexpected %q", got)
+	}
+	if got := SplitList(""); got != nil {
+		t.Errorf("unexpected %q", got)
+	}
+}
+
 func TestPendingBannerAndBell(t *testing.T) {
 	peers := []smap.KV[tsnet.Peer, tsnet.PeerData]{
 		{Key: tsnet.Peer{Name: "a"}, Value: tsnet.PeerData{Status: tsnet.Connected}},

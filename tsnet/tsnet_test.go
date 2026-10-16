@@ -465,3 +465,48 @@ func TestMultiplePeersDiscovery(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticPeerNoMulticast(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Different multicast groups and ports: they can't discover each other by multicast.
+	idA, _ := tcrypto.NewIdentity()
+	idB, _ := tcrypto.NewIdentity()
+	cfgA := tsnet.Config{
+		Name: "HostA", Port: testPort + 10, Mcast: "239.255.115.120", Target: tsnet.DefaultTarget,
+		Identity: idA, BaseBroadcastInterval: 100 * time.Millisecond,
+	}
+	serverA := cfgA.NewServer()
+	if err := serverA.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer serverA.Stop()
+	// Only B knows about A (A's discovery port), A must learn about B from B's direct discovery.
+	cfgB := tsnet.Config{
+		Name: "HostB", Port: testPort + 11, Mcast: "239.255.115.121", Target: tsnet.DefaultTarget,
+		Identity: idB, BaseBroadcastInterval: 100 * time.Millisecond,
+		Peers: []string{fmt.Sprintf("%s:%d", serverA.OurAddress().IP, cfgA.Port)},
+	}
+	serverB := cfgB.NewServer()
+	if err := serverB.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer serverB.Stop()
+	peerB := waitForPeer(ctx, t, serverA, "HostB")
+	peerA := waitForPeer(ctx, t, serverB, "HostA")
+	if err := serverA.ConnectToPeer(peerB); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(ctx, t, serverB, peerA, tsnet.ReceivedConn)
+	if err := serverB.ConnectToPeer(peerA); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(ctx, t, "A linked", func() bool { return serverA.Linked(peerB) })
+	waitFor(ctx, t, "B linked", func() bool { return serverB.Linked(peerA) })
+	// Bad static peer address is a config error.
+	bad := tsnet.Config{Name: "Bad", Port: testPort + 12, Mcast: "239.255.115.122", Identity: idA, Peers: []string{"no such host!:x"}}
+	if err := bad.NewServer().Start(ctx); err == nil {
+		t.Errorf("expected error for invalid peer address")
+	}
+}

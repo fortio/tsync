@@ -108,6 +108,17 @@ func DarkGray(s string) string {
 	return Color16(tcolor.DarkGray, s)
 }
 
+// SplitList splits a comma separated list, ignoring empty entries and spaces.
+func SplitList(s string) []string {
+	var res []string
+	for p := range strings.SplitSeq(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			res = append(res, p)
+		}
+	}
+	return res
+}
+
 // SendPastes sends the completed pastes to the linked peers, returns true if any was sent.
 func SendPastes(srv *tsnet.Server, clips *ClipPanel, pastes []Paste) bool {
 	sent := false
@@ -290,6 +301,8 @@ func Main() int {
 		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
 	fClipLines := flag.Int("clip-lines", 3, "Max number of lines shown for each clipboard box")
 	fAutoConnect := flag.Bool("auto-connect", true, "Automatically connect to trusted (previously accepted) peers")
+	fPeers := flag.String("peers", "",
+		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	cli.Main()
 	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
@@ -321,6 +334,7 @@ func Main() int {
 		BaseBroadcastInterval: *fInterval,
 		Storage:               storage,
 		NoAutoConnect:         !*fAutoConnect,
+		Peers:                 SplitList(*fPeers),
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
