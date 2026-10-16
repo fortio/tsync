@@ -2,12 +2,17 @@
 package tsnet
 
 import (
+	"bytes"
 	"context"
+	crand "crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +39,11 @@ const (
 	DefaultDiscoveryPort           = 29556 // "ts" in ascii.
 )
 
+// Compatible returns false for peers running an older tsync version we can't connect with.
+func (pd PeerData) Compatible() bool {
+	return pd.RunID != ""
+}
+
 type Config struct {
 	// Name to use, if empty hostname will be used.
 	Name  string
@@ -54,6 +64,9 @@ type Config struct {
 	NoAutoConnect bool
 	// FileDir is where received files are saved (current directory if empty).
 	FileDir string
+	// Peers are host[:port] addresses we also send our discovery message to directly (unicast),
+	// for when multicast doesn't work (port defaults to Port).
+	Peers []string
 }
 
 type ConnectionStatus int
@@ -98,8 +111,14 @@ type Server struct {
 	transfers  []*Transfer
 	nextFileID uint32
 	offers     map[uint32]*offer // our recent offers, by id.
-	lastOffer  *offer            // also offered to newly linked peers.
-	changes    atomic.Uint64     // OnChange version.
+	// resolved Config.Peers
+	staticPeers []*net.UDPAddr
+	// random id of this run, in our discovery messages (handshake context, restart detection).
+	runID string
+	// testDialAddr if set changes the address we dial (tests).
+	testDialAddr func(addr string, fallback bool) string
+	lastOffer    *offer        // also offered to newly linked peers.
+	changes      atomic.Uint64 // OnChange version.
 	// TCP links
 	tcpListen *net.TCPListener
 	tcpPort   int
@@ -123,6 +142,7 @@ type PeerData struct {
 	Epoch     int32
 	LastSeen  time.Time
 	Status    ConnectionStatus
+	RunID     string // random id of the peer's current run (from its discovery messages), empty for old versions.
 	// Last clipboard received from that peer.
 	Clip     string
 	ClipTime time.Time
@@ -144,6 +164,7 @@ func (c *Config) NewServer() *Server {
 
 func (s *Server) Start(ctx context.Context) error {
 	s.idStr = s.Identity.PublicKeyToString()
+	s.runID = newRunID()
 	var err error
 	if s.Name == "" {
 		s.Name, err = os.Hostname()
@@ -166,6 +187,16 @@ func (s *Server) Start(ctx context.Context) error {
 			return err
 		}
 		log.Infof("Loaded %d trusted peers", len(s.trusted))
+	}
+	for _, p := range s.Config.Peers {
+		if _, _, perr := net.SplitHostPort(p); perr != nil {
+			p = net.JoinHostPort(p, strconv.Itoa(s.Port))
+		}
+		a, rerr := net.ResolveUDPAddr("udp4", p)
+		if rerr != nil {
+			return fmt.Errorf("invalid peer address %q: %w", p, rerr)
+		}
+		s.staticPeers = append(s.staticPeers, a)
 	}
 	if s.Target == "" {
 		s.Target = DefaultTarget
@@ -272,6 +303,7 @@ func (s *Server) runAdv(ctx context.Context) {
 			if err != nil {
 				log.Errf("Error sending UDP packet: %v", err)
 			}
+			s.directDiscovery(epoch)
 			// Run some cleanup/expire entries
 			s.PeersCleanup()
 			s.handshakeTick()
@@ -340,7 +372,10 @@ func (s *Server) runUnicastReceive(ctx context.Context) {
 			}
 			// Unicast messages are always from other peers, never from ourselves
 			log.LogVf("Received unicast message %d bytes from %v: %q", n, addr, buf[:n])
-			// Process as direct message
+			if bytes.HasPrefix(buf[:n], []byte(discoveryPrefix)) {
+				s.handleDiscovery(buf[:n], addr) // discovery sent directly to us (see directDiscovery).
+				continue
+			}
 			s.handleDirectMessage(buf[:n], addr)
 		}
 	}
@@ -352,7 +387,6 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
 		s.Name, s.broadcastListen.LocalAddr(), BufSize)
 	ourAddr := s.ourSendAddr
-	us := Peer{Name: s.Name, IP: ourAddr.IP.String(), PublicKey: s.Identity.PublicKeyToString()}
 	for {
 		select {
 		case <-ctx.Done():
@@ -374,65 +408,75 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				continue
 			}
 			log.LogVf("Received %d bytes from %v: %q", n, addr, buf[:n])
-			name, pubKey, theirEpoch, err := s.MCastMessageDecode(buf[:n])
-			if err != nil {
-				log.Errf("Error decoding UDP packet %q from %v: %v", buf[:n], addr, err)
-				continue
-			}
-			data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now()}
-			peer := Peer{Name: name, IP: addr.IP.String(), PublicKey: pubKey}
-			if peer == us {
-				if theirEpoch <= s.epoch.Load() {
-					log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%v %v)", peer, data)
-					s.Stop()
-				} else {
-					log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%v %v)", peer, data)
-				}
-				continue
-			}
-			s.stateMu.Lock() // released at the end of this message processing
-			if v, ok := s.Peers.Get(peer); ok {
-				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
-				// Transfer the human hash (same pub key so same human hash)
-				data.HumanHash = v.HumanHash
-				// as well as the status
-				data.Status = v.Status
-				data.Clip = v.Clip
-				data.ClipTime = v.ClipTime
-				// Check if this is an updated port
-				if v.Port != data.Port {
-					log.Infof("Peer %q port changed from %d to %d", peer, v.Port, data.Port)
-					data.Status = NotLinked
-					src := Source{IP: peer.IP, Port: v.Port} // old source to delete
-					s.Sources.Delete(src)
-					src.Port = data.Port
-					s.Sources.Set(src, peer)
-					s.dropLinkLocked(peer) // port change is also how we detect a restarted peer.
-					delete(s.lastAuto, peer)
-					s.expireOffersLocked(peer)
-				}
-				// Update last seen and epoch
-				s.change(s.Peers.Set(peer, data))
-				s.autoConnectLocked(peer, data, time.Now())
-				s.stateMu.Unlock()
-				continue
-			}
-			pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
-			data.HumanHash = tcrypto.HumanHash(pub)
-			if err != nil {
-				log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
-				data.HumanHash = "BAD-PKEY"
-			}
-			nv := s.Peers.Set(peer, data)
-			src := Source{IP: peer.IP, Port: data.Port}
-			s.Sources.Set(src, peer)
-			log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
-				log.Any("Peer", peer), log.Any("Data", data))
-			s.change(nv)
-			s.autoConnectLocked(peer, data, time.Now())
-			s.stateMu.Unlock()
+			s.handleDiscovery(buf[:n], addr)
 		}
 	}
+}
+
+// handleDiscovery processes a discovery message, received by multicast or directly (unicast).
+func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
+	d, err := s.MCastMessageDecode(buf)
+	if err != nil {
+		log.Errf("Error decoding UDP packet %q from %v: %v", buf, addr, err)
+		return
+	}
+	theirEpoch := d.Epoch
+	data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now(), RunID: d.RunID}
+	peer := Peer{Name: d.Name, IP: addr.IP.String(), PublicKey: d.PublicKey}
+	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
+	if peer == us {
+		if theirEpoch <= s.epoch.Load() {
+			log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%v %v)", peer, data)
+			s.Stop()
+		} else {
+			log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%v %v)", peer, data)
+		}
+		return
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if v, ok := s.Peers.Get(peer); ok {
+		log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
+		// Transfer the human hash (same pub key so same human hash)
+		data.HumanHash = v.HumanHash
+		// as well as the status
+		data.Status = v.Status
+		data.Clip = v.Clip
+		data.ClipTime = v.ClipTime
+		// Check if this is an updated port or a restarted peer.
+		if v.Port != data.Port || v.RunID != data.RunID {
+			log.Infof("Peer %q restarted or port changed: port %d -> %d, run %q -> %q",
+				peer, v.Port, data.Port, v.RunID, data.RunID)
+			data.Status = NotLinked
+			src := Source{IP: peer.IP, Port: v.Port} // old source to delete
+			s.Sources.Delete(src)
+			src.Port = data.Port
+			s.Sources.Set(src, peer)
+			s.dropLinkLocked(peer)
+			delete(s.lastAuto, peer)
+			s.expireOffersLocked(peer)
+		}
+		// Update last seen and epoch
+		s.change(s.Peers.Set(peer, data))
+		s.autoConnectLocked(peer, data, time.Now())
+		return
+	}
+	pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
+	data.HumanHash = tcrypto.HumanHash(pub)
+	if err != nil {
+		log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
+		data.HumanHash = "BAD-PKEY"
+	}
+	nv := s.Peers.Set(peer, data)
+	src := Source{IP: peer.IP, Port: data.Port}
+	s.Sources.Set(src, peer)
+	log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
+		log.Any("Peer", peer), log.Any("Data", data))
+	if !data.Compatible() {
+		log.Warnf("%s (%s) runs an older, incompatible tsync version: upgrade it to connect", peer.Name, peer.IP)
+	}
+	s.change(nv)
+	s.autoConnectLocked(peer, data, time.Now())
 }
 
 // GetInternetInterface returns the interface used to reach a public IP (default route).
@@ -483,33 +527,65 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 }
 
 const (
-	DiscoveryMessageFormat = "tsync1 %q %s e %d"    // name, public key, epoch
-	ConnectMessageFormat   = "connect1 %q %q %d %s" // from_name, target_name, tcp link port, signed ephemeral key
-	AcceptMessageFormat    = "accept1 %q %q %d %s"  // from_name, target_name, tcp link port, signed ephemeral key
-	RejectMessageFormat    = "reject1 %q %q %q"     // from_name, target_name, reason
+	DiscoveryMessageFormat = "tsync1 %q %s e %d r %s" // name, public key, epoch, run id
+	ConnectMessageFormat   = "connect1 %q %q %d %s"   // from_name, target_name, tcp link port, signed ephemeral key
+	AcceptMessageFormat    = "accept1 %q %q %d %s"    // from_name, target_name, tcp link port, signed ephemeral key
+	DialMeMessageFormat    = "dialme1 %q %q"          // from_name, target_name: our dial failed, please dial us.
+	RejectMessageFormat    = "reject1 %q %q %q"       // from_name, target_name, reason
 )
 
+func newRunID() string {
+	b := make([]byte, 8)
+	_, _ = crand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// discoveryPrefix is the start of DiscoveryMessageFormat.
+const discoveryPrefix = "tsync1 "
+
+// directDiscovery also sends our discovery message directly (unicast) to the configured
+// static peers and to the peers we know: when multicast only works one way (eg a NAT'ed
+// VM sees the host but not the other way around) or not at all, they still discover us.
+func (s *Server) directDiscovery(epoch int32) {
+	payload := []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID))
+	targets := slices.Clone(s.staticPeers)
+	for peer, data := range s.Peers.All() {
+		targets = append(targets, &net.UDPAddr{IP: net.ParseIP(peer.IP), Port: data.Port})
+	}
+	for _, a := range targets {
+		if _, err := s.dualUDPSock.WriteToUDP(payload, a); err != nil {
+			log.LogVf("Error sending direct discovery to %v: %v", a, err)
+		}
+	}
+}
+
 func (s *Server) MCastMessageSend(epoch int32) error {
-	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch)
+	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID)
 	_, err := s.dualUDPSock.WriteToUDP([]byte(payload), s.destAddr)
 	return err
 }
 
-func (s *Server) MCastMessageDecode(buf []byte) (string, string, int32, error) {
-	var name string
-	var pubKeyStr string
-	var epoch int32
-	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat, &name, &pubKeyStr, &epoch)
-	if err != nil {
-		return "", "", 0, err
+// Discovery is a decoded discovery message.
+type Discovery struct {
+	Name      string
+	PublicKey string
+	Epoch     int32
+	RunID     string // empty for older versions.
+}
+
+func (s *Server) MCastMessageDecode(buf []byte) (Discovery, error) {
+	var d Discovery
+	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat, &d.Name, &d.PublicKey, &d.Epoch, &d.RunID)
+	if n < 3 { // older versions don't have the run id.
+		if err == nil {
+			err = fmt.Errorf("could not decode message %q", string(buf))
+		}
+		return d, err
 	}
-	if n != 3 {
-		return "", "", 0, fmt.Errorf("could not decode message %q", string(buf))
+	if err = ValidateName(d.Name); err != nil {
+		return d, err
 	}
-	if err = ValidateName(name); err != nil {
-		return "", "", 0, err
-	}
-	return name, pubKeyStr, epoch, nil
+	return d, nil
 }
 
 // MaxNameLen is the maximum length in bytes of a peer name.
