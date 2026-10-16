@@ -122,12 +122,18 @@ func SplitList(s string) []string {
 	return res
 }
 
-// SendPastes sends the completed pastes to the linked peers, returns true if any was sent.
-func SendPastes(srv *tsnet.Server, clips *ClipPanel, pastes []Paste) bool {
+// SendPastes sends the completed pastes to the linked peers (dropped files are offered),
+// returns true if anything changed.
+func SendPastes(srv *tsnet.Server, clips *ClipPanel, files *FilePanel, pastes []Paste) bool {
 	sent := false
 	for _, p := range pastes {
 		if p.Truncated {
 			log.Errf("Paste too large (over %s), not sent", sizeStr(tsnet.MaxClipSize))
+			continue
+		}
+		if paths, ok := DroppedFiles(p.Text); ok {
+			files.Offer(paths)
+			sent = true
 			continue
 		}
 		text := SanitizeClip(p.Text)
@@ -148,6 +154,7 @@ type TopArea struct {
 	srv        *tsnet.Server
 	logArea    *LogArea
 	clips      *ClipPanel
+	files      *FilePanel
 	fixedLines [][]string // our line and header.
 	help       string
 	pending    map[tsnet.Peer]bool // peers with a pending connection request (for the bell).
@@ -207,19 +214,30 @@ func (t *TopArea) Draw(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) int {
 		lines = append(lines, PeerLine(i+1, kv.Key, kv.Value, t.srv.Linked(kv.Key)))
 	}
 	tableHeight := len(lines) + 2 // + borders.
-	boxes := t.clips.Layout(peers, ap.H-MinLogLines-tableHeight-1)
+	avail := ap.H - MinLogLines - tableHeight - 1
+	// Files first (pending offers matter most), clips get the rest.
+	fileLines := t.files.Lines()
+	if keep := max(0, avail-2); len(fileLines) > keep {
+		fileLines = fileLines[len(fileLines)-keep:]
+	}
+	filesHeight := 0
+	if len(fileLines) > 0 {
+		filesHeight = len(fileLines) + 2
+	}
+	boxes := t.clips.Layout(peers, avail-filesHeight)
 	boxesHeight := 0
 	for _, b := range boxes {
 		boxesHeight += b.height()
 	}
-	// table + clip boxes + separator line.
-	top := t.logArea.SetTop(tableHeight + boxesHeight + 1)
+	// table + clip boxes + files box + separator line.
+	top := t.logArea.SetTop(tableHeight + boxesHeight + filesHeight + 1)
 	for y := range top {
 		ap.MoveCursor(0, y)
 		ap.ClearEndOfLine()
 	}
 	tableWidth := ap.WriteTable(0, alignment, 1, lines, ansipixels.BorderOuterColumns)
 	t.clips.Draw(tableHeight, boxes)
+	t.files.Draw(tableHeight+boxesHeight, fileLines)
 	if top > 0 {
 		ap.MoveCursor(0, top-1)
 		banner, pending := PendingBanner(peers)
@@ -239,7 +257,9 @@ func (t *TopArea) Draw(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) int {
 }
 
 // HandleKey handles a key press, returns false to exit.
-func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, peers []smap.KV[tsnet.Peer, tsnet.PeerData]) bool {
+func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, files *FilePanel,
+	peers []smap.KV[tsnet.Peer, tsnet.PeerData],
+) bool {
 	switch c {
 	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		connectToPeerIdx := int(c - '0')
@@ -250,6 +270,8 @@ func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, peers []smap.KV[tsne
 		} else {
 			log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
 		}
+	case 'd':
+		files.DownloadLatest()
 	case 'c':
 		if box, ok := clips.Latest(); ok {
 			clips.Copy(box)
@@ -304,6 +326,8 @@ func Main() int {
 		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
 	fClipLines := flag.Int("clip-lines", 3, "Max number of lines shown for each clipboard box")
 	fAutoConnect := flag.Bool("auto-connect", true, "Automatically connect to trusted (previously accepted) peers")
+	fDir := flag.String("dir", "",
+		"Directory where received files are saved (default ~/Downloads if it exists, else current directory)")
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	cli.Main()
@@ -338,13 +362,17 @@ func Main() int {
 		Storage:               storage,
 		NoAutoConnect:         !*fAutoConnect,
 		Peers:                 SplitList(*fPeers),
+		FileDir:               *fDir,
+	}
+	if cfg.FileDir == "" {
+		cfg.FileDir = DefaultDownloadDir()
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
 	defer srv.Stop()
-	log.Infof("Started tsync with name %q", srv.Name)
+	log.Infof("Started tsync with name %q, received files are saved in %s", srv.Name, cfg.FileDir)
 	log.Infof("Paste to send to connected peers, Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
@@ -366,6 +394,7 @@ func Main() int {
 	var peersSnapshot []smap.KV[tsnet.Peer, tsnet.PeerData]
 	tableWidth := 0
 	clips := NewClipPanel(ap, *fClipLines)
+	files := NewFilePanel(ap, srv, cfg.FileDir, 5)
 	ap.OnMouse = func() {
 		if !ap.LeftClick() || !ap.MouseRelease() {
 			return
@@ -376,6 +405,8 @@ func Main() int {
 			InitiatePeerConnection(srv, peer.Key, peer.Value)
 		} else if box, ok := clips.Clicked(ap.My); ok {
 			clips.Copy(box)
+		} else if files.Clicked(ap.My) {
+			return
 		} else {
 			log.Infof("Left click (release) at %d,%d -> outside peer list", ap.Mx, ap.My)
 		}
@@ -384,9 +415,9 @@ func Main() int {
 	ap.NoDecode = true
 	paste := &PasteCollector{MaxSize: tsnet.MaxClipSize + 1}
 	top := &TopArea{
-		ap: ap, srv: srv, logArea: logArea, clips: clips,
+		ap: ap, srv: srv, logArea: logArea, clips: clips, files: files,
 		fixedLines: [][]string{ourLine, headerLine},
-		help:       " paste: send · click box or c: copy · click or 1-9: connect/accept · q: quit ",
+		help:       " paste/drop file: send · click box or c: copy · d: download · click or 1-9: connect/accept · q: quit ",
 	}
 	err = ap.FPSTicks(func() bool {
 		// Log output scrolls in its own area (see LogArea) so we only need to refresh
@@ -401,7 +432,7 @@ func Main() int {
 		other, pastes := paste.Feed(ap.Data)
 		ap.Data = other
 		ap.MouseDecodeAll()
-		if SendPastes(srv, clips, pastes) {
+		if SendPastes(srv, clips, files, pastes) {
 			prev = ^uint64(0) // force repaint
 		}
 		curVersion := version.Load()
@@ -421,7 +452,7 @@ func Main() int {
 		if len(ap.Data) == 0 {
 			return true
 		}
-		return HandleKey(ap.Data[0], srv, clips, peersSnapshot)
+		return HandleKey(ap.Data[0], srv, clips, files, peersSnapshot)
 	})
 	if err != nil {
 		log.Infof("Exiting on %v", err)

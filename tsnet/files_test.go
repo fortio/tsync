@@ -147,6 +147,13 @@ func TestFileTransfer(t *testing.T) {
 	if _, err := serverA.OfferFile(src); err == nil {
 		t.Errorf("expected error offering a directory")
 	}
+	unreadable := filepath.Join(src, "unreadable.txt")
+	_ = os.WriteFile(unreadable, []byte("x"), 0o000)
+	if f, err := os.Open(unreadable); err == nil { // eg running as root.
+		f.Close()
+	} else if _, err = serverA.OfferFile(unreadable); err == nil {
+		t.Errorf("expected error offering an unreadable file")
+	}
 }
 
 func checkNoPartial(t *testing.T, dir string) {

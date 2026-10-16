@@ -166,6 +166,11 @@ func (s *Server) OfferFile(path string) (int, error) {
 	if !fi.Mode().IsRegular() {
 		return 0, fmt.Errorf("%s: not a regular file (directories aren't supported yet)", path)
 	}
+	f, err := os.Open(path) // check it's readable before offering it.
+	if err != nil {
+		return 0, err
+	}
+	_ = f.Close()
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return 0, err

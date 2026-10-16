@@ -4,13 +4,13 @@
 
 # tsync
 
-Secure clipboard (and soon file) sharing between your machines, from a cross platform terminal UI (TUI): macOS, Linux and Windows.
+Secure clipboard and file sharing between your machines, from a cross platform terminal UI (TUI): macOS, Linux and Windows.
 
-Run `tsync` on each machine on your local network: they find each other automatically, you approve each new machine once (checking a short hash, trust on first use), and from then on they reconnect on their own over an end to end encrypted link. Paste text into tsync on one machine, click to copy it on another.
+Run `tsync` on each machine on your local network: they find each other automatically, you approve each new machine once (checking a short hash, trust on first use), and from then on they reconnect on their own over an end to end encrypted link. Paste text into tsync on one machine, click to copy it on another. Drag and drop a file into tsync, click to download it on another.
 
 Also a reusable Go library for local network discovery, authenticated encrypted peer links and clipboard/file transfer (`tsnet` and `tcrypto` packages).
 
-**Status**: clipboard sharing works and is used daily between macOS, Windows and Linux (including VMs). File sharing (drag and drop a file, click to download on the other machines) is being added next.
+**Status**: clipboard sharing works and is used daily between macOS, Windows and Linux (including VMs). File sharing is new (directories aren't supported yet, and a `tsync send` command for ssh sessions is coming).
 
 ![Example Screenshot](screenshot.png)
 
@@ -39,6 +39,8 @@ Run `tsync` on each machine. Discovered peers are listed in the table (`🏠` is
 - Accepted peers are remembered and reconnect automatically next time (when either side restarts, or after a network hiccup).
 - **Share text**: paste (Cmd-V, Ctrl-Shift-V...) into tsync: it's sent to all the linked peers and shows in a box below the table (on yours too). Peers that connect later also get the last thing you shared.
 - **Copy**: click on a box (or press `c` for the latest received) to copy it to your clipboard.
+- **Share a file**: drag and drop it into tsync (most terminals paste the dropped file's path; an existing absolute path, quoted or not, is detected as a file instead of text). It's *offered* to the linked peers: name and size only.
+- **Download**: on the other machines the offer shows in the files box below the clipboard ones; click it (or press `d` for the latest) to download. Nothing is written until you do. Files are saved in `~/Downloads` (or the current directory if there's no such directory, or `-dir`), never overwriting an existing file (`name-1.ext`, `name-2.ext`...), with a progress bar while it transfers.
 - `q` (or Ctrl-C) to quit.
 
 The log scrolls below the table and boxes; `-loglevel debug` for more details.
@@ -57,6 +59,7 @@ tsync help
 
 Most useful ones:
 - `-name` to use another name than the hostname (eg 2 instances on the same machine).
+- `-dir` where received files are saved (default `~/Downloads` if it exists, else the current directory).
 - `-peers host[:port],...` to also send discovery directly to these addresses, when multicast doesn't work at all (some VPNs, cloud VMs...). Default port is the discovery one (29556).
 - `-auto-connect=false` to not automatically connect to already accepted peers.
 - `-clip-lines` max number of lines shown per clipboard box (default 3).
@@ -82,6 +85,7 @@ Run 2 instances with different names and identities, eg `tsync -name a` and `HOM
 - **Handshake**: connection requests and accepts carry a fresh X25519 ephemeral key signed with the sender's identity, bound to both run ids (no replay from previous runs). Both sides derive session keys with HKDF (SHA-256), one AES-256-GCM key per direction.
 - **Link**: one side then opens a TCP connection; all frames on it are encrypted and authenticated (counter nonces, so no replay or reordering), and the first one proves it's the right peer.
 - **Clipboard**: the text (up to 1 MiB) with the time it was copied is sent to all the linked peers; the receiver keeps the newest.
+- **Files**: the offer (path, size, modification time) goes to the linked peers; when you accept, the sender checks the file didn't change and streams it in chunks with its SHA-256. The receiver writes a temporary file, checks size and hash, then renames it to its final name: only the last component of the sender's path is used, sanitized (no `../`, control or Windows reserved characters, not hidden), mode 0644 (never executable), original modification time kept.
 
 ## Docker
 
@@ -95,5 +99,5 @@ but multicast, which tsync needs for discovery, doesn't seem to work at least on
 ```
 make test   # unit and (local network multicast) integration tests
 make lint   # golangci-lint with the fortio shared config
-make e2e    # end to end TUI test: 2 instances in tmux, connect, paste, copy, restart (needs tmux)
+make e2e    # end to end TUI test: 2 instances in tmux, connect, paste, copy, restart, drop/download file (needs tmux)
 ```
