@@ -2,6 +2,7 @@ package tsnet
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -156,21 +158,30 @@ func (s *Server) finishLocked(t *Transfer, err error) {
 	s.change(0)
 }
 
-// OfferFile offers the file to all the linked peers (and to peers linked later, until
-// another file is offered). Returns how many peers it was offered to.
-func (s *Server) OfferFile(path string) (int, error) {
+// CheckFile checks that path is a regular file we can read (that can be offered).
+func CheckFile(path string) (os.FileInfo, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return 0, fmt.Errorf("%s: not a regular file (directories aren't supported yet)", path)
+		return nil, fmt.Errorf("%s: not a regular file (directories aren't supported yet)", path)
 	}
-	f, err := os.Open(path) // check it's readable before offering it.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	_ = f.Close()
+	return fi, nil
+}
+
+// OfferFile offers the file to all the linked peers, and to peers linked later (our last
+// offers are sent to newly linked peers). Returns how many peers it was offered to now.
+func (s *Server) OfferFile(path string) (int, error) {
+	fi, err := CheckFile(path)
 	if err != nil {
 		return 0, err
 	}
-	_ = f.Close()
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return 0, err
@@ -179,7 +190,6 @@ func (s *Server) OfferFile(path string) (int, error) {
 	s.nextFileID++
 	o := &offer{id: s.nextFileID, path: abs, name: filepath.Base(abs), size: fi.Size(), mtime: fi.ModTime()}
 	s.offers[o.id] = o
-	s.lastOffer = o
 	delete(s.offers, o.id-maxTransfers) // only keep the last ones.
 	type target struct {
 		peer Peer
@@ -214,16 +224,20 @@ func offerPayload(o *offer) []byte {
 	return append(b, o.path...)
 }
 
-// sendLastOffer sends our last file offer (if any) to a newly linked peer.
-func (s *Server) sendLastOffer(peer Peer, l *link, conn net.Conn) {
+// sendOffers sends our (recent) file offers to a newly linked peer, oldest first.
+func (s *Server) sendOffers(peer Peer, l *link, conn net.Conn) {
 	s.stateMu.Lock()
-	o := s.lastOffer
-	s.stateMu.Unlock()
-	if o == nil {
-		return
+	offers := make([]*offer, 0, len(s.offers))
+	for _, o := range s.offers {
+		offers = append(offers, o)
 	}
-	if err := l.send(conn, FrameFileOffer, offerPayload(o)); err != nil {
-		log.Errf("Failed to send last file offer to %s: %v", peer.Name, err)
+	s.stateMu.Unlock()
+	slices.SortFunc(offers, func(a, b *offer) int { return cmp.Compare(a.id, b.id) })
+	for _, o := range offers {
+		if err := l.send(conn, FrameFileOffer, offerPayload(o)); err != nil {
+			log.Errf("Failed to send file offers to %s: %v", peer.Name, err)
+			return
+		}
 	}
 }
 

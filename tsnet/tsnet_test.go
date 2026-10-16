@@ -309,6 +309,14 @@ func TestRetryAndLastClipForNewLink(t *testing.T) {
 	if n, err = serverA.OfferFile(early); err != nil || n != 0 {
 		t.Fatalf("OfferFile with no peers: %d %v", n, err)
 	}
+	early2 := filepath.Join(t.TempDir(), "early2.txt")
+	_ = os.WriteFile(early2, []byte("y"), 0o644)
+	if _, err = serverA.OfferFile(early2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = serverA.OfferFile(t.TempDir()); err == nil {
+		t.Errorf("expected error offering a directory")
+	}
 	serverB := startTestServer(ctx, t, "HostB", idB, nil)
 	defer serverB.Stop()
 	peerB := waitForPeer(ctx, t, serverA, "HostB")
@@ -326,7 +334,8 @@ func TestRetryAndLastClipForNewLink(t *testing.T) {
 		clipTime = data.ClipTime
 		return data.Clip == "early clip"
 	})
-	waitTransfer(ctx, t, serverB, true, "early.txt", tsnet.TransferOffered) // file offer too.
+	waitTransfer(ctx, t, serverB, true, "early.txt", tsnet.TransferOffered) // file offers too (all of them).
+	waitTransfer(ctx, t, serverB, true, "early2.txt", tsnet.TransferOffered)
 	if clipTime.After(sentTime) {
 		t.Errorf("clip time %v should be the original time (before %v)", clipTime, sentTime)
 	}

@@ -42,7 +42,8 @@ wait_for() {
 	echo "ok: $1 shows '$2'"
 }
 
-$T new-session -d -s A -x 200 -y 40 "env HOME=$OUT/hA $BIN $ARGS -name e2eA"
+echo "file given on the command line" > "$OUT/src/arg file.txt"
+$T new-session -d -s A -x 200 -y 40 "env HOME=$OUT/hA $BIN $ARGS -name e2eA '$OUT/src/arg file.txt'"
 $T set -g set-clipboard on
 $T new-session -d -s B -x 200 -y 40 "env HOME=$OUT/hB $BIN $ARGS -name e2eB -dir $OUT/dlB"
 
@@ -55,6 +56,8 @@ wait_for B "wants to connect: check the hash, then click or press 1 to accept"
 $T send-keys -t B 1
 wait_for A "🔗 e2eB"
 wait_for B "🔗 e2eA"
+# File given as argument to A: offered once B is linked.
+wait_for B "e2eA offers $OUT/src/arg file.txt (31 b): click or press d"
 
 # Raw bytes as a terminal would send for a bracketed paste (tmux paste-buffer rewrites control chars).
 printf 'hello from A\nsecond\tline \033[31mred\033[0m osc52:\033]52;c;aGFja2Vk\007end\nthird\nfourth\nfifth' > "$OUT/clip.raw"

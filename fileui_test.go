@@ -30,7 +30,7 @@ func TestFilePanel(t *testing.T) {
 	_ = os.WriteFile(f, make([]byte, 2048), 0o644)
 	fp.Offer([]string{f, filepath.Join(t.TempDir(), "missing")})
 	lines := fp.Lines()
-	if len(lines) != 2 || !strings.Contains(lines[0].text, "offered "+f+" (2 Kb) to 0 peers") ||
+	if len(lines) != 2 || !strings.Contains(lines[0].text, "offered "+f+" (2 Kb), will be sent to peers when they connect") ||
 		!strings.Contains(lines[1].text, "can't offer") {
 		t.Errorf("unexpected local lines %+v", lines)
 	}
