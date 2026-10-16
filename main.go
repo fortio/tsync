@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"fortio.org/cli"
@@ -142,7 +143,9 @@ func Main() int {
 		return 1 // error already logged
 	}
 	ap.MouseClickOn()
+	logArea := NewLogArea(ap)
 	defer func() {
+		logArea.Reset()
 		ap.MouseClickOff()
 		ap.Restore()
 	}()
@@ -202,14 +205,17 @@ func Main() int {
 		}
 	}
 	err = ap.FPSTicks(func() bool {
-		// Only refresh if we had (log) output or something changed, so cursor blinks (!).
+		// Log output scrolls in its own area (see LogArea) so we only need to refresh
+		// the top area when something changed, so cursor blinks (!).
 		logHadOutput := ap.FlushLogger()
 		if srv.Stopped() {
+			if logHadOutput {
+				ap.EndSyncMode()
+			}
 			return false
 		}
 		curVersion := version.Load()
-		// log.Debugf("Have %d peers (prev %d), logHadOutput=%v", numPeers, prev, logHadOutput)
-		if logHadOutput || curVersion != prev {
+		if curVersion != prev {
 			if !logHadOutput {
 				ap.StartSyncMode()
 			}
@@ -223,8 +229,20 @@ func Main() int {
 				lines = append(lines, PeerLine(idx, kv.Key, kv.Value))
 				idx++
 			}
+			// table + borders + separator line.
+			top := logArea.SetTop(len(lines) + 3)
+			for y := range top {
+				ap.MoveCursor(0, y)
+				ap.ClearEndOfLine()
+			}
 			tableWidth = ap.WriteTable(0, alignment, 1, lines, ansipixels.BorderOuterColumns)
+			if top > 0 {
+				ap.MoveCursor(0, top-1)
+				ap.WriteString(DarkGray(strings.Repeat("─", ap.W)))
+			}
 			ap.RestoreCursorPos()
+			ap.EndSyncMode()
+		} else if logHadOutput {
 			ap.EndSyncMode()
 		}
 		if len(ap.Data) == 0 {
