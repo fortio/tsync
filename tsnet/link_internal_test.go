@@ -54,3 +54,31 @@ func TestFrames(t *testing.T) {
 		t.Errorf("expected error for truncated frame")
 	}
 }
+
+func TestValidateNameAndDecode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ok   bool
+	}{
+		{"host1", true},
+		{"My Laptop (é ✂️)", true},
+		{"", false},
+		{"esc\x1b[31m", false},
+		{"nl\nx", false},
+		{"c1\u009b", false},
+		{"bad\xffutf8", false},
+		{string(make([]byte, MaxNameLen+1)), false},
+	} {
+		err := ValidateName(tc.name)
+		if (err == nil) != tc.ok {
+			t.Errorf("ValidateName(%q) = %v, expected ok %t", tc.name, err, tc.ok)
+		}
+	}
+	s := &Server{}
+	if _, _, _, err := s.MCastMessageDecode([]byte(`tsync1 "ok" p.key e 3`)); err != nil {
+		t.Errorf("valid discovery message rejected: %v", err)
+	}
+	if _, _, _, err := s.MCastMessageDecode([]byte(`tsync1 "evil\x1b]52;c;aGk=\a" p.key e 3`)); err == nil {
+		t.Errorf("discovery message with escape in name accepted")
+	}
+}

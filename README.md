@@ -43,6 +43,16 @@ docker run --network host -v ~/.tsync:/home/user/.tsync -ti fortio/tsync
 
 ## Usage
 
+Run `tsync` on each machine (same LAN). Peers are discovered automatically and listed in the table.
+
+- Click on a peer (or press its number) to connect: it turns yellow, and blue on the other machine.
+- On the other machine, check the hash matches and click (or press its number) to accept: both turn green and get a 🔗 once the encrypted link is up. Accepted peers are remembered (`~/.tsync/checked.pub`) and auto accepted next time.
+- Paste (Cmd-V / Ctrl-Shift-V...) into tsync to send that text to all the linked peers. It shows up in a box below the table on the other machines.
+- Click on a box (or press `c` for the latest received) to copy it to your clipboard. This uses OSC 52, which your terminal must support/allow (eg iTerm2: "Applications in terminal may access clipboard", tmux: `set -g set-clipboard on`; Apple's Terminal doesn't support it).
+- `q` to quit.
+
+To try it on a single machine, run 2 instances with different names and identities, eg `tsync -name a` and `HOME=/tmp/b tsync -name b`.
+
 ```
 tsync help
 ```
