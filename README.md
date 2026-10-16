@@ -14,6 +14,8 @@ Also a reusable Go library for local network discovery, authenticated encrypted 
 
 ![Example Screenshot](screenshot.png)
 
+*tsync on a Mac linked with a Windows PC, a Linux VM and a Linux laptop: shared clipboard text, a file offered by the Windows machine, one downloaded from the VM and one offered to all.*
+
 ## Install
 
 Get the binary from [releases](https://github.com/fortio/tsync/releases), or
@@ -39,9 +41,9 @@ Run `tsync` on each machine. Discovered peers are listed in the table (`🏠` is
 - Accepted peers are remembered and reconnect automatically next time (when either side restarts, or after a network hiccup).
 - **Share text**: paste (Cmd-V, Ctrl-Shift-V...) into tsync: it's sent to all the linked peers and shows in a box below the table (on yours too). Peers that connect later also get the last thing you shared.
 - **Copy**: click on a box (or press `c` for the latest received) to copy it to your clipboard.
-- **Share a file**: drag and drop it into tsync (most terminals paste the dropped file's path; an existing absolute path, quoted or not, is detected as a file instead of text). It's *offered* to the linked peers: name and size only.
-- **Share files from the command line**: `tsync file1 file2...` starts tsync as usual and offers these files (handy in an ssh session, where you can't drag and drop the remote machine's files). If tsync was already running in another window on that machine, the new one replaces it (same name and identity: the older instance exits).
+- **Share a file**: drag and drop it into tsync (most terminals paste the dropped file's path; an existing absolute path, quoted or not, is detected as a file instead of text). It's *offered* to the linked peers: name and size only. Peers that connect later get your current offers too.
 - **Download**: on the other machines the offer shows in the files box below the clipboard ones; click it (or press `d` for the latest) to download. Nothing is written until you do. Files are saved in `~/Downloads` (or the current directory if there's no such directory, or `-dir`), never overwriting an existing file (`name-1.ext`, `name-2.ext`...), with a progress bar while it transfers.
+- **Share files from the command line**: `tsync file1 file2...` starts tsync as usual and offers these files (handy in an ssh session, where you can't drag and drop the remote machine's files). If tsync was already running in another window on that machine, the new one replaces it (same name and identity: the older instance exits).
 - `q` (or Ctrl-C) to quit.
 
 The log scrolls below the table and boxes; `-loglevel debug` for more details.
@@ -87,7 +89,7 @@ Run 2 instances with different names and identities, eg `tsync -name a` and `HOM
 - **Handshake**: connection requests and accepts carry a fresh X25519 ephemeral key signed with the sender's identity, bound to both run ids (no replay from previous runs). Both sides derive session keys with HKDF (SHA-256), one AES-256-GCM key per direction.
 - **Link**: one side then opens a TCP connection; all frames on it are encrypted and authenticated (counter nonces, so no replay or reordering), and the first one proves it's the right peer.
 - **Clipboard**: the text (up to 1 MiB) with the time it was copied is sent to all the linked peers; the receiver keeps the newest.
-- **Files**: the offer (path, size, modification time) goes to the linked peers; when you accept, the sender checks the file didn't change and streams it in chunks with its SHA-256. The receiver writes a temporary file, checks size and hash, then renames it to its final name: only the last component of the sender's path is used, sanitized (no `../`, control or Windows reserved characters, not hidden), mode 0644 (never executable), original modification time kept.
+- **Files**: the offer (path, size, modification time) goes to the linked peers; when you accept, the sender checks the file didn't change and streams it in chunks with its SHA-256. The receiver writes a temporary file, checks size and hash, then renames it to its final name: only the last component of the sender's path is used, sanitized (no `../`, control or Windows reserved characters, not hidden; look-alike spaces such as macOS screenshots' one before AM/PM become regular spaces and invisible characters like bidi overrides are removed, while accents, any script and emojis are kept), mode 0644 (never executable), original modification time kept.
 
 ## Docker
 
