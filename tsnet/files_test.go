@@ -79,7 +79,7 @@ func offerAndDownload(ctx context.Context, t *testing.T, serverA, serverB *tsnet
 		offered = trs[len(trs)-1]
 		return true
 	})
-	if offered.State != tsnet.TransferOffered || offered.Name != filepath.Base(path) {
+	if offered.State != tsnet.TransferOffered || offered.Name != filepath.Base(path) || offered.Source != path {
 		t.Fatalf("unexpected offer %+v", offered)
 	}
 	if err := serverB.AcceptFile(peerA, offered.ID); err != nil {
@@ -159,31 +159,20 @@ func checkNoPartial(t *testing.T, dir string) {
 	}
 }
 
-func TestFileRefusedOrChanged(t *testing.T) {
+func TestFileChanged(t *testing.T) {
 	NoMCastOnMacInCI(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	dirB := t.TempDir()
 	serverA, serverB, peerA := linkedPair(ctx, t,
-		tsnet.Config{Name: "HostA"}, tsnet.Config{Name: "HostB", FileDir: dirB, MaxFileSize: 1000})
-	// Too large for B: refused locally on accept, never requested.
-	big := filepath.Join(t.TempDir(), "big.bin")
-	_ = os.WriteFile(big, make([]byte, 5000), 0o644)
-	if _, err := serverA.OfferFile(big); err != nil {
-		t.Fatal(err)
-	}
-	offered := waitTransfer(ctx, t, serverB, true, "big.bin", tsnet.TransferOffered)
-	if err := serverB.AcceptFile(peerA, offered.ID); err == nil || !strings.Contains(err.Error(), "too large") {
-		t.Errorf("expected too large error, got %v", err)
-	}
-	waitTransfer(ctx, t, serverB, true, "big.bin", tsnet.TransferFailed)
+		tsnet.Config{Name: "HostA"}, tsnet.Config{Name: "HostB", FileDir: dirB})
 	// Changed after being offered: sender aborts.
 	small := filepath.Join(t.TempDir(), "small.txt")
 	_ = os.WriteFile(small, []byte("v1"), 0o644)
 	if _, err := serverA.OfferFile(small); err != nil {
 		t.Fatal(err)
 	}
-	offered = waitTransfer(ctx, t, serverB, true, "small.txt", tsnet.TransferOffered)
+	offered := waitTransfer(ctx, t, serverB, true, "small.txt", tsnet.TransferOffered)
 	_ = os.WriteFile(small, []byte("v2 longer"), 0o644)
 	if err := serverB.AcceptFile(peerA, offered.ID); err != nil {
 		t.Fatal(err)

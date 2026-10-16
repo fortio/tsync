@@ -54,8 +54,6 @@ type Config struct {
 	NoAutoConnect bool
 	// FileDir is where received files are saved (current directory if empty).
 	FileDir string
-	// MaxFileSize is the maximum size of received files (DefaultMaxFileSize if 0).
-	MaxFileSize int64
 }
 
 type ConnectionStatus int

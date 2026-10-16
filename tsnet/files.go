@@ -28,7 +28,7 @@ import (
 // can abort.
 
 const (
-	FrameFileOffer  = 'O' // sender offers: id (4) + size (8) + mtime unix nano (8) + name.
+	FrameFileOffer  = 'O' // sender offers: id (4) + size (8) + mtime unix nano (8) + path (on the sender).
 	FrameFileGet    = 'G' // receiver requests the offered file: id (4).
 	FrameFileData   = 'D' // id (4) + data.
 	FrameFileEnd    = 'E' // id (4) + sha256 (32).
@@ -38,8 +38,6 @@ const (
 
 	// FileChunkSize is the size of file data frames.
 	FileChunkSize = 256 * 1024
-	// DefaultMaxFileSize is the default maximum size of files we accept to download.
-	DefaultMaxFileSize = 2 << 30
 	// MaxFileNameLen is the maximum length in bytes of a received file name.
 	MaxFileNameLen = 200
 	// maxTransfers is how many offers/finished transfers we keep (for display).
@@ -79,6 +77,7 @@ type Transfer struct {
 	Incoming bool
 	Name     string // file name (incoming: as saved once done).
 	Path     string // outgoing: source path; incoming: where it was saved once done.
+	Source   string // incoming: the path on the sender (for display only).
 	Size     int64
 	MTime    time.Time // file modification time.
 	Done     int64     // bytes transferred so far.
@@ -203,11 +202,11 @@ func (s *Server) OfferFile(path string) (int, error) {
 }
 
 func offerPayload(o *offer) []byte {
-	b := make([]byte, 20, 20+len(o.name))
+	b := make([]byte, 20, 20+len(o.path))
 	binary.BigEndian.PutUint32(b, o.id)
 	binary.BigEndian.PutUint64(b[4:], uint64(o.size)) //nolint:gosec // size is positive.
 	binary.BigEndian.PutUint64(b[12:], uint64(o.mtime.UnixNano()))
-	return append(b, o.name...)
+	return append(b, o.path...)
 }
 
 // sendLastOffer sends our last file offer (if any) to a newly linked peer.
@@ -255,15 +254,6 @@ func (s *Server) prepareDownload(peer Peer, id uint32) (*link, error) {
 	l := s.links[peer]
 	if l == nil || l.conn == nil {
 		return nil, fmt.Errorf("not linked to %s (anymore)", peer.Name)
-	}
-	maxSize := s.MaxFileSize
-	if maxSize <= 0 {
-		maxSize = DefaultMaxFileSize
-	}
-	if t.Size > maxSize {
-		err := fmt.Errorf("too large (%d > %d max)", t.Size, maxSize)
-		s.finishLocked(t, err)
-		return nil, err
 	}
 	if l.incoming[id] != nil {
 		return nil, fmt.Errorf("file %q from %s already being downloaded", t.Name, peer.Name)
@@ -510,7 +500,9 @@ func (s *Server) fileOffered(peer Peer, id uint32, payload []byte) {
 	}
 	size := int64(binary.BigEndian.Uint64(payload[0:8]))                 //nolint:gosec // checked below.
 	mtime := time.Unix(0, int64(binary.BigEndian.Uint64(payload[8:16]))) //nolint:gosec // any value is fine.
-	name := SafeFileName(string(payload[16:]))
+	source := string(payload[16:])
+	name := SafeFileName(source) // last path component only (sanitized).
+	source = sanitizeReason(payload[16:])
 	if size < 0 {
 		log.Warnf("Invalid file offer size %d from %s", size, peer.Name)
 		return
@@ -522,9 +514,9 @@ func (s *Server) fileOffered(peer Peer, id uint32, payload []byte) {
 			return // already known (eg resent on reconnect).
 		}
 	}
-	log.Warnf("%s offers file %q (%d bytes): click or press d to download", peer.Name, name, size)
+	log.Warnf("%s offers file %q (%d bytes): click or press d to download", peer.Name, source, size)
 	s.addTransferLocked(&Transfer{
-		Peer: peer, ID: id, Incoming: true, Name: name, Size: size, MTime: mtime, Start: time.Now(),
+		Peer: peer, ID: id, Incoming: true, Name: name, Source: source, Size: size, MTime: mtime, Start: time.Now(),
 	})
 }
 

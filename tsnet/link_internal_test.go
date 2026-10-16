@@ -91,6 +91,7 @@ func TestSafeFileName(t *testing.T) {
 		{"report.pdf", "report.pdf"},
 		{"../../etc/passwd", "passwd"},
 		{`C:\Users\x\evil.exe`, "evil.exe"},
+		{`C:\World of Warcraft\_classic_beta_\WTF\Config.wtf`, "Config.wtf"},
 		{"..", "file"},
 		{"", "file"},
 		{".bashrc", "_.bashrc"},
