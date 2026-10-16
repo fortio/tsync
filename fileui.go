@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,7 @@ type FilePanel struct {
 	MaxLines int
 	local    []fileLine // our offers and local errors.
 	rows     []fileLine // as last drawn (y set).
+	bars     map[transferKey]*progressbar.Bar
 }
 
 type fileLine struct {
@@ -37,7 +39,7 @@ type fileLine struct {
 }
 
 func NewFilePanel(ap *ansipixels.AnsiPixels, srv *tsnet.Server, dir string, maxLines int) *FilePanel {
-	return &FilePanel{ap: ap, srv: srv, Dir: dir, MaxLines: maxLines}
+	return &FilePanel{ap: ap, srv: srv, Dir: dir, MaxLines: maxLines, bars: make(map[transferKey]*progressbar.Bar)}
 }
 
 // DefaultDownloadDir returns ~/Downloads if it exists, the current directory otherwise.
@@ -54,20 +56,6 @@ func DefaultDownloadDir() string {
 	return "."
 }
 
-// HumanSize formats a byte count, eg 1.5 MiB.
-func HumanSize(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return sizeStr(int(n))
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit && exp < 4; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
-}
-
 // ShortPath replaces the home directory prefix by ~.
 func ShortPath(p string) string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(p, home) {
@@ -78,61 +66,51 @@ func ShortPath(p string) string {
 
 const barWidth = 20
 
-// progressBar renders a progress bar with 1/8th of a character resolution, same look as
-// fortio.org/progressbar (whose rendering isn't exported, only its building blocks), followed by the
-// percentage. Its screen width is width + 7.
-func progressBar(done, size int64, width int, color string) string {
-	frac := 1.0
-	if size > 0 {
-		frac = min(1, float64(done)/float64(size))
-	}
-	count := int(8*float64(width)*frac + 0.5)
-	full, rem := count/8, count%8
-	spaces := width - full
-	if rem > 0 {
-		spaces--
-	}
-	return color + strings.Repeat(progressbar.Full, full) + progressbar.FractionalBlocks[rem] +
-		strings.Repeat(progressbar.Space, spaces) + progressbar.Reset + fmt.Sprintf(" %5.1f%%", 100*frac)
+// transferKey identifies a transfer (for its progress bar).
+type transferKey struct {
+	peer     tsnet.Peer
+	id       uint32
+	incoming bool
 }
 
-// spinner returns the current spinner character (animated by repaints, ie progress updates).
-func spinner() string {
-	return progressbar.SpinnerChars[time.Now().UnixMilli()/100%int64(len(progressbar.SpinnerChars))]
+// bar returns the progress bar of an active transfer (kept between frames for its spinner).
+func (fp *FilePanel) bar(t tsnet.Transfer, color string) *progressbar.Bar {
+	k := transferKey{t.Peer, t.ID, t.Incoming}
+	b := fp.bars[k]
+	if b == nil {
+		cfg := progressbar.DefaultConfig()
+		cfg.Width = barWidth
+		cfg.Color = color
+		cfg.ScreenWriter = io.Discard // only used through Render().
+		b = cfg.NewBar()
+		fp.bars[k] = b
+	}
+	return b
 }
 
-// rateStr returns the transfer rate and, if not done, the estimated time left.
-func rateStr(done, size int64, elapsed time.Duration) string {
-	if done <= 0 || elapsed <= 0 {
-		return ""
+func (fp *FilePanel) activeLine(icon string, t tsnet.Transfer, color, dir string) fileLine {
+	percent := 100.
+	if t.Size > 0 {
+		percent = 100 * float64(t.Done) / float64(t.Size)
 	}
-	speed := float64(done) / elapsed.Seconds()
-	res := HumanSize(int64(speed)) + "/s"
-	if done < size {
-		left := time.Duration(float64(size-done) / speed * float64(time.Second))
-		res += ", " + progressbar.HumanDuration(left) + " left"
-	}
-	return res
-}
-
-func activeLine(icon string, t tsnet.Transfer, color, dir string) fileLine {
+	lead := icon + " " + fp.bar(t, color).Render(percent)
 	return fileLine{
 		when:  t.Start,
-		lead:  icon + " " + spinner() + progressBar(t.Done, t.Size, barWidth, color),
-		leadW: 2 + 1 + 2 + barWidth + 7,
-		text: fmt.Sprintf(" %s/%s %s · %s %s %s", HumanSize(t.Done), HumanSize(t.Size),
-			rateStr(t.Done, t.Size, time.Since(t.Start)), t.Name, dir, SanitizeName(t.Peer.Name)),
+		lead:  lead,
+		leadW: fp.ap.ScreenWidth(lead),
+		text: fmt.Sprintf(" %s · %s %s %s", progressbar.RateETA(t.Done, t.Size, time.Since(t.Start)),
+			t.Name, dir, SanitizeName(t.Peer.Name)),
 		color: tcolor.BrightBlue,
 	}
 }
 
-// doneStr is how long it took and the average speed.
+// doneStr is the size, and how long it took and the average speed.
 func doneStr(t tsnet.Transfer) string {
 	d := t.End.Sub(t.Start)
 	if d <= 0 || t.Size == 0 {
-		return ""
+		return " (" + progressbar.HumanBytes(t.Size) + ")"
 	}
-	return fmt.Sprintf(" in %s (%s)", progressbar.HumanDuration(d), rateStr(t.Size, t.Size, d))
+	return " (" + progressbar.RateETA(t.Size, t.Size, d) + ")"
 }
 
 // Offer offers the dropped file(s) to the linked peers, with feedback on errors.
@@ -145,7 +123,7 @@ func (fp *FilePanel) Offer(paths []string) {
 			line.text, line.color = fmt.Sprintf("❌ can't offer %s: %v", p, err), tcolor.BrightRed
 		} else {
 			fi, _ := os.Stat(p)
-			line.text = fmt.Sprintf("📤 offered %s (%s) to %d peer%s", p, HumanSize(fi.Size()), n, plural(n))
+			line.text = fmt.Sprintf("📤 offered %s (%s) to %d peer%s", p, progressbar.HumanBytes(fi.Size()), n, plural(n))
 			line.color = tcolor.BrightCyan
 		}
 		fp.local = append(fp.local, line)
@@ -162,23 +140,23 @@ func plural(n int) string {
 	return "s"
 }
 
-func transferLine(t tsnet.Transfer) fileLine {
+func (fp *FilePanel) transferLine(t tsnet.Transfer) fileLine {
 	tc := t
 	l := fileLine{when: t.Start}
 	peer := SanitizeName(t.Peer.Name)
 	switch {
 	case t.Incoming && t.State == tsnet.TransferOffered:
-		l.text = fmt.Sprintf("📥 %s offers %s (%s): click or press d to download", peer, t.Source, HumanSize(t.Size))
+		l.text = fmt.Sprintf("📥 %s offers %s (%s): click or press d to download", peer, t.Source, progressbar.HumanBytes(t.Size))
 		l.color, l.offer = tcolor.BrightYellow, &tc
 	case t.Incoming && t.State == tsnet.TransferActive:
-		return activeLine("📥", t, progressbar.GreenBar, "from")
+		return fp.activeLine("📥", t, progressbar.GreenBar, "from")
 	case t.Incoming && t.State == tsnet.TransferDone:
-		l.text = fmt.Sprintf("✅ %s (%s) from %s saved as %s%s", t.Name, HumanSize(t.Size), peer, ShortPath(t.Path), doneStr(t))
+		l.text = fmt.Sprintf("✅ %s from %s saved as %s%s", t.Name, peer, ShortPath(t.Path), doneStr(t))
 		l.color = tcolor.BrightGreen
 	case t.State == tsnet.TransferActive:
-		return activeLine("📤", t, progressbar.BlueBar, "to")
+		return fp.activeLine("📤", t, progressbar.BlueBar, "to")
 	case t.State == tsnet.TransferDone:
-		l.text = fmt.Sprintf("✅ %s (%s) sent to %s%s", t.Name, HumanSize(t.Size), peer, doneStr(t))
+		l.text = fmt.Sprintf("✅ %s sent to %s%s", t.Name, peer, doneStr(t))
 		l.color = tcolor.Green
 	default: // failed
 		dir := "from"
@@ -194,8 +172,17 @@ func transferLine(t tsnet.Transfer) fileLine {
 // Lines returns the (at most MaxLines, most recent) lines to show.
 func (fp *FilePanel) Lines() []fileLine {
 	lines := slices.Clone(fp.local)
+	active := make(map[transferKey]bool)
 	for _, t := range fp.srv.Transfers() {
-		lines = append(lines, transferLine(t))
+		lines = append(lines, fp.transferLine(t))
+		if t.State == tsnet.TransferActive {
+			active[transferKey{t.Peer, t.ID, t.Incoming}] = true
+		}
+	}
+	for k := range fp.bars { // forget the bars of finished transfers.
+		if !active[k] {
+			delete(fp.bars, k)
+		}
 	}
 	slices.SortStableFunc(lines, func(a, b fileLine) int { return a.when.Compare(b.when) })
 	if len(lines) > fp.MaxLines {

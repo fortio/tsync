@@ -11,30 +11,7 @@ import (
 	"fortio.org/tsync/tsnet"
 )
 
-func TestHumanSizeAndBar(t *testing.T) {
-	for _, tc := range []struct {
-		n   int64
-		out string
-	}{{0, "0 bytes"}, {1, "1 byte"}, {1023, "1023 bytes"}, {1536, "1.5 KiB"}, {5 << 20, "5.0 MiB"}, {3 << 30, "3.0 GiB"}} {
-		if got := HumanSize(tc.n); got != tc.out {
-			t.Errorf("HumanSize(%d) = %q, expected %q", tc.n, got, tc.out)
-		}
-	}
-	if got := progressBar(1, 4, 8, ""); got != "██      \x1b[0m  25.0%" {
-		t.Errorf("unexpected bar %q", got)
-	}
-	if got := progressBar(3, 16, 4, ""); got != "▊   \x1b[0m  18.8%" { // 0.75 block: 1/8th resolution.
-		t.Errorf("unexpected fractional bar %q", got)
-	}
-	if got := progressBar(0, 0, 4, ""); got != "████\x1b[0m 100.0%" {
-		t.Errorf("unexpected bar for empty file %q", got)
-	}
-	if got := rateStr(1024, 4096, time.Second); got != "1.0 KiB/s, 3s left" {
-		t.Errorf("unexpected rate %q", got)
-	}
-	if got := rateStr(0, 4096, time.Second); got != "" {
-		t.Errorf("unexpected rate for nothing done %q", got)
-	}
+func TestShortPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	if got := ShortPath(filepath.Join(home, "Downloads", "x")); got != "~"+string(filepath.Separator)+filepath.Join("Downloads", "x") {
 		t.Errorf("unexpected short path %q", got)
@@ -53,7 +30,7 @@ func TestFilePanel(t *testing.T) {
 	_ = os.WriteFile(f, make([]byte, 2048), 0o644)
 	fp.Offer([]string{f, filepath.Join(t.TempDir(), "missing")})
 	lines := fp.Lines()
-	if len(lines) != 2 || !strings.Contains(lines[0].text, "offered "+f+" (2.0 KiB) to 0 peers") ||
+	if len(lines) != 2 || !strings.Contains(lines[0].text, "offered "+f+" (2 Kb) to 0 peers") ||
 		!strings.Contains(lines[1].text, "can't offer") {
 		t.Errorf("unexpected local lines %+v", lines)
 	}
@@ -74,34 +51,44 @@ func TestFilePanel(t *testing.T) {
 	}{
 		{
 			tsnet.Transfer{Peer: peer, Incoming: true, Source: `C:\x\Config.wtf`, Size: 10, State: tsnet.TransferOffered},
-			`leno16 offers C:\x\Config.wtf (10 bytes): click or press d to download`,
+			`leno16 offers C:\x\Config.wtf (10 b): click or press d to download`,
 		},
 		{
 			tsnet.Transfer{
 				Peer: peer, Incoming: true, Name: "a.bin", Size: 2048, Done: 1024, State: tsnet.TransferActive,
 				Start: time.Now().Add(-time.Second),
 			},
-			"s left · a.bin from leno16",
+			"1 Kb out of 2 Kb, 1s elapsed",
 		},
 		{
 			tsnet.Transfer{
 				Peer: peer, Incoming: true, Name: "a.bin", Size: 2048, Path: "/tmp/a.bin", State: tsnet.TransferDone,
 				Start: time.Unix(10, 0), End: time.Unix(12, 0),
 			},
-			"a.bin (2.0 KiB) from leno16 saved as /tmp/a.bin in 2s (1.0 KiB/s)",
+			"a.bin from leno16 saved as /tmp/a.bin (2 Kb in 2s, 1 Kb/s)",
 		},
-		{tsnet.Transfer{Peer: peer, Name: "b", Size: 4, Done: 4, State: tsnet.TransferActive}, "4 bytes/4 bytes 0 bytes/s · b to leno16"},
-		{tsnet.Transfer{Peer: peer, Name: "b", Size: 4, State: tsnet.TransferDone}, "b (4 bytes) sent to leno16"},
+		{tsnet.Transfer{Peer: peer, Name: "b", Size: 4, Done: 4, State: tsnet.TransferActive}, "· b to leno16"},
+		{tsnet.Transfer{Peer: peer, Name: "b", Size: 4, State: tsnet.TransferDone}, "b sent to leno16 (4 b)"},
 		{tsnet.Transfer{Peer: peer, Name: "b", State: tsnet.TransferFailed, Err: "boom"}, "b to leno16: boom"},
 		{tsnet.Transfer{Peer: peer, Incoming: true, Name: "c", State: tsnet.TransferFailed, Err: "bad"}, "c from leno16: bad"},
 	} {
-		l := transferLine(tc.tr)
+		l := fp.transferLine(tc.tr)
 		if !strings.Contains(l.text, tc.expect) {
 			t.Errorf("transferLine(%v) = %q, expected %q", tc.tr.State, l.text, tc.expect)
+		}
+		if tc.tr.State == tsnet.TransferActive && (!strings.Contains(l.lead, "%") || l.leadW < barWidth) {
+			t.Errorf("active line should have a progress bar lead: %q (%d)", l.lead, l.leadW)
 		}
 		if (l.offer != nil) != (tc.tr.State == tsnet.TransferOffered) {
 			t.Errorf("offer set wrong for %v", tc.tr.State)
 		}
+	}
+	if len(fp.bars) != 2 { // the 2 active transfers above.
+		t.Errorf("expected 2 progress bars, got %d", len(fp.bars))
+	}
+	fp.Lines() // no active transfers on the server: bars are forgotten.
+	if len(fp.bars) != 0 {
+		t.Errorf("expected bars of finished transfers to be removed, got %d", len(fp.bars))
 	}
 	// Max lines kept.
 	for range 10 {

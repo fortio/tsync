@@ -66,7 +66,7 @@ wait_for B "second    line red osc52:end"
 wait_for B "… (+3 lines)"
 
 $T send-keys -t B c
-wait_for B "Copied 57 bytes from e2eA to the clipboard"
+wait_for B "Copied 57 b from e2eA to the clipboard"
 expected=$(printf 'hello from A\nsecond\tline red osc52:end\nthird\nfourth\nfifth')
 copied=$($T show-buffer)
 if [ "$copied" != "$expected" ]; then
@@ -94,14 +94,14 @@ drop() {
 	$T send-keys -t A -H $( (printf '\033[200~'"'"; printf '%s' "$OUT/src/My File.bin"; printf "' "'\033[201~') | od -An -tx1 )
 }
 drop
-wait_for A "offered $OUT/src/My File.bin (585.9 KiB) to 1 peer"
-wait_for B "e2eA offers $OUT/src/My File.bin (585.9 KiB): click or press d"
+wait_for A "offered $OUT/src/My File.bin (585.9 Kb) to 1 peer"
+wait_for B "e2eA offers $OUT/src/My File.bin (585.9 Kb): click or press d"
 if [ -n "$(ls -A "$OUT/dlB")" ]; then
 	fail "nothing should be written before accepting: $(ls -A "$OUT/dlB")"
 fi
 $T send-keys -t B d
-wait_for B "My File.bin (585.9 KiB) from e2eA saved as"
-wait_for A "My File.bin (585.9 KiB) sent to e2eB"
+wait_for B "My File.bin from e2eA saved as"
+wait_for A "My File.bin sent to e2eB"
 cmp "$OUT/src/My File.bin" "$OUT/dlB/My File.bin" || fail "downloaded file differs"
 drop
 wait_for B "click or press d" # new offer.
