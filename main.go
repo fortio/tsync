@@ -12,6 +12,7 @@ import (
 
 	"fortio.org/cli"
 	"fortio.org/log"
+	"fortio.org/progressbar"
 	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
@@ -114,9 +115,15 @@ func DarkGray(s string) string {
 // CheckFiles checks that all the files can be offered.
 func CheckFiles(files []string) error {
 	for _, f := range files {
-		if _, err := tsnet.CheckFile(f); err != nil {
-			return err
+		fi, err := tsnet.CheckFile(f)
+		if err != nil {
+			return fmt.Errorf("%q: %w", f, err)
 		}
+		size := progressbar.HumanBytes(fi.Size())
+		if fi.Size() >= 1024 {
+			size += fmt.Sprintf(" (%d bytes)", fi.Size())
+		}
+		log.LogVf("File %q ok to offer: %s", f, size)
 	}
 	return nil
 }

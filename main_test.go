@@ -88,3 +88,18 @@ func TestCheckFilesAndDownloadDir(t *testing.T) {
 		t.Errorf("unexpected download dirs")
 	}
 }
+
+func TestCheckFilesErrors(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		path, msg string
+	}{
+		{filepath.Join(dir, "missing"), "missing\": "},
+		{dir, "not a regular file"},
+	} {
+		err := CheckFiles([]string{tc.path})
+		if err == nil || !strings.Contains(err.Error(), tc.msg) || strings.Contains(err.Error(), "stat ") {
+			t.Errorf("CheckFiles(%q) error %v, expected %q (without stat)", tc.path, err, tc.msg)
+		}
+	}
+}

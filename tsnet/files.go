@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -159,20 +160,29 @@ func (s *Server) finishLocked(t *Transfer, err error) {
 }
 
 // CheckFile checks that path is a regular file we can read (that can be offered).
+// The error doesn't include the path (eg "no such file or directory").
 func CheckFile(path string) (os.FileInfo, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, pathErr(err)
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s: not a regular file (directories aren't supported yet)", path)
+		return nil, errors.New("not a regular file (directories aren't supported yet)")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, pathErr(err)
 	}
 	_ = f.Close()
 	return fi, nil
+}
+
+// pathErr returns the underlying error of a *fs.PathError (without the operation and path).
+func pathErr(err error) error {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return pe.Err
+	}
+	return err
 }
 
 // OfferFile offers the file to all the linked peers, and to peers linked later (our last
