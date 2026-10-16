@@ -65,9 +65,11 @@ func readFrame(r io.Reader) ([]byte, error) {
 
 // weDialLocked returns true if we are the side that dials the TCP link to peer.
 // Deterministic on both sides and independent of who initiated the handshake.
+// (Run ids and not ports, which can differ through NAT.) If that dial fails, we ask the
+// peer to dial us instead (eg we can't reach a NAT'ed VM but it can reach us).
 func (s *Server) weDialLocked(peer Peer, peerData PeerData) bool {
-	ours := fmt.Sprintf("%s %q %d", s.idStr, s.Name, s.ourSendAddr.Port)
-	theirs := fmt.Sprintf("%s %q %d", peer.PublicKey, peer.Name, peerData.Port)
+	ours := fmt.Sprintf("%s %q %s", s.idStr, s.Name, s.runID)
+	theirs := fmt.Sprintf("%s %q %s", peer.PublicKey, peer.Name, peerData.RunID)
 	return ours < theirs
 }
 
@@ -119,15 +121,40 @@ func (s *Server) startDialLocked(peer Peer, peerData PeerData, l *link) {
 		time.AfterFunc(2*linkHelloTimeout, func() { s.linkTimeout(peer, l) })
 		return
 	}
+	s.goDialLocked(peer, l, false)
+}
+
+// goDialLocked starts dialing the peer's TCP link. fallback is when the peer asked us to (its dial failed).
+func (s *Server) goDialLocked(peer Peer, l *link, fallback bool) {
 	if s.ctx == nil || s.ctx.Err() != nil {
 		return
 	}
 	addr := net.JoinHostPort(peer.IP, strconv.Itoa(l.tcpPort))
+	if s.testDialAddr != nil {
+		addr = s.testDialAddr(addr, fallback)
+	}
 	s.wg.Add(1)
-	go s.dial(s.ctx, peer, l, addr)
+	go s.dial(s.ctx, peer, l, addr, fallback)
 }
 
-func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string) {
+// handleDialMe handles the peer's request to dial it (its dial to us failed).
+func (s *Server) handleDialMe(from *net.UDPAddr, fromName, toName string) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	peer, peerData, _, ok := s.senderLocked(from, fromName, toName)
+	if !ok {
+		return
+	}
+	l := s.links[peer]
+	if peerData.Status != Connected || l == nil || l.session == nil || l.conn != nil {
+		log.Warnf("Ignoring dial request from %s in state %v", peer.Name, peerData.Status)
+		return
+	}
+	log.Infof("%s couldn't reach us, dialing it instead", peer.Name)
+	s.goDialLocked(peer, l, true)
+}
+
+func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string, fallback bool) {
 	defer s.wg.Done()
 	log.Infof("Dialing TCP link to %s at %s", peer.Name, addr)
 	dialer := net.Dialer{Timeout: linkDialTimeout}
@@ -137,11 +164,16 @@ func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string) {
 		err = writeFrame(conn, l.session, FrameHello, nil)
 	}
 	if err != nil {
-		log.Errf("TCP link to %s (%s) failed: %v", peer.Name, addr, err)
 		if conn != nil {
 			_ = conn.Close()
 		}
-		s.linkFailed(peer, l)
+		if fallback {
+			log.Errf("TCP link to %s (%s) failed: %v", peer.Name, addr, err)
+			s.linkFailed(peer, l)
+			return
+		}
+		log.Warnf("TCP link to %s (%s) failed: %v - asking it to dial us instead", peer.Name, addr, err)
+		s.askDialMe(peer, l)
 		return
 	}
 	if !s.attach(peer, l, conn) {
@@ -152,12 +184,29 @@ func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string) {
 	s.readLoop(ctx, peer, l, conn)
 }
 
-// attach sets the connection on the link if it is still current.
-func (s *Server) attach(peer Peer, l *link, conn net.Conn) bool {
+// askDialMe asks the peer to dial us, and gives up if it didn't in time.
+func (s *Server) askDialMe(peer Peer, l *link) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if s.links[peer] != l {
-		log.Infof("Stale TCP link to %s (newer handshake), closing", peer.Name)
+		return
+	}
+	peerData, ok := s.Peers.Get(peer)
+	if !ok {
+		return
+	}
+	if err := s.sendDirect(peer, peerData, fmt.Sprintf(DialMeMessageFormat, s.Name, peer.Name)); err != nil {
+		log.Errf("Failed to ask %s to dial us: %v", peer.Name, err)
+	}
+	time.AfterFunc(2*linkHelloTimeout, func() { s.linkTimeout(peer, l) })
+}
+
+// attach sets the connection on the link if it is still current (and not already up).
+func (s *Server) attach(peer Peer, l *link, conn net.Conn) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.links[peer] != l || l.conn != nil {
+		log.Infof("Stale or duplicate TCP link to %s, closing", peer.Name)
 		_ = conn.Close()
 		return false
 	}
@@ -245,7 +294,7 @@ func (s *Server) matchHello(remoteIP string, frame []byte, conn net.Conn) (Peer,
 			continue
 		}
 		peerData, ok := s.Peers.Get(peer)
-		if !ok || peerData.Status != Connected || s.weDialLocked(peer, peerData) {
+		if !ok || peerData.Status != Connected { // either side may dial (fallback when one can't).
 			continue
 		}
 		plain, err := l.session.Open(frame)

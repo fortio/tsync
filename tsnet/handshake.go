@@ -61,12 +61,13 @@ func (s ConnectionStatus) String() string {
 }
 
 // linkContext is the handshake context, identical on both sides. It includes both
-// UDP ports, which are different for each run, so a signed ephemeral key captured
-// from a previous run can't be replayed (eg by someone advertising the peer's
-// public key from another address, as discovery itself isn't authenticated).
+// run ids, which are random for each run, so a signed ephemeral key captured from a
+// previous run can't be replayed (eg by someone advertising the peer's public key
+// from another address, as discovery itself isn't authenticated). Run ids rather
+// than ports so it works through NAT (eg a VM, where the port we see isn't theirs).
 func (s *Server) linkContext(peer Peer, peerData PeerData) string {
-	ours := fmt.Sprintf("%q:%d", s.Name, s.ourSendAddr.Port)
-	theirs := fmt.Sprintf("%q:%d", peer.Name, peerData.Port)
+	ours := fmt.Sprintf("%q:%s", s.Name, s.runID)
+	theirs := fmt.Sprintf("%q:%s", peer.Name, peerData.RunID)
 	if theirs < ours {
 		ours, theirs = theirs, ours
 	}
@@ -239,6 +240,10 @@ func (s *Server) handleDirectMessage(buf []byte, from *net.UDPAddr) {
 	}
 	if n, err := fmt.Sscanf(msgStr, AcceptMessageFormat, &fromName, &toName, &tcpPort, &arg); err == nil && n == 4 {
 		s.handleAccept(from, fromName, toName, tcpPort, arg)
+		return
+	}
+	if n, err := fmt.Sscanf(msgStr, DialMeMessageFormat, &fromName, &toName); err == nil && n == 2 {
+		s.handleDialMe(from, fromName, toName)
 		return
 	}
 	if n, err := fmt.Sscanf(msgStr, RejectMessageFormat, &fromName, &toName, &arg); err == nil && n == 3 {

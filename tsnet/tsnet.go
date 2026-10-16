@@ -4,6 +4,8 @@ package tsnet
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -106,8 +108,12 @@ type Server struct {
 	offers     map[uint32]*offer // our recent offers, by id.
 	// resolved Config.Peers
 	staticPeers []*net.UDPAddr
-	lastOffer   *offer        // also offered to newly linked peers.
-	changes     atomic.Uint64 // OnChange version.
+	// random id of this run, in our discovery messages (handshake context, restart detection).
+	runID string
+	// testDialAddr if set changes the address we dial (tests).
+	testDialAddr func(addr string, fallback bool) string
+	lastOffer    *offer        // also offered to newly linked peers.
+	changes      atomic.Uint64 // OnChange version.
 	// TCP links
 	tcpListen *net.TCPListener
 	tcpPort   int
@@ -131,6 +137,7 @@ type PeerData struct {
 	Epoch     int32
 	LastSeen  time.Time
 	Status    ConnectionStatus
+	RunID     string // random id of the peer's current run (from its discovery messages).
 	// Last clipboard received from that peer.
 	Clip     string
 	ClipTime time.Time
@@ -152,6 +159,7 @@ func (c *Config) NewServer() *Server {
 
 func (s *Server) Start(ctx context.Context) error {
 	s.idStr = s.Identity.PublicKeyToString()
+	s.runID = newRunID()
 	var err error
 	if s.Name == "" {
 		s.Name, err = os.Hostname()
@@ -402,13 +410,14 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 
 // handleDiscovery processes a discovery message, received by multicast or directly (unicast).
 func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
-	name, pubKey, theirEpoch, err := s.MCastMessageDecode(buf)
+	d, err := s.MCastMessageDecode(buf)
 	if err != nil {
 		log.Errf("Error decoding UDP packet %q from %v: %v", buf, addr, err)
 		return
 	}
-	data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now()}
-	peer := Peer{Name: name, IP: addr.IP.String(), PublicKey: pubKey}
+	theirEpoch := d.Epoch
+	data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now(), RunID: d.RunID}
+	peer := Peer{Name: d.Name, IP: addr.IP.String(), PublicKey: d.PublicKey}
 	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
 	if peer == us {
 		if theirEpoch <= s.epoch.Load() {
@@ -429,15 +438,16 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		data.Status = v.Status
 		data.Clip = v.Clip
 		data.ClipTime = v.ClipTime
-		// Check if this is an updated port
-		if v.Port != data.Port {
-			log.Infof("Peer %q port changed from %d to %d", peer, v.Port, data.Port)
+		// Check if this is an updated port or a restarted peer.
+		if v.Port != data.Port || v.RunID != data.RunID {
+			log.Infof("Peer %q restarted or port changed: port %d -> %d, run %q -> %q",
+				peer, v.Port, data.Port, v.RunID, data.RunID)
 			data.Status = NotLinked
 			src := Source{IP: peer.IP, Port: v.Port} // old source to delete
 			s.Sources.Delete(src)
 			src.Port = data.Port
 			s.Sources.Set(src, peer)
-			s.dropLinkLocked(peer) // port change is also how we detect a restarted peer.
+			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
 			s.expireOffersLocked(peer)
 		}
@@ -509,11 +519,18 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 }
 
 const (
-	DiscoveryMessageFormat = "tsync1 %q %s e %d"    // name, public key, epoch
-	ConnectMessageFormat   = "connect1 %q %q %d %s" // from_name, target_name, tcp link port, signed ephemeral key
-	AcceptMessageFormat    = "accept1 %q %q %d %s"  // from_name, target_name, tcp link port, signed ephemeral key
-	RejectMessageFormat    = "reject1 %q %q %q"     // from_name, target_name, reason
+	DiscoveryMessageFormat = "tsync1 %q %s e %d r %s" // name, public key, epoch, run id
+	ConnectMessageFormat   = "connect1 %q %q %d %s"   // from_name, target_name, tcp link port, signed ephemeral key
+	AcceptMessageFormat    = "accept1 %q %q %d %s"    // from_name, target_name, tcp link port, signed ephemeral key
+	DialMeMessageFormat    = "dialme1 %q %q"          // from_name, target_name: our dial failed, please dial us.
+	RejectMessageFormat    = "reject1 %q %q %q"       // from_name, target_name, reason
 )
+
+func newRunID() string {
+	b := make([]byte, 8)
+	_, _ = crand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
 
 // discoveryPrefix is the start of DiscoveryMessageFormat.
 const discoveryPrefix = "tsync1 "
@@ -522,7 +539,7 @@ const discoveryPrefix = "tsync1 "
 // static peers and to the peers we know: when multicast only works one way (eg a NAT'ed
 // VM sees the host but not the other way around) or not at all, they still discover us.
 func (s *Server) directDiscovery(epoch int32) {
-	payload := []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch))
+	payload := []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID))
 	targets := slices.Clone(s.staticPeers)
 	for peer, data := range s.Peers.All() {
 		targets = append(targets, &net.UDPAddr{IP: net.ParseIP(peer.IP), Port: data.Port})
@@ -535,26 +552,32 @@ func (s *Server) directDiscovery(epoch int32) {
 }
 
 func (s *Server) MCastMessageSend(epoch int32) error {
-	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch)
+	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID)
 	_, err := s.dualUDPSock.WriteToUDP([]byte(payload), s.destAddr)
 	return err
 }
 
-func (s *Server) MCastMessageDecode(buf []byte) (string, string, int32, error) {
-	var name string
-	var pubKeyStr string
-	var epoch int32
-	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat, &name, &pubKeyStr, &epoch)
-	if err != nil {
-		return "", "", 0, err
+// Discovery is a decoded discovery message.
+type Discovery struct {
+	Name      string
+	PublicKey string
+	Epoch     int32
+	RunID     string // empty for older versions.
+}
+
+func (s *Server) MCastMessageDecode(buf []byte) (Discovery, error) {
+	var d Discovery
+	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat, &d.Name, &d.PublicKey, &d.Epoch, &d.RunID)
+	if n < 3 { // older versions don't have the run id.
+		if err == nil {
+			err = fmt.Errorf("could not decode message %q", string(buf))
+		}
+		return d, err
 	}
-	if n != 3 {
-		return "", "", 0, fmt.Errorf("could not decode message %q", string(buf))
+	if err = ValidateName(d.Name); err != nil {
+		return d, err
 	}
-	if err = ValidateName(name); err != nil {
-		return "", "", 0, err
-	}
-	return name, pubKeyStr, epoch, nil
+	return d, nil
 }
 
 // MaxNameLen is the maximum length in bytes of a peer name.
