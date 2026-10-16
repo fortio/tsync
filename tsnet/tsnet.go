@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"fortio.org/log"
 	"fortio.org/smap"
@@ -129,6 +131,9 @@ func (s *Server) Start(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+	}
+	if err = ValidateName(s.Name); err != nil {
+		return err
 	}
 	if s.BaseBroadcastInterval <= 0 {
 		s.BaseBroadcastInterval = DefaultBroadcastInterval
@@ -473,7 +478,30 @@ func (s *Server) MCastMessageDecode(buf []byte) (string, string, int32, error) {
 	if n != 3 {
 		return "", "", 0, fmt.Errorf("could not decode message %q", string(buf))
 	}
+	if err = ValidateName(name); err != nil {
+		return "", "", 0, err
+	}
 	return name, pubKeyStr, epoch, nil
+}
+
+// MaxNameLen is the maximum length in bytes of a peer name.
+const MaxNameLen = 64
+
+// ValidateName checks that a peer name is non empty, at most MaxNameLen bytes of valid
+// UTF-8 without control characters (so it's safe to display, eg in a terminal).
+func ValidateName(name string) error {
+	if name == "" || len(name) > MaxNameLen {
+		return fmt.Errorf("invalid name length %d (must be 1-%d bytes)", len(name), MaxNameLen)
+	}
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("invalid name %q: not valid UTF-8", name)
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("invalid name %q: contains control characters", name)
+		}
+	}
+	return nil
 }
 
 // PeerLess sort function for smap.AllSorted.

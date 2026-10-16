@@ -57,7 +57,7 @@ var alignment = []ansipixels.Alignment{
 	ansipixels.Right,  // Human Hash
 }
 
-func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
+func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData, linked bool) []string {
 	idxStr := strconv.Itoa(idx)
 	switch peerData.Status {
 	case tsnet.NotLinked:
@@ -71,9 +71,13 @@ func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData) []string {
 	case tsnet.Connected:
 		idxStr = tcolor.Inverse + Color16(tcolor.BrightGreen, idxStr)
 	}
+	name := SanitizeName(peer.Name)
+	if linked {
+		name = "🔗 " + name
+	}
 	return []string{
 		idxStr,
-		Color16(tcolor.BrightCyan, peer.Name),
+		Color16(tcolor.BrightCyan, name),
 		Color16(tcolor.BrightGreen, peer.IP),
 		Color16f(tcolor.Blue, "%d", peerData.Port),
 		Color16(tcolor.BrightYellow, peerData.HumanHash),
@@ -104,8 +108,100 @@ func DarkGray(s string) string {
 	return Color16(tcolor.DarkGray, s)
 }
 
+// SendPastes sends the completed pastes to the linked peers, returns true if any was sent.
+func SendPastes(srv *tsnet.Server, clips *ClipPanel, pastes []Paste) bool {
+	sent := false
+	for _, p := range pastes {
+		if p.Truncated {
+			log.Errf("Paste too large (over %s), not sent", sizeStr(tsnet.MaxClipSize))
+			continue
+		}
+		text := SanitizeClip(p.Text)
+		n, err := srv.SendClip(text)
+		if err != nil {
+			log.Errf("Error sending clipboard: %v", err)
+		}
+		log.Infof("Sent %s to %d peers", sizeStr(len(text)), n)
+		clips.SetOurs(text, n)
+		sent = true
+	}
+	return sent
+}
+
+// TopArea is the fixed (non log) top part of the screen: peers table, clip boxes and help/separator line.
+type TopArea struct {
+	ap         *ansipixels.AnsiPixels
+	srv        *tsnet.Server
+	logArea    *LogArea
+	clips      *ClipPanel
+	fixedLines [][]string // our line and header.
+	help       string
+}
+
+// Draw draws the top area for the given peers and returns the table width.
+func (t *TopArea) Draw(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) int {
+	ap := t.ap
+	lines := make([][]string, 0, len(peers)+len(t.fixedLines))
+	lines = append(lines, t.fixedLines...)
+	for i, kv := range peers {
+		lines = append(lines, PeerLine(i+1, kv.Key, kv.Value, t.srv.Linked(kv.Key)))
+	}
+	tableHeight := len(lines) + 2 // + borders.
+	boxes := t.clips.Layout(peers, ap.H-MinLogLines-tableHeight-1)
+	boxesHeight := 0
+	for _, b := range boxes {
+		boxesHeight += b.height()
+	}
+	// table + clip boxes + separator line.
+	top := t.logArea.SetTop(tableHeight + boxesHeight + 1)
+	for y := range top {
+		ap.MoveCursor(0, y)
+		ap.ClearEndOfLine()
+	}
+	tableWidth := ap.WriteTable(0, alignment, 1, lines, ansipixels.BorderOuterColumns)
+	t.clips.Draw(tableHeight, boxes)
+	if top > 0 {
+		ap.MoveCursor(0, top-1)
+		h, hw := TruncateRightToFit(ap, t.help, ap.W-4)
+		left := (ap.W - hw) / 2
+		ap.WriteString(DarkGray(strings.Repeat("─", left) + h + strings.Repeat("─", ap.W-left-hw)))
+	}
+	return tableWidth
+}
+
+// HandleKey handles a key press, returns false to exit.
+func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, peers []smap.KV[tsnet.Peer, tsnet.PeerData]) bool {
+	switch c {
+	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		connectToPeerIdx := int(c - '0')
+		maxPeerIdx := len(peers)
+		if connectToPeerIdx <= maxPeerIdx {
+			peer := peers[connectToPeerIdx-1]
+			InitiatePeerConnection(srv, peer.Key, peer.Value)
+		} else {
+			log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
+		}
+	case 'c':
+		if box, ok := clips.Latest(); ok {
+			clips.Copy(box)
+		} else {
+			log.Warnf("No received clipboard to copy yet")
+		}
+	case 'q', 'Q', 3: // Ctrl-C
+		log.Infof("Exiting on %q", c)
+		return false
+	default:
+		log.Infof("Input %q", c)
+	}
+	return true
+}
+
 func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.PeerData) {
-	log.Infof("Initiating connection to peer %q at %s:%d", peer.Name, peer.IP, peerData.Port)
+	if peerData.Status == tsnet.ReceivedConn {
+		log.Infof("Accepting connection from peer %q at %s:%d (%s)", peer.Name, peer.IP, peerData.Port, peerData.HumanHash)
+	} else {
+		log.Infof("Initiating connection to peer %q at %s:%d", peer.Name, peer.IP, peerData.Port)
+	}
 	if connErr := srv.ConnectToPeer(peer); connErr != nil {
 		log.Errf("Failed to connect to peer %s: %v", peer.Name, connErr)
 	}
@@ -137,15 +233,18 @@ func Main() int {
 	fTarget := flag.String("target", tsnet.DefaultTarget, "Test target udp ip:port to use to find the right interface and local ip")
 	fInterval := flag.Duration("interval", tsnet.DefaultBroadcastInterval,
 		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
+	fClipLines := flag.Int("clip-lines", 3, "Max number of lines shown for each clipboard box")
 	cli.Main()
 	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
 		return 1 // error already logged
 	}
 	ap.MouseClickOn()
+	ap.SetBracketedPasteMode(true)
 	logArea := NewLogArea(ap)
 	defer func() {
 		logArea.Reset()
+		ap.SetBracketedPasteMode(false)
 		ap.MouseClickOff()
 		ap.Restore()
 	}()
@@ -172,7 +271,7 @@ func Main() int {
 	}
 	defer srv.Stop()
 	log.Infof("Started tsync with name %q", srv.Name)
-	log.Infof("Press Q, q or Ctrl-C to stop")
+	log.Infof("Paste to send to connected peers, Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
 	ourAddress := srv.OurAddress()
@@ -192,17 +291,28 @@ func Main() int {
 	}
 	var peersSnapshot []smap.KV[tsnet.Peer, tsnet.PeerData]
 	tableWidth := 0
+	clips := NewClipPanel(ap, *fClipLines)
 	ap.OnMouse = func() {
 		if !ap.LeftClick() || !ap.MouseRelease() {
 			return
 		}
 		if peerLine, ok := MouseInsideBox(ap, tableWidth, len(peersSnapshot)); ok {
 			peer := peersSnapshot[peerLine]
-			log.Infof("Left click (release) at %d,%d -> line %d - connecting to %q", ap.Mx, ap.My, peerLine+1, peer.Key.Name)
+			log.Infof("Left click (release) at %d,%d -> line %d - %q", ap.Mx, ap.My, peerLine+1, peer.Key.Name)
 			InitiatePeerConnection(srv, peer.Key, peer.Value)
+		} else if box, ok := clips.Clicked(ap.My); ok {
+			clips.Copy(box)
 		} else {
 			log.Infof("Left click (release) at %d,%d -> outside peer list", ap.Mx, ap.My)
 		}
+	}
+	// We decode mouse events ourselves, outside of pastes.
+	ap.NoDecode = true
+	paste := &PasteCollector{MaxSize: tsnet.MaxClipSize + 1}
+	top := &TopArea{
+		ap: ap, srv: srv, logArea: logArea, clips: clips,
+		fixedLines: [][]string{ourLine, headerLine},
+		help:       " paste: send · click box or c: copy · click or 1-9: connect/accept · q: quit ",
 	}
 	err = ap.FPSTicks(func() bool {
 		// Log output scrolls in its own area (see LogArea) so we only need to refresh
@@ -214,6 +324,12 @@ func Main() int {
 			}
 			return false
 		}
+		other, pastes := paste.Feed(ap.Data)
+		ap.Data = other
+		ap.MouseDecodeAll()
+		if SendPastes(srv, clips, pastes) {
+			prev = ^uint64(0) // force repaint
+		}
 		curVersion := version.Load()
 		if curVersion != prev {
 			if !logHadOutput {
@@ -222,24 +338,7 @@ func Main() int {
 			prev = curVersion
 			peersSnapshot = srv.Peers.KeysValuesSnapshot()
 			slices.SortFunc(peersSnapshot, tsnet.PeerKVSort)
-			lines := make([][]string, 0, len(peersSnapshot)+2)
-			lines = append(lines, ourLine, headerLine)
-			idx := 1
-			for _, kv := range peersSnapshot {
-				lines = append(lines, PeerLine(idx, kv.Key, kv.Value))
-				idx++
-			}
-			// table + borders + separator line.
-			top := logArea.SetTop(len(lines) + 3)
-			for y := range top {
-				ap.MoveCursor(0, y)
-				ap.ClearEndOfLine()
-			}
-			tableWidth = ap.WriteTable(0, alignment, 1, lines, ansipixels.BorderOuterColumns)
-			if top > 0 {
-				ap.MoveCursor(0, top-1)
-				ap.WriteString(DarkGray(strings.Repeat("─", ap.W)))
-			}
+			tableWidth = top.Draw(peersSnapshot)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()
 		} else if logHadOutput {
@@ -248,24 +347,7 @@ func Main() int {
 		if len(ap.Data) == 0 {
 			return true
 		}
-		c := ap.Data[0]
-		switch c {
-		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
-			connectToPeerIdx := int(c - '0')
-			maxPeerIdx := len(peersSnapshot)
-			if connectToPeerIdx <= maxPeerIdx {
-				peer := peersSnapshot[connectToPeerIdx-1]
-				InitiatePeerConnection(srv, peer.Key, peer.Value)
-			} else {
-				log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
-			}
-		case 'q', 'Q', 3: // Ctrl-C
-			log.Infof("Exiting on %q", c)
-			return false
-		default:
-			log.Infof("Input %q", c)
-		}
-		return true
+		return HandleKey(ap.Data[0], srv, clips, peersSnapshot)
 	})
 	if err != nil {
 		log.Infof("Exiting on %v", err)
