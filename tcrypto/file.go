@@ -100,6 +100,9 @@ func (s *Storage) LoadTrusted() (map[string]string, error) {
 			continue
 		}
 		pubKey, quotedName, _ := strings.Cut(line, " ")
+		if err = ValidatePublicKeyString(pubKey); err != nil {
+			return nil, NewEncodingErr(fmt.Sprintf("%s line %d: invalid public key %q: %v", ValidatedPublicKeysFile, i+1, pubKey, err))
+		}
 		name, err := strconv.Unquote(quotedName)
 		if err != nil {
 			return nil, NewEncodingErr(fmt.Sprintf("%s line %d: invalid name %q: %v", ValidatedPublicKeysFile, i+1, quotedName, err))
@@ -112,6 +115,9 @@ func (s *Storage) LoadTrusted() (map[string]string, error) {
 // AddTrusted appends a peer public key (and its current name) to the trusted keys file.
 // Callers should check [Storage.LoadTrusted] first to avoid duplicates (last one wins on load).
 func (s *Storage) AddTrusted(pubKey, name string) error {
+	if err := ValidatePublicKeyString(pubKey); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(path.Join(s.Dir, ValidatedPublicKeysFile),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {

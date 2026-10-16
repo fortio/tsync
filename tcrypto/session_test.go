@@ -1,13 +1,32 @@
 package tcrypto_test
 
 import (
+	"crypto/ed25519"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"fortio.org/tsync/tcrypto"
 )
 
+const testContext = "connect1 alice>bob"
+
 func newTestSessions(t *testing.T) (*tcrypto.Session, *tcrypto.Session) {
+	t.Helper()
+	aliceID, bobID, aliceEph, bobEph := newTestKeys(t)
+	alice, err := aliceID.VerifiedSession(aliceEph, bobID.SignEphemeral(bobEph, testContext), testContext, bobID.PublicKey)
+	if err != nil {
+		t.Fatalf("alice session: %v", err)
+	}
+	bob, err := bobID.VerifiedSession(bobEph, aliceID.SignEphemeral(aliceEph, testContext), testContext, aliceID.PublicKey)
+	if err != nil {
+		t.Fatalf("bob session: %v", err)
+	}
+	return alice, bob
+}
+
+func newTestKeys(t *testing.T) (*tcrypto.Identity, *tcrypto.Identity, *tcrypto.Ephemeral, *tcrypto.Ephemeral) {
 	t.Helper()
 	aliceID, err := tcrypto.NewIdentity()
 	if err != nil {
@@ -25,15 +44,7 @@ func newTestSessions(t *testing.T) (*tcrypto.Session, *tcrypto.Session) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alice, err := tcrypto.NewSession(aliceEph, bobEph.PublicKey, aliceID.PublicKey, bobID.PublicKey)
-	if err != nil {
-		t.Fatalf("alice session: %v", err)
-	}
-	bob, err := tcrypto.NewSession(bobEph, aliceEph.PublicKey, bobID.PublicKey, aliceID.PublicKey)
-	if err != nil {
-		t.Fatalf("bob session: %v", err)
-	}
-	return alice, bob
+	return aliceID, bobID, aliceEph, bobEph
 }
 
 func expectDecryptErr(t *testing.T, msg string, err error) {
@@ -92,20 +103,30 @@ func TestSessionFailures(t *testing.T) {
 	expectDecryptErr(t, "other session", err)
 }
 
-func TestSessionSameEphemeral(t *testing.T) {
-	id, err := tcrypto.NewIdentity()
-	if err != nil {
-		t.Fatal(err)
+func TestVerifiedSessionFailures(t *testing.T) {
+	aliceID, bobID, aliceEph, bobEph := newTestKeys(t)
+	bobSigned := bobID.SignEphemeral(bobEph, testContext)
+	for _, tc := range []struct {
+		name    string
+		signed  string
+		context string
+		theirID ed25519.PublicKey
+	}{
+		{"wrong identity (mitm)", aliceID.SignEphemeral(bobEph, testContext), testContext, bobID.PublicKey},
+		{"wrong context", bobSigned, "accept1 bob>alice", bobID.PublicKey},
+		{"tampered", bobSigned[:len(bobSigned)-3] + "AAA", testContext, bobID.PublicKey},
+		{"bad identity size", bobSigned, testContext, bobID.PublicKey[:5]},
+		{"not an ephemeral key", bobID.SignMessage([]byte("hello")), testContext, bobID.PublicKey},
+		// reflection: our own signed ephemeral sent back to us.
+		{"reflected", aliceID.SignEphemeral(aliceEph, testContext), testContext, aliceID.PublicKey},
+	} {
+		_, err := aliceID.VerifiedSession(aliceEph, tc.signed, tc.context, tc.theirID)
+		if err == nil {
+			t.Errorf("%s: expected error", tc.name)
+			continue
+		}
+		t.Logf("%s: got expected error %v", tc.name, err)
 	}
-	eph, err := tcrypto.NewEphemeralKeys()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = tcrypto.NewSession(eph, eph.PublicKey, id.PublicKey, id.PublicKey)
-	if err == nil {
-		t.Fatalf("expected error for reflected ephemeral key")
-	}
-	t.Logf("got expected error %v", err)
 }
 
 func TestTrustedStorage(t *testing.T) {
@@ -127,6 +148,11 @@ func TestTrustedStorage(t *testing.T) {
 	if err = s.AddTrusted(k1, "host1-renamed"); err != nil {
 		t.Fatal(err)
 	}
+	for _, bad := range []string{"", "p.", k1[:len(k1)-2], k1 + "\np.injected \"x\"", "x" + k1[1:]} {
+		if err = s.AddTrusted(bad, "bad"); err == nil {
+			t.Errorf("expected error adding invalid key %q", bad)
+		}
+	}
 	trusted, err = s.LoadTrusted()
 	if err != nil {
 		t.Fatal(err)
@@ -134,4 +160,16 @@ func TestTrustedStorage(t *testing.T) {
 	if len(trusted) != 2 || trusted[k1] != "host1-renamed" || trusted[k2] != weirdName {
 		t.Errorf("unexpected trusted map: %q", trusted)
 	}
+	// Corrupted file (eg bad manual edit) is rejected.
+	f, err := os.OpenFile(filepath.Join(s.Dir, tcrypto.ValidatedPublicKeysFile), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("p.short \"bad\"\n")
+	_ = f.Close()
+	_, err = s.LoadTrusted()
+	if err == nil {
+		t.Fatalf("expected error loading corrupted trusted file")
+	}
+	t.Logf("got expected error %v", err)
 }
