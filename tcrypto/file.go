@@ -1,8 +1,11 @@
 package tcrypto
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -77,4 +80,46 @@ func (s *Storage) LoadIdentity() (*Identity, error) {
 		return nil, NewEncodingErr("public key file does not match private key")
 	}
 	return id, nil
+}
+
+// LoadTrusted returns the trusted (validated through TOFU) peer public keys
+// mapped to the name the peer had when it was accepted.
+// A missing file is not an error (no trusted peers yet).
+func (s *Storage) LoadTrusted() (map[string]string, error) {
+	res := map[string]string{}
+	b, err := os.ReadFile(path.Join(s.Dir, ValidatedPublicKeysFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return res, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for i, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		pubKey, quotedName, _ := strings.Cut(line, " ")
+		name, err := strconv.Unquote(quotedName)
+		if err != nil {
+			return nil, NewEncodingErr(fmt.Sprintf("%s line %d: invalid name %q: %v", ValidatedPublicKeysFile, i+1, quotedName, err))
+		}
+		res[pubKey] = name
+	}
+	return res, nil
+}
+
+// AddTrusted appends a peer public key (and its current name) to the trusted keys file.
+// Callers should check [Storage.LoadTrusted] first to avoid duplicates (last one wins on load).
+func (s *Storage) AddTrusted(pubKey, name string) error {
+	f, err := os.OpenFile(path.Join(s.Dir, ValidatedPublicKeysFile),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(f, "%s %q\n", pubKey, name)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

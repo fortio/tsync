@@ -1,0 +1,112 @@
+package tcrypto
+
+import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/ed25519"
+	"crypto/hkdf"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"sync"
+)
+
+const (
+	sessionInfo   = "tsync1 session"
+	sessionKeyLen = 32 // AES-256
+)
+
+// Session holds the 2 directional AEAD (AES-256-GCM) states derived from an
+// ephemeral ECDH exchange. Nonces are implicit 64-bit counters so frames must be
+// opened in the same order they were sealed (ie over an ordered stream like TCP);
+// any replay, reorder or drop makes Open fail.
+type Session struct {
+	sendMu  sync.Mutex
+	send    cipher.AEAD
+	sendCtr uint64
+	recvMu  sync.Mutex
+	recv    cipher.AEAD
+	recvCtr uint64
+}
+
+// NewSession derives a session from our ephemeral keys and the peer's ephemeral
+// public key. Both long term identities are bound into the derivation so the same
+// session keys can only be obtained by these 2 identities (signatures over the
+// ephemeral keys are checked by the handshake). Both sides get matching
+// send/recv keys without needing to know who initiated.
+func NewSession(eph *Ephemeral, peerEph *ecdh.PublicKey, ourID, theirID ed25519.PublicKey) (*Session, error) {
+	secret, err := eph.SharedSecret(peerEph)
+	if err != nil {
+		return nil, err
+	}
+	ourEph := eph.PublicKey.Bytes()
+	theirEph := peerEph.Bytes()
+	cmp := bytes.Compare(ourEph, theirEph)
+	if cmp == 0 {
+		return nil, errors.New("peer ephemeral key is identical to ours")
+	}
+	lowEph, highEph := ourEph, theirEph
+	lowID, highID := ourID, theirID
+	if cmp > 0 {
+		lowEph, highEph = highEph, lowEph
+		lowID, highID = highID, lowID
+	}
+	salt := append(append([]byte{}, lowEph...), highEph...)
+	info := sessionInfo + string(lowID) + string(highID)
+	keys, err := hkdf.Key(sha256.New, secret, salt, info, 2*sessionKeyLen)
+	if err != nil {
+		return nil, err
+	}
+	// first key is for low -> high direction, second for high -> low.
+	lowToHigh, err := newGCM(keys[:sessionKeyLen])
+	if err != nil {
+		return nil, err
+	}
+	highToLow, err := newGCM(keys[sessionKeyLen:])
+	if err != nil {
+		return nil, err
+	}
+	s := &Session{send: lowToHigh, recv: highToLow}
+	if cmp > 0 {
+		s.send, s.recv = s.recv, s.send
+	}
+	return s, nil
+}
+
+func newGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func counterNonce(aead cipher.AEAD, ctr uint64) []byte {
+	nonce := make([]byte, aead.NonceSize())
+	binary.BigEndian.PutUint64(nonce[len(nonce)-8:], ctr)
+	return nonce
+}
+
+// Seal encrypts and authenticates the plaintext for the next outgoing frame.
+func (s *Session) Seal(plaintext []byte) []byte {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	nonce := counterNonce(s.send, s.sendCtr)
+	s.sendCtr++
+	return s.send.Seal(nil, nonce, plaintext, nil)
+}
+
+// Open decrypts and authenticates the next incoming frame.
+func (s *Session) Open(ciphertext []byte) ([]byte, error) {
+	s.recvMu.Lock()
+	defer s.recvMu.Unlock()
+	nonce := counterNonce(s.recv, s.recvCtr)
+	plaintext, err := s.recv.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, NewDecryptErr(err.Error())
+	}
+	s.recvCtr++
+	return plaintext, nil
+}

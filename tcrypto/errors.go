@@ -23,3 +23,15 @@ func (e *EncodingError) Error() string {
 func NewEncodingErr(msg string) error {
 	return &EncodingError{Msg: msg}
 }
+
+type DecryptError struct {
+	Msg string
+}
+
+func (e *DecryptError) Error() string {
+	return "decrypt error: " + e.Msg
+}
+
+func NewDecryptErr(msg string) error {
+	return &DecryptError{Msg: msg}
+}
