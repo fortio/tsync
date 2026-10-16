@@ -57,3 +57,15 @@ func TestPendingBannerAndBell(t *testing.T) {
 		t.Errorf("expected 1 bell for the 2nd new pending request, got %d", n)
 	}
 }
+
+func TestPeerLine(t *testing.T) {
+	peer := tsnet.Peer{Name: "host\x1b[31m", IP: "10.0.0.2"}
+	line := PeerLine(1, peer, tsnet.PeerData{Port: 12, HumanHash: "123-4567"}, true)
+	if !strings.Contains(line[1], "🔗 host[31m (old version)") {
+		t.Errorf("unexpected name cell %q", line[1])
+	}
+	line = PeerLine(2, peer, tsnet.PeerData{RunID: "r", Status: tsnet.ReceivedConn}, false)
+	if strings.Contains(line[1], "old version") || !strings.Contains(line[0], "\x1b[5m") {
+		t.Errorf("unexpected line %q", line)
+	}
+}

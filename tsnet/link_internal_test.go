@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -207,4 +209,82 @@ func TestDialMeFallback(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// handleDiscovery paths without network (messages fed directly).
+func TestHandleDiscovery(t *testing.T) {
+	id, _ := tcrypto.NewIdentity()
+	other, _ := tcrypto.NewIdentity()
+	s := (&Config{Name: "Us", Identity: id, NoAutoConnect: true}).NewServer()
+	s.idStr = id.PublicKeyToString()
+	s.runID = "ourrun"
+	s.ourSendAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000}
+	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 2000}
+	key := other.PublicKeyToString()
+	msg := func(name, k string, epoch int, run string) []byte {
+		return []byte(fmt.Sprintf(DiscoveryMessageFormat, name, k, epoch, run))
+	}
+	get := func(name string) (Peer, PeerData) {
+		t.Helper()
+		for p, d := range s.Peers.All() {
+			if p.Name == name {
+				return p, d
+			}
+		}
+		t.Fatalf("peer %s not found", name)
+		return Peer{}, PeerData{}
+	}
+	s.handleDiscovery([]byte("garbage"), from) // decode error: ignored.
+	s.handleDiscovery(msg("Them", key, 1, "run1"), from)
+	peer, data := get("Them")
+	if data.RunID != "run1" || data.Port != 2000 || data.HumanHash != other.HumanID() || !data.Compatible() {
+		t.Errorf("unexpected new peer data %+v", data)
+	}
+	// Pretend we're connected, then it restarts (new run id): reset to NotLinked.
+	s.stateMu.Lock()
+	data.Status = Connected
+	s.Peers.Set(peer, data)
+	s.links[peer] = &link{}
+	s.stateMu.Unlock()
+	s.handleDiscovery(msg("Them", key, 1, "run2"), from)
+	_, data = get("Them")
+	if data.Status != NotLinked || data.RunID != "run2" || s.links[peer] != nil {
+		t.Errorf("restart not detected: %+v", data)
+	}
+	// Port change also resets and updates the source map.
+	from2 := &net.UDPAddr{IP: from.IP, Port: 2001}
+	s.handleDiscovery(msg("Them", key, 2, "run2"), from2)
+	if p, ok := s.Sources.Get(Source{IP: "10.0.0.2", Port: 2001}); !ok || p != peer {
+		t.Errorf("source map not updated")
+	}
+	if _, ok := s.Sources.Get(Source{IP: "10.0.0.2", Port: 2000}); ok {
+		t.Errorf("old source not removed")
+	}
+	// Older version (no run id): flagged, can't connect.
+	s.handleDiscovery([]byte(fmt.Sprintf(`tsync1 %q %s e %d`, "Old", key, 1)), from)
+	oldPeer, oldData := get("Old")
+	if oldData.Compatible() {
+		t.Errorf("old version peer should not be compatible")
+	}
+	if err := s.ConnectToPeer(oldPeer); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Errorf("expected incompatible version error, got %v", err)
+	}
+	// Bad public key.
+	s.handleDiscovery(msg("BadKey", "p.notakey", 1, "r"), from)
+	if _, d := get("BadKey"); d.HumanHash != "BAD-PKEY" {
+		t.Errorf("expected BAD-PKEY, got %q", d.HumanHash)
+	}
+	// Older duplicate of ourselves (same name, ip, key): ignored, newer one: we stop.
+	s.epoch.Store(5)
+	s.handleDiscovery(msg("Us", s.idStr, 9, "x"), s.ourSendAddr)
+	if s.Stopped() {
+		t.Errorf("should not stop for an older duplicate")
+	}
+	s.handleDiscovery(msg("Us", s.idStr, 3, "x"), s.ourSendAddr)
+	if !s.Stopped() {
+		t.Errorf("should stop when a newer duplicate is detected")
+	}
+	// Dial me requests from unknown source or not connected peer are ignored.
+	s.handleDialMe(&net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1}, "x", "Us")
+	s.handleDialMe(from2, "Them", "Us")
 }
