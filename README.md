@@ -10,7 +10,7 @@ Run `tsync` on each machine on your local network: they find each other automati
 
 Also a reusable Go library for local network discovery, authenticated encrypted peer links and clipboard/file transfer (`tsnet` and `tcrypto` packages).
 
-**Status**: clipboard sharing works and is used daily between macOS, Windows and Linux (including VMs). File sharing is new (directories aren't supported yet, and a `tsync send` command for ssh sessions is coming).
+**Status**: clipboard sharing works and is used daily between macOS, Windows and Linux (including VMs). File sharing is new (directories aren't supported yet).
 
 ![Example Screenshot](screenshot.png)
 
@@ -40,6 +40,7 @@ Run `tsync` on each machine. Discovered peers are listed in the table (`🏠` is
 - **Share text**: paste (Cmd-V, Ctrl-Shift-V...) into tsync: it's sent to all the linked peers and shows in a box below the table (on yours too). Peers that connect later also get the last thing you shared.
 - **Copy**: click on a box (or press `c` for the latest received) to copy it to your clipboard.
 - **Share a file**: drag and drop it into tsync (most terminals paste the dropped file's path; an existing absolute path, quoted or not, is detected as a file instead of text). It's *offered* to the linked peers: name and size only.
+- **Share files from the command line**: `tsync file1 file2...` starts tsync as usual and offers these files (handy in an ssh session, where you can't drag and drop the remote machine's files). If tsync was already running in another window on that machine, the new one replaces it (same name and identity: the older instance exits).
 - **Download**: on the other machines the offer shows in the files box below the clipboard ones; click it (or press `d` for the latest) to download. Nothing is written until you do. Files are saved in `~/Downloads` (or the current directory if there's no such directory, or `-dir`), never overwriting an existing file (`name-1.ext`, `name-2.ext`...), with a progress bar while it transfers.
 - `q` (or Ctrl-C) to quit.
 
@@ -55,6 +56,7 @@ Text received from peers is sanitized (escape sequences and control characters r
 
 ```
 tsync help
+tsync [flags] [file...]
 ```
 
 Most useful ones:
