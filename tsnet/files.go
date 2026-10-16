@@ -641,14 +641,25 @@ func reserveName(dir, name string) (string, error) {
 // SafeFileName returns a file name safe to create in a directory on any OS from a
 // (peer provided) name: last path component only, no control or Windows reserved
 // characters, not hidden (no leading dot), not a Windows device name, length limited.
+// Letters of any script, accents, emojis... are kept, but look-alike spaces (eg the
+// U+202F macOS puts before AM/PM in screenshot names) become regular spaces and invisible
+// format characters (bidi overrides that can disguise the extension, zero width spaces...)
+// are removed.
 func SafeFileName(name string) string {
 	name = strings.ToValidUTF8(name, "_")
 	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
 		name = name[i+1:]
 	}
 	name = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || strings.ContainsRune(`<>:"|?*`, r) {
+		switch {
+		case unicode.IsControl(r) || strings.ContainsRune(`<>:"|?*`, r):
 			return '_'
+		case r != ' ' && r != '\u3000' && unicode.Is(unicode.Zs, r): // keep the CJK ideographic space.
+			return ' '
+		case r == '\u200c' || r == '\u200d': // zero width (non) joiners: needed by emojis and some scripts.
+			return r
+		case unicode.Is(unicode.Cf, r):
+			return -1
 		}
 		return r
 	}, name)

@@ -119,6 +119,12 @@ func TestSafeFileName(t *testing.T) {
 		{"trailing dots... ", "trailing dots"},
 		{"日本語 ✂️.md", "日本語 ✂️.md"},
 		{"bad\xffutf8", "bad_utf8"},
+		{"Screenshot 2026-09-17 at 12.25.39\u202fPM.png", "Screenshot 2026-09-17 at 12.25.39 PM.png"},
+		{"no\u00a0break\u2009thin.txt", "no break thin.txt"},
+		{"invoice\u202efdp.exe", "invoicefdp.exe"}, // RLO would display as invoiceexe.pdf.
+		{"zero\u200bwidth\ufeff\u00adx\u2060.txt", "zerowidthx.txt"},
+		{"famille 👨\u200d👩\u200d👧.jpg", "famille 👨\u200d👩\u200d👧.jpg"},
+		{"Café crème 日本語\u3000メモ ✂️.md", "Café crème 日本語\u3000メモ ✂️.md"},
 	} {
 		if got := SafeFileName(tc.in); got != tc.out {
 			t.Errorf("SafeFileName(%q) = %q, expected %q", tc.in, got, tc.out)
