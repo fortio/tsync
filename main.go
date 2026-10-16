@@ -22,10 +22,10 @@ func main() {
 	os.Exit(Main())
 }
 
-func LoadIdentity() (*tcrypto.Identity, error) {
+func LoadIdentity() (*tcrypto.Identity, *tcrypto.Storage, error) {
 	storage, err := tcrypto.InitStorage()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Try to load existing identity
 	op := "Loaded"
@@ -35,17 +35,17 @@ func LoadIdentity() (*tcrypto.Identity, error) {
 		log.Infof("No existing identity found, creating new one: %v", err)
 		id, err = tcrypto.NewIdentity()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		err = storage.SaveIdentity(id)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		op = "Created"
 		level = log.Warning
 	}
 	log.Logf(level, "%s identity with public key: %s", op, id.PublicKeyToString())
-	return id, nil
+	return id, storage, nil
 }
 
 var alignment = []ansipixels.Alignment{
@@ -146,7 +146,7 @@ func Main() int {
 		ap.MouseClickOff()
 		ap.Restore()
 	}()
-	id, err := LoadIdentity()
+	id, storage, err := LoadIdentity()
 	if err != nil {
 		return log.FErrf("Failed to load or create identity: %v", err)
 	}
@@ -161,6 +161,7 @@ func Main() int {
 		},
 		Identity:              id,
 		BaseBroadcastInterval: *fInterval,
+		Storage:               storage,
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
