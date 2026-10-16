@@ -3,7 +3,10 @@ package tsnet
 import (
 	"bytes"
 	"encoding/binary"
+	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"fortio.org/tsync/tcrypto"
 )
@@ -80,5 +83,49 @@ func TestValidateNameAndDecode(t *testing.T) {
 	}
 	if _, _, _, err := s.MCastMessageDecode([]byte(`tsync1 "evil\x1b]52;c;aGk=\a" p.key e 3`)); err == nil {
 		t.Errorf("discovery message with escape in name accepted")
+	}
+}
+
+func TestSafeFileName(t *testing.T) {
+	for _, tc := range []struct{ in, out string }{
+		{"report.pdf", "report.pdf"},
+		{"../../etc/passwd", "passwd"},
+		{`C:\Users\x\evil.exe`, "evil.exe"},
+		{`C:\World of Warcraft\_classic_beta_\WTF\Config.wtf`, "Config.wtf"},
+		{"..", "file"},
+		{"", "file"},
+		{".bashrc", "_.bashrc"},
+		{"a<b>c:d|e?f*g\"h.txt", "a_b_c_d_e_f_g_h.txt"},
+		{"ctrl\x1b[31m\nname.txt", "ctrl_[31m_name.txt"},
+		{"CON", "_CON"},
+		{"com1.txt", "_com1.txt"},
+		{"COM10.txt", "COM10.txt"},
+		{"trailing dots... ", "trailing dots"},
+		{"日本語 ✂️.md", "日本語 ✂️.md"},
+		{"bad\xffutf8", "bad_utf8"},
+	} {
+		if got := SafeFileName(tc.in); got != tc.out {
+			t.Errorf("SafeFileName(%q) = %q, expected %q", tc.in, got, tc.out)
+		}
+	}
+	long := SafeFileName(strings.Repeat("é", 300) + ".txt")
+	if len(long) > MaxFileNameLen || !strings.HasSuffix(long, ".txt") || !utf8.ValidString(long) {
+		t.Errorf("long name not truncated properly: %d %q", len(long), long)
+	}
+}
+
+func TestReserveName(t *testing.T) {
+	dir := t.TempDir()
+	for _, expected := range []string{"a.txt", "a-1.txt", "a-2.txt"} {
+		p, err := reserveName(dir, "a.txt")
+		if err != nil || filepath.Base(p) != expected {
+			t.Fatalf("reserveName got %q %v, expected %q", p, err, expected)
+		}
+	}
+	if p, err := reserveName(dir, "noext"); err != nil || filepath.Base(p) != "noext" {
+		t.Errorf("unexpected %q %v", p, err)
+	}
+	if p, err := reserveName(dir, "noext"); err != nil || filepath.Base(p) != "noext-1" {
+		t.Errorf("unexpected %q %v", p, err)
 	}
 }
