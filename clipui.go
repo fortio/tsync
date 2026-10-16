@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fortio.org/log"
+	"fortio.org/progressbar"
 	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/tsync/tsnet"
@@ -63,11 +64,9 @@ func clipTitle(prefix string, e clipEntry, extra string) string {
 	return fmt.Sprintf(" %s %s · %s%s ", prefix, e.when.Format("15:04:05"), sizeStr(len(e.text)), extra)
 }
 
+// sizeStr formats a byte count (like fortio.org/progressbar, eg 57 b, 1.5 Kb).
 func sizeStr(n int) string {
-	if n == 1 {
-		return "1 byte"
-	}
-	return strconv.Itoa(n) + " bytes"
+	return progressbar.HumanBytes(int64(n))
 }
 
 // Layout returns the boxes to draw, fitting in maxHeight lines (boxes get fewer
