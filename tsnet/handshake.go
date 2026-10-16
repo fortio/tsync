@@ -311,7 +311,7 @@ func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName string, tcpPo
 		}
 	default:
 		if peerData.Status != ReceivedConn { // only once, not for each retry.
-			log.Infof("Connection request from new peer %s (%s): check its hash is %s and select it to accept",
+			log.Warnf("Connection request from new peer %s (%s): check its hash is %s and select it to accept",
 				peer.Name, peer.IP, peerData.HumanHash)
 		}
 		s.setStatusLocked(peer, peerData, ReceivedConn)
