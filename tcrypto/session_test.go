@@ -103,6 +103,22 @@ func TestSessionFailures(t *testing.T) {
 	expectDecryptErr(t, "other session", err)
 }
 
+func TestSessionContextSeparation(t *testing.T) {
+	// Even if (incorrectly) reusing the same ephemeral keys, different contexts must get different keys.
+	aliceID, bobID, aliceEph, bobEph := newTestKeys(t)
+	const otherContext = "other context"
+	alice1, err := aliceID.VerifiedSession(aliceEph, bobID.SignEphemeral(bobEph, testContext), testContext, bobID.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob2, err := bobID.VerifiedSession(bobEph, aliceID.SignEphemeral(aliceEph, otherContext), otherContext, aliceID.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = bob2.Open(alice1.Seal([]byte("context 1 frame")))
+	expectDecryptErr(t, "cross context", err)
+}
+
 func TestVerifiedSessionFailures(t *testing.T) {
 	aliceID, bobID, aliceEph, bobEph := newTestKeys(t)
 	bobSigned := bobID.SignEphemeral(bobEph, testContext)
@@ -160,8 +176,29 @@ func TestTrustedStorage(t *testing.T) {
 	if len(trusted) != 2 || trusted[k1] != "host1-renamed" || trusted[k2] != weirdName {
 		t.Errorf("unexpected trusted map: %q", trusted)
 	}
+	// Manually edited file without trailing newline.
+	id3, _ := tcrypto.NewIdentity()
+	k3 := id3.PublicKeyToString()
+	fname := filepath.Join(s.Dir, tcrypto.ValidatedPublicKeysFile)
+	b, err := os.ReadFile(fname)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(fname, append(b, []byte("# no newline comment")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.AddTrusted(k3, "host3"); err != nil {
+		t.Fatal(err)
+	}
+	trusted, err = s.LoadTrusted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trusted) != 3 || trusted[k3] != "host3" {
+		t.Errorf("unexpected trusted map after no trailing newline append: %q", trusted)
+	}
 	// Corrupted file (eg bad manual edit) is rejected.
-	f, err := os.OpenFile(filepath.Join(s.Dir, tcrypto.ValidatedPublicKeysFile), os.O_APPEND|os.O_WRONLY, 0)
+	f, err := os.OpenFile(fname, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

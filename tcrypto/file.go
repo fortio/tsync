@@ -119,11 +119,19 @@ func (s *Storage) AddTrusted(pubKey, name string) error {
 		return err
 	}
 	f, err := os.OpenFile(path.Join(s.Dir, ValidatedPublicKeysFile),
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f, "%s %q\n", pubKey, name)
+	// Don't glue our record to the last line if the file (eg manually edited) lacks a trailing newline.
+	prefix := ""
+	if fi, serr := f.Stat(); serr == nil && fi.Size() > 0 {
+		last := make([]byte, 1)
+		if _, rerr := f.ReadAt(last, fi.Size()-1); rerr == nil && last[0] != '\n' {
+			prefix = "\n"
+		}
+	}
+	_, err = fmt.Fprintf(f, "%s%s %q\n", prefix, pubKey, name)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}

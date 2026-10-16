@@ -32,9 +32,10 @@ type Session struct {
 }
 
 // SignEphemeral returns our ephemeral public key, bound to the given handshake
-// context (eg message type and names), signed with our long term identity.
-// It is meant to be sent to the peer which passes it to [Identity.VerifiedSession]
-// with the same context.
+// context, signed with our long term identity. It is meant to be sent to the peer
+// which passes it to [Identity.VerifiedSession] with the same context.
+// Both sides must use the same context (eg protocol version and both names in
+// a canonical order) as it is also mixed into the session keys derivation.
 func (id *Identity) SignEphemeral(eph *Ephemeral, context string) string {
 	return id.SignMessage(ephemeralTranscript(context, eph.PublicKey.Bytes()))
 }
@@ -61,15 +62,16 @@ func (id *Identity) VerifiedSession(eph *Ephemeral, peerSigned, context string, 
 	if err != nil {
 		return nil, NewEncodingErr("invalid peer ephemeral key: " + err.Error())
 	}
-	return newSession(eph, peerEph, id.PublicKey, theirID)
+	return newSession(eph, peerEph, id.PublicKey, theirID, context)
 }
 
 // newSession derives a session from our ephemeral keys and the peer's ephemeral
 // public key. Both long term identities are bound into the derivation so the same
-// session keys can only be obtained by these 2 identities. Both sides get matching
+// session keys can only be obtained by these 2 identities, as is the context so
+// different handshake contexts get different keys. Both sides get matching
 // send/recv keys without needing to know who initiated. Unexported as it doesn't
 // check peerEph belongs to theirID, use [Identity.VerifiedSession].
-func newSession(eph *Ephemeral, peerEph *ecdh.PublicKey, ourID, theirID ed25519.PublicKey) (*Session, error) {
+func newSession(eph *Ephemeral, peerEph *ecdh.PublicKey, ourID, theirID ed25519.PublicKey, context string) (*Session, error) {
 	secret, err := eph.SharedSecret(peerEph)
 	if err != nil {
 		return nil, err
@@ -87,7 +89,8 @@ func newSession(eph *Ephemeral, peerEph *ecdh.PublicKey, ourID, theirID ed25519.
 		lowID, highID = highID, lowID
 	}
 	salt := append(append([]byte{}, lowEph...), highEph...)
-	info := sessionInfo + string(lowID) + string(highID)
+	// identities are fixed size so appending the context after is unambiguous.
+	info := sessionInfo + string(lowID) + string(highID) + context
 	keys, err := hkdf.Key(sha256.New, secret, salt, info, 2*sessionKeyLen)
 	if err != nil {
 		return nil, err
