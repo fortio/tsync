@@ -83,6 +83,10 @@ type Server struct {
 	stateMu sync.Mutex
 	links   map[Peer]*link
 	trusted map[string]string // trusted public keys -> name
+	// TCP links
+	tcpListen *net.TCPListener
+	tcpPort   int
+	ctx       context.Context //nolint:containedctx // server lifetime context, for dial goroutines.
 }
 
 type Source struct {
@@ -102,6 +106,9 @@ type PeerData struct {
 	Epoch     int32
 	LastSeen  time.Time
 	Status    ConnectionStatus
+	// Last clipboard received from that peer.
+	Clip     string
+	ClipTime time.Time
 }
 
 func (c *Config) NewServer() *Server {
@@ -170,15 +177,24 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	s.ourSendAddr = s.dualUDPSock.LocalAddr().(*net.UDPAddr)
-	log.Infof("Sockets created - unicast: %s, multicast listen: %s",
-		s.ourSendAddr, s.broadcastListen.LocalAddr())
+	if err = s.startTCP(localIP); err != nil {
+		s.broadcastListen.Close()
+		s.dualUDPSock.Close()
+		return err
+	}
+	log.Infof("Sockets created - unicast: %s, multicast listen: %s, tcp: %s",
+		s.ourSendAddr, s.broadcastListen.LocalAddr(), s.tcpListen.Addr())
 
 	// get a cancelable context
 	ctx, s.cancel = context.WithCancel(ctx)
-	s.wg.Add(3) // broadcast sender, multicast receiver, and unicast receiver
+	s.stateMu.Lock()
+	s.ctx = ctx
+	s.stateMu.Unlock()
+	s.wg.Add(4) // broadcast sender, multicast receiver, unicast receiver and tcp accept
 	go s.runAdv(ctx)
 	go s.runMulticastReceive(ctx)
 	go s.runUnicastReceive(ctx)
+	go s.runTCPAccept(ctx)
 	return nil
 }
 
@@ -194,6 +210,7 @@ func (s *Server) Stop() {
 	s.cancel = nil
 	s.broadcastListen.Close() // needed or write will block forever
 	s.dualUDPSock.Close()
+	s.tcpListen.Close() // TCP links get closed by the context cancel.
 	s.wg.Wait()
 }
 
@@ -351,6 +368,8 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				data.HumanHash = v.HumanHash
 				// as well as the status
 				data.Status = v.Status
+				data.Clip = v.Clip
+				data.ClipTime = v.ClipTime
 				// Check if this is an updated port
 				if v.Port != data.Port {
 					log.Infof("Peer %q port changed from %d to %d", peer, v.Port, data.Port)
@@ -431,10 +450,10 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 }
 
 const (
-	DiscoveryMessageFormat = "tsync1 %q %s e %d" // name, public key, epoch
-	ConnectMessageFormat   = "connect1 %q %q %s" // from_name, target_name, signed ephemeral key
-	AcceptMessageFormat    = "accept1 %q %q %s"  // from_name, target_name, signed ephemeral key
-	RejectMessageFormat    = "reject1 %q %q %q"  // from_name, target_name, reason
+	DiscoveryMessageFormat = "tsync1 %q %s e %d"    // name, public key, epoch
+	ConnectMessageFormat   = "connect1 %q %q %d %s" // from_name, target_name, tcp link port, signed ephemeral key
+	AcceptMessageFormat    = "accept1 %q %q %d %s"  // from_name, target_name, tcp link port, signed ephemeral key
+	RejectMessageFormat    = "reject1 %q %q %q"     // from_name, target_name, reason
 )
 
 func (s *Server) MCastMessageSend(epoch int32) error {

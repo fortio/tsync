@@ -1,0 +1,348 @@
+package tsnet
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"time"
+
+	"fortio.org/log"
+	"fortio.org/tsync/tcrypto"
+)
+
+// Encrypted TCP link with each Connected peer: once the handshake is done, one side
+// (see weDialLocked) dials the other's TCP port (exchanged in the handshake). Frames are
+// a 4 byte big endian length followed by the session sealed (AES-GCM) plaintext, which
+// is a 1 byte frame type followed by the payload.
+
+const (
+	// MaxClipSize is the maximum clipboard payload we send or accept.
+	MaxClipSize = 1 << 20
+	// maxFrameSize leaves room for the frame type and the AEAD tag.
+	maxFrameSize = MaxClipSize + 64
+
+	FrameHello = 'H' // first frame from the dialer, authenticates the connection.
+	FrameClip  = 'C' // clipboard (text) content.
+
+	linkDialTimeout  = 3 * time.Second
+	linkHelloTimeout = 5 * time.Second // also how long we wait for our side of the handshake to complete.
+	linkWriteTimeout = 5 * time.Second
+	helloRetryDelay  = 100 * time.Millisecond
+)
+
+func writeFrame(w io.Writer, sess *tcrypto.Session, frameType byte, payload []byte) error {
+	plain := make([]byte, 0, 1+len(payload))
+	plain = append(plain, frameType)
+	plain = append(plain, payload...)
+	sealed := sess.Seal(plain)
+	buf := make([]byte, 4, 4+len(sealed))
+	binary.BigEndian.PutUint32(buf, uint32(len(sealed))) //nolint:gosec // bounded by MaxClipSize checks.
+	buf = append(buf, sealed...)
+	_, err := w.Write(buf)
+	return err
+}
+
+// readFrame returns the next (still encrypted) frame.
+func readFrame(r io.Reader) ([]byte, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	if n > maxFrameSize {
+		return nil, fmt.Errorf("frame too large: %d > %d", n, maxFrameSize)
+	}
+	buf := make([]byte, n)
+	_, err := io.ReadFull(r, buf)
+	return buf, err
+}
+
+// weDialLocked returns true if we are the side that dials the TCP link to peer.
+// Deterministic on both sides and independent of who initiated the handshake.
+func (s *Server) weDialLocked(peer Peer, peerData PeerData) bool {
+	ours := fmt.Sprintf("%s %q %d", s.idStr, s.Name, s.ourSendAddr.Port)
+	theirs := fmt.Sprintf("%s %q %d", peer.PublicKey, peer.Name, peerData.Port)
+	return ours < theirs
+}
+
+// Linked returns true if the encrypted TCP link to peer is up.
+func (s *Server) Linked(peer Peer) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	l := s.links[peer]
+	return l != nil && l.conn != nil
+}
+
+func (s *Server) startTCP(localIP *net.UDPAddr) error {
+	var laddr *net.TCPAddr
+	if localIP != nil {
+		laddr = &net.TCPAddr{IP: localIP.IP}
+	}
+	var err error
+	s.tcpListen, err = net.ListenTCP("tcp4", laddr)
+	if err != nil {
+		return err
+	}
+	s.tcpPort = s.tcpListen.Addr().(*net.TCPAddr).Port
+	return nil
+}
+
+func (s *Server) runTCPAccept(ctx context.Context) {
+	defer s.wg.Done()
+	log.Infof("Starting TCP link listener on %s", s.tcpListen.Addr())
+	for {
+		conn, err := s.tcpListen.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Infof("Exiting TCP listener after %v", ctx.Err())
+				return
+			}
+			log.Errf("Error accepting TCP connection: %v", err)
+			continue
+		}
+		s.wg.Add(1)
+		go s.handleIncoming(ctx, conn)
+	}
+}
+
+// startDialLocked starts dialing peer's TCP link if we're the dialer.
+func (s *Server) startDialLocked(peer Peer, peerData PeerData, l *link) {
+	if !s.weDialLocked(peer, peerData) {
+		log.LogVf("Waiting for %s to dial us", peer.Name)
+		// Don't stay Connected without a link if they fail to dial us (eg firewall).
+		time.AfterFunc(2*linkHelloTimeout, func() { s.linkTimeout(peer, l) })
+		return
+	}
+	if s.ctx == nil || s.ctx.Err() != nil {
+		return
+	}
+	addr := net.JoinHostPort(peer.IP, strconv.Itoa(l.tcpPort))
+	s.wg.Add(1)
+	go s.dial(s.ctx, peer, l, addr)
+}
+
+func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string) {
+	defer s.wg.Done()
+	log.Infof("Dialing TCP link to %s at %s", peer.Name, addr)
+	dialer := net.Dialer{Timeout: linkDialTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp4", addr)
+	if err == nil {
+		_ = conn.SetWriteDeadline(time.Now().Add(linkWriteTimeout))
+		err = writeFrame(conn, l.session, FrameHello, nil)
+	}
+	if err != nil {
+		log.Errf("TCP link to %s (%s) failed: %v", peer.Name, addr, err)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		s.linkFailed(peer, l)
+		return
+	}
+	if !s.attach(peer, l, conn) {
+		return
+	}
+	s.readLoop(ctx, peer, l, conn)
+}
+
+// attach sets the connection on the link if it is still current.
+func (s *Server) attach(peer Peer, l *link, conn net.Conn) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.links[peer] != l {
+		log.Infof("Stale TCP link to %s (newer handshake), closing", peer.Name)
+		_ = conn.Close()
+		return false
+	}
+	l.conn = conn
+	log.Infof("TCP link up with %s (%s)", peer.Name, conn.RemoteAddr())
+	if peerData, ok := s.Peers.Get(peer); ok {
+		s.change(s.Peers.Set(peer, peerData)) // just to bump version for UI refresh.
+	}
+	return true
+}
+
+// linkFailed resets peer to NotLinked if l is still its current link.
+func (s *Server) linkFailed(peer Peer, l *link) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.links[peer] != l {
+		return
+	}
+	s.resetLinkLocked(peer)
+}
+
+func (s *Server) resetLinkLocked(peer Peer) {
+	s.dropLinkLocked(peer)
+	if peerData, ok := s.Peers.Get(peer); ok {
+		s.setStatusLocked(peer, peerData, NotLinked)
+	}
+}
+
+func (s *Server) linkTimeout(peer Peer, l *link) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.links[peer] != l || l.conn != nil {
+		return
+	}
+	log.Warnf("%s didn't establish the TCP link in time", peer.Name)
+	s.resetLinkLocked(peer)
+}
+
+// handleIncoming authenticates an incoming TCP connection: its first frame must
+// open with the session of one of the Connected peers at that IP (that we expect
+// to dial us). Trying a session with the wrong frame doesn't change its state.
+func (s *Server) handleIncoming(ctx context.Context, conn net.Conn) {
+	defer s.wg.Done()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	deadline := time.Now().Add(linkHelloTimeout)
+	_ = conn.SetReadDeadline(deadline)
+	remoteIP := conn.RemoteAddr().(*net.TCPAddr).IP.String()
+	frame, err := readFrame(conn)
+	if err != nil {
+		log.Warnf("Failed to read hello from %v: %v", conn.RemoteAddr(), err)
+		_ = conn.Close()
+		return
+	}
+	for {
+		peer, l, found, bad := s.matchHello(remoteIP, frame, conn)
+		if bad {
+			return
+		}
+		if found {
+			_ = conn.SetReadDeadline(time.Time{})
+			s.readLoop(ctx, peer, l, conn)
+			return
+		}
+		// Our side of the handshake may not have completed yet (eg accept still in flight).
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			log.Warnf("Unauthenticated TCP connection from %v, closing", conn.RemoteAddr())
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(helloRetryDelay)
+	}
+}
+
+// matchHello returns the peer and link matching the hello frame if found, or bad
+// if the frame was from a peer but invalid (and the connection got closed).
+func (s *Server) matchHello(remoteIP string, frame []byte, conn net.Conn) (Peer, *link, bool, bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	for peer, l := range s.links {
+		if peer.IP != remoteIP || l.session == nil || l.conn != nil {
+			continue
+		}
+		peerData, ok := s.Peers.Get(peer)
+		if !ok || peerData.Status != Connected || s.weDialLocked(peer, peerData) {
+			continue
+		}
+		plain, err := l.session.Open(frame)
+		if err != nil {
+			continue
+		}
+		if len(plain) == 0 || plain[0] != FrameHello {
+			log.Warnf("Unexpected first frame type from %s", peer.Name)
+			_ = conn.Close()
+			return peer, nil, false, true
+		}
+		l.conn = conn
+		log.Infof("TCP link up with %s (%s)", peer.Name, conn.RemoteAddr())
+		s.change(s.Peers.Set(peer, peerData)) // bump version for UI refresh.
+		return peer, l, true, false
+	}
+	return Peer{}, nil, false, false
+}
+
+func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn) {
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	for {
+		frame, err := readFrame(conn)
+		var plain []byte
+		if err == nil {
+			plain, err = l.session.Open(frame)
+		}
+		if err == nil && len(plain) == 0 {
+			err = errors.New("empty frame")
+		}
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Warnf("TCP link with %s closed: %v", peer.Name, err)
+			}
+			_ = conn.Close()
+			s.linkFailed(peer, l)
+			return
+		}
+		switch plain[0] {
+		case FrameClip:
+			s.receivedClip(peer, l, string(plain[1:]))
+		default:
+			log.Warnf("Ignoring unknown frame type %q from %s", plain[0], peer.Name)
+		}
+	}
+}
+
+func (s *Server) receivedClip(peer Peer, l *link, clip string) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.links[peer] != l {
+		return
+	}
+	peerData, ok := s.Peers.Get(peer)
+	if !ok {
+		return
+	}
+	log.Infof("Received %d bytes clipboard from %s", len(clip), peer.Name)
+	peerData.Clip = clip
+	peerData.ClipTime = time.Now()
+	s.change(s.Peers.Set(peer, peerData))
+}
+
+// SendClip sends the clipboard text to all the peers we have a TCP link with.
+// Returns how many peers it was sent to.
+func (s *Server) SendClip(clip string) (int, error) {
+	if len(clip) > MaxClipSize {
+		return 0, fmt.Errorf("clipboard too large: %d > %d", len(clip), MaxClipSize)
+	}
+	s.stateMu.Lock()
+	type target struct {
+		peer Peer
+		l    *link
+		conn net.Conn
+	}
+	var targets []target
+	for peer, l := range s.links {
+		if l.conn != nil {
+			targets = append(targets, target{peer, l, l.conn})
+		}
+	}
+	s.stateMu.Unlock()
+	sent := 0
+	var errs []error
+	for _, t := range targets {
+		if err := t.l.send(t.conn, FrameClip, []byte(clip)); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", t.peer.Name, err))
+			continue
+		}
+		sent++
+	}
+	return sent, errors.Join(errs...)
+}
+
+// send writes one frame; sealing and writing are done under the same lock so the
+// frames go out in nonce order.
+func (l *link) send(conn net.Conn, frameType byte, payload []byte) error {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(linkWriteTimeout))
+	err := writeFrame(conn, l.session, frameType, payload)
+	if err != nil {
+		_ = conn.Close() // read loop will notice and clean up.
+	}
+	return err
+}

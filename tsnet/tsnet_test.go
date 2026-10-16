@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,7 +140,44 @@ func TestPeerDiscovery(t *testing.T) {
 	}
 	waitForStatus(ctx, t, serverB, peerA, tsnet.Connected)
 	waitForStatus(ctx, t, serverA, peerB, tsnet.Connected)
+	checkClips(ctx, t, serverA, peerA, serverB, peerB)
 	t.Log("✓ Test completed successfully!")
+}
+
+// checkClips waits for the TCP link between A and B and checks clipboard content goes both ways.
+func checkClips(ctx context.Context, t *testing.T,
+	serverA *tsnet.Server, peerA tsnet.Peer, serverB *tsnet.Server, peerB tsnet.Peer,
+) {
+	t.Helper()
+	waitFor(ctx, t, "A linked to B", func() bool { return serverA.Linked(peerB) })
+	waitFor(ctx, t, "B linked to A", func() bool { return serverB.Linked(peerA) })
+	sendClip(ctx, t, serverA, serverB, peerA, "hello\nfrom A ✂️")
+	sendClip(ctx, t, serverB, serverA, peerB, "and back from B")
+	sendClip(ctx, t, serverA, serverB, peerA, "") // empty clip is valid too.
+}
+
+func sendClip(ctx context.Context, t *testing.T, from, to *tsnet.Server, fromPeer tsnet.Peer, clip string) {
+	t.Helper()
+	n, err := from.SendClip(clip)
+	if err != nil || n != 1 {
+		t.Fatalf("%s SendClip: sent to %d peers, err %v", from.Name, n, err)
+	}
+	waitFor(ctx, t, to.Name+" received clip from "+from.Name, func() bool {
+		data, ok := to.Peers.Get(fromPeer)
+		return ok && data.Clip == clip && !data.ClipTime.IsZero()
+	})
+}
+
+func waitFor(ctx context.Context, t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for !cond() {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for %s", what)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Logf("✓ %s", what)
 }
 
 // waitForStatus waits for srv to see peer in the given status.
@@ -215,6 +253,7 @@ func TestHandshakeTrustedAndSimultaneous(t *testing.T) {
 	}
 	waitForStatus(ctx, t, serverA, peerB, tsnet.Connected)
 	waitForStatus(ctx, t, serverB, peerA, tsnet.Connected)
+	checkClips(ctx, t, serverA, peerA, serverB, peerB)
 	serverA.Stop()
 	serverB.Stop()
 	for _, st := range []*tcrypto.Storage{storageA, storageB} {
@@ -235,6 +274,62 @@ func TestHandshakeTrustedAndSimultaneous(t *testing.T) {
 	}
 	waitForStatus(ctx, t, serverA, peerB, tsnet.Connected)
 	waitForStatus(ctx, t, serverB, peerA, tsnet.Connected)
+	checkClips(ctx, t, serverA, peerA, serverB, peerB)
+	// B going away: A's link drops back to NotLinked.
+	serverB.Stop()
+	waitForStatus(ctx, t, serverA, peerB, tsnet.NotLinked)
+	if serverA.Linked(peerB) {
+		t.Errorf("A still linked to stopped B")
+	}
+}
+
+func TestClipToMultiplePeers(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// All on the same IP so incoming TCP links must be matched to the right session.
+	names := []string{"HostA", "HostB", "HostC"}
+	servers := make([]*tsnet.Server, len(names))
+	for i, name := range names {
+		id, _ := tcrypto.NewIdentity()
+		servers[i] = startTestServer(ctx, t, name, id, nil)
+		defer servers[i].Stop()
+	}
+	// A connects to B and C, which accept.
+	for _, other := range servers[1:] {
+		// Both must have discovered each other first, or the request is dropped as from an unknown source.
+		peer := waitForPeer(ctx, t, servers[0], other.Name)
+		peerA := waitForPeer(ctx, t, other, "HostA")
+		if err := servers[0].ConnectToPeer(peer); err != nil {
+			t.Fatal(err)
+		}
+		waitForStatus(ctx, t, other, peerA, tsnet.ReceivedConn)
+		if err := other.ConnectToPeer(peerA); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(ctx, t, "A linked to "+other.Name, func() bool { return servers[0].Linked(peer) })
+		waitFor(ctx, t, other.Name+" linked to A", func() bool { return other.Linked(peerA) })
+	}
+	clip := "to everyone"
+	n, err := servers[0].SendClip(clip)
+	if err != nil || n != 2 {
+		t.Fatalf("SendClip: sent to %d peers, err %v", n, err)
+	}
+	for _, other := range servers[1:] {
+		peerA := waitForPeer(ctx, t, other, "HostA")
+		waitFor(ctx, t, other.Name+" got clip", func() bool {
+			data, _ := other.Peers.Get(peerA)
+			return data.Clip == clip
+		})
+	}
+	// B and C aren't connected to each other.
+	n, err = servers[1].SendClip("only to A")
+	if err != nil || n != 1 {
+		t.Fatalf("B SendClip: sent to %d peers, err %v", n, err)
+	}
+	if _, err = servers[0].SendClip(strings.Repeat("x", tsnet.MaxClipSize+1)); err == nil {
+		t.Errorf("expected error for too large clip")
+	}
 }
 
 func TestMultiplePeersDiscovery(t *testing.T) {
