@@ -65,7 +65,7 @@ func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData, linked bool) []
 	case tsnet.SentConn:
 		idxStr = tcolor.Inverse + Color16(tcolor.BrightYellow, idxStr)
 	case tsnet.ReceivedConn:
-		idxStr = tcolor.Inverse + Color16(tcolor.BrightBlue, idxStr)
+		idxStr = tcolor.Blink + tcolor.Inverse + Color16(tcolor.BrightBlue, idxStr)
 	case tsnet.Failed:
 		idxStr = tcolor.Inverse + Color16(tcolor.BrightRed, idxStr)
 	case tsnet.Connected:
@@ -136,6 +136,52 @@ type TopArea struct {
 	clips      *ClipPanel
 	fixedLines [][]string // our line and header.
 	help       string
+	pending    map[tsnet.Peer]bool // peers with a pending connection request (for the bell).
+}
+
+// PendingBanner returns the message to show when there are pending connection requests.
+func PendingBanner(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) (string, bool) {
+	first := -1
+	count := 0
+	for i, kv := range peers {
+		if kv.Value.Status != tsnet.ReceivedConn {
+			continue
+		}
+		count++
+		if first < 0 {
+			first = i
+		}
+	}
+	if count == 0 {
+		return "", false
+	}
+	kv := peers[first]
+	how := "click"
+	if first < 9 {
+		how += " or press " + strconv.Itoa(first+1)
+	}
+	msg := fmt.Sprintf(" ⚠ %s (%s) wants to connect: check the hash, then %s to accept ",
+		SanitizeName(kv.Key.Name), kv.Value.HumanHash, how)
+	if count > 1 {
+		msg += fmt.Sprintf("(+%d more) ", count-1)
+	}
+	return msg, true
+}
+
+// bellOnNewPending rings the terminal bell (once) if there is a new pending connection request.
+func (t *TopArea) bellOnNewPending(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) {
+	current := make(map[tsnet.Peer]bool)
+	ring := false
+	for _, kv := range peers {
+		if kv.Value.Status == tsnet.ReceivedConn {
+			current[kv.Key] = true
+			ring = ring || !t.pending[kv.Key]
+		}
+	}
+	t.pending = current
+	if ring {
+		t.ap.WriteString("\a")
+	}
 }
 
 // Draw draws the top area for the given peers and returns the table width.
@@ -162,10 +208,19 @@ func (t *TopArea) Draw(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) int {
 	t.clips.Draw(tableHeight, boxes)
 	if top > 0 {
 		ap.MoveCursor(0, top-1)
-		h, hw := TruncateRightToFit(ap, t.help, ap.W-4)
+		banner, pending := PendingBanner(peers)
+		msg := t.help
+		if pending {
+			msg = banner
+		}
+		h, hw := TruncateRightToFit(ap, msg, ap.W-4)
 		left := (ap.W - hw) / 2
-		ap.WriteString(DarkGray(strings.Repeat("─", left) + h + strings.Repeat("─", ap.W-left-hw)))
+		if pending {
+			h = tcolor.Inverse + Color16(tcolor.BrightYellow, h)
+		}
+		ap.WriteString(DarkGray(strings.Repeat("─", left)) + h + DarkGray(strings.Repeat("─", ap.W-left-hw)))
 	}
+	t.bellOnNewPending(peers)
 	return tableWidth
 }
 

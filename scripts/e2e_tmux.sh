@@ -50,7 +50,8 @@ $T new-session -d -s B -x 100 -y 30 "env HOME=$OUT/hB $BIN $ARGS -name e2eB"
 wait_for A "e2eB"
 wait_for B "e2eA"
 $T send-keys -t A 1
-wait_for B "select it to accept"
+wait_for B "e2eA ("
+wait_for B "wants to connect: check the hash, then click or press 1 to accept"
 $T send-keys -t B 1
 wait_for A "🔗 e2eB"
 wait_for B "🔗 e2eA"
