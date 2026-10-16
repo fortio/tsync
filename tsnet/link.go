@@ -180,7 +180,7 @@ func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string, fall
 		return
 	}
 	s.sendLastClip(peer, l, conn)
-	s.sendLastOffer(peer, l, conn)
+	s.sendOffers(peer, l, conn)
 	s.readLoop(ctx, peer, l, conn)
 }
 
@@ -270,7 +270,7 @@ func (s *Server) handleIncoming(ctx context.Context, conn net.Conn) {
 		if found {
 			_ = conn.SetReadDeadline(time.Time{})
 			s.sendLastClip(peer, l, conn)
-			s.sendLastOffer(peer, l, conn)
+			s.sendOffers(peer, l, conn)
 			s.readLoop(ctx, peer, l, conn)
 			return
 		}

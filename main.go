@@ -12,6 +12,7 @@ import (
 
 	"fortio.org/cli"
 	"fortio.org/log"
+	"fortio.org/progressbar"
 	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
@@ -109,6 +110,22 @@ func Color16f(color tcolor.BasicColor, format string, args ...any) string {
 
 func DarkGray(s string) string {
 	return Color16(tcolor.DarkGray, s)
+}
+
+// CheckFiles checks that all the files can be offered.
+func CheckFiles(files []string) error {
+	for _, f := range files {
+		fi, err := tsnet.CheckFile(f)
+		if err != nil {
+			return fmt.Errorf("%q: %w", f, err)
+		}
+		size := progressbar.HumanBytes(fi.Size())
+		if fi.Size() >= 1024 {
+			size += fmt.Sprintf(" (%d bytes)", fi.Size())
+		}
+		log.LogVf("File %q ok to offer: %s", f, size)
+	}
+	return nil
 }
 
 // SplitList splits a comma separated list, ignoring empty entries and spaces.
@@ -330,7 +347,13 @@ func Main() int {
 		"Directory where received files are saved (default ~/Downloads if it exists, else current directory)")
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
+	cli.ArgsHelp = "[file...]"
+	cli.MaxArgs = -1
 	cli.Main()
+	// Files to offer (eg from a ssh session where drag and drop isn't possible): check them before starting.
+	if err := CheckFiles(flag.Args()); err != nil {
+		return log.FErrf("Can't offer %v", err)
+	}
 	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
 		return 1 // error already logged
@@ -362,10 +385,7 @@ func Main() int {
 		Storage:               storage,
 		NoAutoConnect:         !*fAutoConnect,
 		Peers:                 SplitList(*fPeers),
-		FileDir:               *fDir,
-	}
-	if cfg.FileDir == "" {
-		cfg.FileDir = DefaultDownloadDir()
+		FileDir:               DownloadDir(*fDir),
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
@@ -395,6 +415,7 @@ func Main() int {
 	tableWidth := 0
 	clips := NewClipPanel(ap, *fClipLines)
 	files := NewFilePanel(ap, srv, cfg.FileDir, 5)
+	files.Offer(flag.Args())
 	ap.OnMouse = func() {
 		if !ap.LeftClick() || !ap.MouseRelease() {
 			return

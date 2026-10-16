@@ -42,8 +42,11 @@ func NewFilePanel(ap *ansipixels.AnsiPixels, srv *tsnet.Server, dir string, maxL
 	return &FilePanel{ap: ap, srv: srv, Dir: dir, MaxLines: maxLines, bars: make(map[transferKey]*progressbar.Bar)}
 }
 
-// DefaultDownloadDir returns ~/Downloads if it exists, the current directory otherwise.
-func DefaultDownloadDir() string {
+// DownloadDir returns dir if not empty, else ~/Downloads if it exists, else the current directory.
+func DownloadDir(dir string) string {
+	if dir != "" {
+		return dir
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		d := filepath.Join(home, "Downloads")
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
@@ -124,6 +127,9 @@ func (fp *FilePanel) Offer(paths []string) {
 		} else {
 			fi, _ := os.Stat(p)
 			line.text = fmt.Sprintf("📤 offered %s (%s) to %d peer%s", p, progressbar.HumanBytes(fi.Size()), n, plural(n))
+			if n == 0 {
+				line.text = fmt.Sprintf("📤 offered %s (%s), will be sent to peers when they connect", p, progressbar.HumanBytes(fi.Size()))
+			}
 			line.color = tcolor.BrightCyan
 		}
 		fp.local = append(fp.local, line)

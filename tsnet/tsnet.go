@@ -117,7 +117,6 @@ type Server struct {
 	runID string
 	// testDialAddr if set changes the address we dial (tests).
 	testDialAddr func(addr string, fallback bool) string
-	lastOffer    *offer        // also offered to newly linked peers.
 	changes      atomic.Uint64 // OnChange version.
 	// TCP links
 	tcpListen *net.TCPListener

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -67,5 +69,37 @@ func TestPeerLine(t *testing.T) {
 	line = PeerLine(2, peer, tsnet.PeerData{RunID: "r", Status: tsnet.ReceivedConn}, false)
 	if strings.Contains(line[1], "old version") || !strings.Contains(line[0], "\x1b[5m") {
 		t.Errorf("unexpected line %q", line)
+	}
+}
+
+func TestCheckFilesAndDownloadDir(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.txt")
+	_ = os.WriteFile(f, []byte("x"), 0o644)
+	if err := CheckFiles([]string{f}); err != nil {
+		t.Errorf("unexpected error %v", err)
+	}
+	for _, bad := range [][]string{{dir}, {f, filepath.Join(dir, "missing")}} {
+		if err := CheckFiles(bad); err == nil {
+			t.Errorf("expected error for %v", bad)
+		}
+	}
+	if DownloadDir(dir) != dir || DownloadDir("") == "" {
+		t.Errorf("unexpected download dirs")
+	}
+}
+
+func TestCheckFilesErrors(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		path, msg string
+	}{
+		{filepath.Join(dir, "missing"), "missing\": "},
+		{dir, "not a regular file"},
+	} {
+		err := CheckFiles([]string{tc.path})
+		if err == nil || !strings.Contains(err.Error(), tc.msg) || strings.Contains(err.Error(), "stat ") {
+			t.Errorf("CheckFiles(%q) error %v, expected %q (without stat)", tc.path, err, tc.msg)
+		}
 	}
 }
