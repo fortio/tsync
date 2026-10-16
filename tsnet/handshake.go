@@ -27,6 +27,10 @@ type link struct {
 	// Connect request retries (while SentConn).
 	sentAt time.Time
 	tries  int
+	// File transfers, created when the TCP link is up: outgoing is accessed with stateMu
+	// held, incoming only by the link's read loop.
+	outgoing map[uint32]*Transfer
+	incoming map[uint32]*recvFile
 }
 
 const (

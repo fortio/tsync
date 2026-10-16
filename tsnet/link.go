@@ -148,6 +148,7 @@ func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string) {
 		return
 	}
 	s.sendLastClip(peer, l, conn)
+	s.sendLastOffer(peer, l, conn)
 	s.readLoop(ctx, peer, l, conn)
 }
 
@@ -161,6 +162,7 @@ func (s *Server) attach(peer Peer, l *link, conn net.Conn) bool {
 		return false
 	}
 	l.conn = conn
+	l.outgoing, l.incoming = make(map[uint32]*Transfer), make(map[uint32]*recvFile)
 	log.Infof("TCP link up with %s (%s)", peer.Name, conn.RemoteAddr())
 	if peerData, ok := s.Peers.Get(peer); ok {
 		s.change(s.Peers.Set(peer, peerData)) // just to bump version for UI refresh.
@@ -219,6 +221,7 @@ func (s *Server) handleIncoming(ctx context.Context, conn net.Conn) {
 		if found {
 			_ = conn.SetReadDeadline(time.Time{})
 			s.sendLastClip(peer, l, conn)
+			s.sendLastOffer(peer, l, conn)
 			s.readLoop(ctx, peer, l, conn)
 			return
 		}
@@ -255,6 +258,7 @@ func (s *Server) matchHello(remoteIP string, frame []byte, conn net.Conn) (Peer,
 			return peer, nil, false, true
 		}
 		l.conn = conn
+		l.outgoing, l.incoming = make(map[uint32]*Transfer), make(map[uint32]*recvFile)
 		log.Infof("TCP link up with %s (%s)", peer.Name, conn.RemoteAddr())
 		s.change(s.Peers.Set(peer, peerData)) // bump version for UI refresh.
 		return peer, l, true, false
@@ -265,6 +269,7 @@ func (s *Server) matchHello(remoteIP string, frame []byte, conn net.Conn) (Peer,
 func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn) {
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
+	defer s.linkClosed(l)
 	for {
 		frame, err := readFrame(conn)
 		var plain []byte
@@ -293,7 +298,9 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			when := time.Unix(0, int64(binary.BigEndian.Uint64(plain[1:9]))) //nolint:gosec // any value is fine.
 			s.receivedClip(peer, l, string(plain[9:]), when)
 		default:
-			log.Warnf("Ignoring unknown frame type %q from %s", plain[0], peer.Name)
+			if !s.handleFileFrame(peer, l, conn, plain) {
+				log.Warnf("Ignoring unknown frame type %q from %s", plain[0], peer.Name)
+			}
 		}
 	}
 }

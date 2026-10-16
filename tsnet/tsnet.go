@@ -52,6 +52,10 @@ type Config struct {
 	Storage *tcrypto.Storage
 	// NoAutoConnect disables automatically connecting to trusted peers when discovered (or link lost).
 	NoAutoConnect bool
+	// FileDir is where received files are saved (current directory if empty).
+	FileDir string
+	// MaxFileSize is the maximum size of received files (DefaultMaxFileSize if 0).
+	MaxFileSize int64
 }
 
 type ConnectionStatus int
@@ -92,6 +96,12 @@ type Server struct {
 	// last clipboard we sent, also sent to newly linked peers.
 	lastClip     string
 	lastClipTime time.Time
+	// file transfers
+	transfers  []*Transfer
+	nextFileID uint32
+	offers     map[uint32]*offer // our recent offers, by id.
+	lastOffer  *offer            // also offered to newly linked peers.
+	changes    atomic.Uint64     // OnChange version.
 	// TCP links
 	tcpListen *net.TCPListener
 	tcpPort   int
@@ -128,6 +138,9 @@ func (c *Config) NewServer() *Server {
 		links:    make(map[Peer]*link),
 		trusted:  make(map[string]string),
 		lastAuto: make(map[Peer]time.Time),
+		offers:   make(map[uint32]*offer),
+		// Random start so offer ids from different runs don't collide (eg in peers' lists).
+		nextFileID: rand.Uint32() >> 1, //nolint:gosec // not cryptographic.
 	}
 }
 
@@ -296,9 +309,12 @@ func (s *Server) OurAddress() *net.UDPAddr {
 	return s.ourSendAddr
 }
 
-func (s *Server) change(version uint64) {
+// change notifies OnChange. Peers map versions are ignored and our own counter is used
+// instead, so other changes (eg file transfers progress) also get distinct versions.
+func (s *Server) change(_ uint64) {
+	v := s.changes.Add(1)
 	if s.OnChange != nil {
-		s.OnChange(version)
+		s.OnChange(v)
 	}
 }
 
@@ -395,6 +411,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 					s.Sources.Set(src, peer)
 					s.dropLinkLocked(peer) // port change is also how we detect a restarted peer.
 					delete(s.lastAuto, peer)
+					s.expireOffersLocked(peer)
 				}
 				// Update last seen and epoch
 				s.change(s.Peers.Set(peer, data))

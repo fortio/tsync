@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -303,6 +304,11 @@ func TestRetryAndLastClipForNewLink(t *testing.T) {
 		t.Fatalf("SendClip with no peers: %d %v", n, err)
 	}
 	sentTime := time.Now()
+	early := filepath.Join(t.TempDir(), "early.txt")
+	_ = os.WriteFile(early, []byte("x"), 0o644)
+	if n, err = serverA.OfferFile(early); err != nil || n != 0 {
+		t.Fatalf("OfferFile with no peers: %d %v", n, err)
+	}
 	serverB := startTestServer(ctx, t, "HostB", idB, nil)
 	defer serverB.Stop()
 	peerB := waitForPeer(ctx, t, serverA, "HostB")
@@ -320,6 +326,7 @@ func TestRetryAndLastClipForNewLink(t *testing.T) {
 		clipTime = data.ClipTime
 		return data.Clip == "early clip"
 	})
+	waitTransfer(ctx, t, serverB, true, "early.txt", tsnet.TransferOffered) // file offer too.
 	if clipTime.After(sentTime) {
 		t.Errorf("clip time %v should be the original time (before %v)", clipTime, sentTime)
 	}
