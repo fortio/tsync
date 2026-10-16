@@ -38,12 +38,17 @@ func (s ConnectionStatus) String() string {
 	}
 }
 
-// linkContext is the handshake context, identical on both sides.
-func linkContext(name1, name2 string) string {
-	if name2 < name1 {
-		name1, name2 = name2, name1
+// linkContext is the handshake context, identical on both sides. It includes both
+// UDP ports, which are different for each run, so a signed ephemeral key captured
+// from a previous run can't be replayed (eg by someone advertising the peer's
+// public key from another address, as discovery itself isn't authenticated).
+func (s *Server) linkContext(peer Peer, peerData PeerData) string {
+	ours := fmt.Sprintf("%q:%d", s.Name, s.ourSendAddr.Port)
+	theirs := fmt.Sprintf("%q:%d", peer.Name, peerData.Port)
+	if theirs < ours {
+		ours, theirs = theirs, ours
 	}
-	return fmt.Sprintf("link1 %q %q", name1, name2)
+	return "link1 " + ours + " " + theirs
 }
 
 // ConnectToPeer initiates a connection to the specified peer, or accepts the
@@ -86,7 +91,7 @@ func (s *Server) dropLinkLocked(peer Peer) {
 }
 
 func (s *Server) sendHandshakeLocked(format string, peer Peer, peerData PeerData, eph *tcrypto.Ephemeral) error {
-	signed := s.Identity.SignEphemeral(eph, linkContext(s.Name, peer.Name))
+	signed := s.Identity.SignEphemeral(eph, s.linkContext(peer, peerData))
 	return s.sendDirect(peer, peerData, fmt.Sprintf(format, s.Name, peer.Name, signed))
 }
 
@@ -208,7 +213,7 @@ func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName, signed strin
 		}
 		l = &link{eph: eph}
 	}
-	session, err := s.Identity.VerifiedSession(l.eph, signed, linkContext(s.Name, peer.Name), pub)
+	session, err := s.Identity.VerifiedSession(l.eph, signed, s.linkContext(peer, peerData), pub)
 	if err != nil {
 		log.Errf("Invalid connection request from %s (%s): %v", peer.Name, peer.IP, err)
 		s.sendReject(peer, peerData, "invalid signature")
@@ -252,7 +257,7 @@ func (s *Server) handleAccept(from *net.UDPAddr, fromName, toName, signed string
 		}
 		return
 	}
-	session, err := s.Identity.VerifiedSession(l.eph, signed, linkContext(s.Name, peer.Name), pub)
+	session, err := s.Identity.VerifiedSession(l.eph, signed, s.linkContext(peer, peerData), pub)
 	if err != nil {
 		log.Errf("Invalid connection accept from %s (%s): %v", peer.Name, peer.IP, err)
 		return

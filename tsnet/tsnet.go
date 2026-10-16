@@ -359,11 +359,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 					s.Sources.Delete(src)
 					src.Port = data.Port
 					s.Sources.Set(src, peer)
-					s.dropLinkLocked(peer)
-				} else if data.Epoch < v.Epoch {
-					log.Infof("Peer %q restarted (epoch %d -> %d)", peer, v.Epoch, data.Epoch)
-					data.Status = NotLinked
-					s.dropLinkLocked(peer)
+					s.dropLinkLocked(peer) // port change is also how we detect a restarted peer.
 				}
 				// Update last seen and epoch
 				s.change(s.Peers.Set(peer, data))
