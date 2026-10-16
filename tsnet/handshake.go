@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"fortio.org/log"
 	"fortio.org/tsync/tcrypto"
@@ -23,7 +24,20 @@ type link struct {
 	tcpPort int      // peer's TCP link port (from its handshake message).
 	conn    net.Conn // TCP link once up (set once).
 	writeMu sync.Mutex
+	// Connect request retries (while SentConn).
+	sentAt time.Time
+	tries  int
 }
+
+const (
+	// HandshakeRetryDelay is how long we wait for an answer before resending a connect request.
+	HandshakeRetryDelay = 2 * time.Second
+	// HandshakeMaxTries is how many times we send a connect request (we then stay in SentConn,
+	// waiting for an accept, eg the other user may take a while to accept).
+	HandshakeMaxTries = 5
+	// AutoConnectInterval is the minimum time between automatic connection attempts to a trusted peer.
+	AutoConnectInterval = 10 * time.Second
+)
 
 func (s ConnectionStatus) String() string {
 	switch s {
@@ -70,11 +84,16 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 	if peerData.Status == Connected {
 		log.Infof("Already connected to %s, reconnecting", peer.Name)
 	}
+	return s.connectLocked(peer, peerData)
+}
+
+func (s *Server) connectLocked(peer Peer, peerData PeerData) error {
 	eph, err := tcrypto.NewEphemeralKeys()
 	if err != nil {
 		return err
 	}
-	s.setLinkLocked(peer, &link{eph: eph})
+	l := &link{eph: eph, sentAt: time.Now(), tries: 1}
+	s.setLinkLocked(peer, l)
 	if err = s.sendHandshakeLocked(ConnectMessageFormat, peer, peerData, eph); err != nil {
 		s.setStatusLocked(peer, peerData, Failed)
 		return err
@@ -82,6 +101,42 @@ func (s *Server) ConnectToPeer(peer Peer) error {
 	s.setStatusLocked(peer, peerData, SentConn)
 	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
 	return nil
+}
+
+// autoConnectLocked connects to peer if it's trusted, not linked and we didn't try recently.
+func (s *Server) autoConnectLocked(peer Peer, peerData PeerData, now time.Time) {
+	if s.NoAutoConnect || (peerData.Status != NotLinked && peerData.Status != Failed) || !s.isTrustedLocked(peer) {
+		return
+	}
+	if now.Sub(s.lastAuto[peer]) < AutoConnectInterval {
+		return
+	}
+	s.lastAuto[peer] = now
+	log.Infof("Auto connecting to trusted peer %s (%s)", peer.Name, peerData.HumanHash)
+	if err := s.connectLocked(peer, peerData); err != nil {
+		log.Errf("Auto connect to %s failed: %v", peer.Name, err)
+	}
+}
+
+// handshakeTick is called periodically: resends pending connect requests and auto connects trusted peers.
+func (s *Server) handshakeTick() {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	now := time.Now()
+	for _, kv := range s.Peers.KeysValuesSnapshot() {
+		peer, peerData := kv.Key, kv.Value
+		l := s.links[peer]
+		if peerData.Status == SentConn && l != nil && l.tries < HandshakeMaxTries && now.Sub(l.sentAt) >= HandshakeRetryDelay {
+			l.tries++
+			l.sentAt = now
+			log.Infof("No answer yet from %s, resending connection request (%d/%d)", peer.Name, l.tries, HandshakeMaxTries)
+			if err := s.sendHandshakeLocked(ConnectMessageFormat, peer, peerData, l.eph); err != nil {
+				log.Errf("Failed to resend connection request to %s: %v", peer.Name, err)
+			}
+			continue
+		}
+		s.autoConnectLocked(peer, peerData, now)
+	}
 }
 
 func (s *Server) setStatusLocked(peer Peer, peerData PeerData, status ConnectionStatus) {
@@ -255,9 +310,11 @@ func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName string, tcpPo
 			log.Errf("Failed to accept connection from %s: %v", peer.Name, err)
 		}
 	default:
+		if peerData.Status != ReceivedConn { // only once, not for each retry.
+			log.Infof("Connection request from new peer %s (%s): check its hash is %s and select it to accept",
+				peer.Name, peer.IP, peerData.HumanHash)
+		}
 		s.setStatusLocked(peer, peerData, ReceivedConn)
-		log.Infof("Connection request from new peer %s (%s): check its hash is %s and select it to accept",
-			peer.Name, peer.IP, peerData.HumanHash)
 	}
 }
 

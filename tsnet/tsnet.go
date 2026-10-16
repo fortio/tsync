@@ -50,6 +50,8 @@ type Config struct {
 	PeerTimeout           time.Duration     // default to 10s if 0
 	// Storage for the trusted peers (TOFU), if nil trust is only kept in memory.
 	Storage *tcrypto.Storage
+	// NoAutoConnect disables automatically connecting to trusted peers when discovered (or link lost).
+	NoAutoConnect bool
 }
 
 type ConnectionStatus int
@@ -85,6 +87,11 @@ type Server struct {
 	stateMu sync.Mutex
 	links   map[Peer]*link
 	trusted map[string]string // trusted public keys -> name
+	// last automatic connection attempt to trusted peers
+	lastAuto map[Peer]time.Time
+	// last clipboard we sent, also sent to newly linked peers.
+	lastClip     string
+	lastClipTime time.Time
 	// TCP links
 	tcpListen *net.TCPListener
 	tcpPort   int
@@ -115,11 +122,12 @@ type PeerData struct {
 
 func (c *Config) NewServer() *Server {
 	return &Server{
-		Config:  *c,
-		Peers:   smap.New[Peer, PeerData](),
-		Sources: smap.New[Source, Peer](),
-		links:   make(map[Peer]*link),
-		trusted: make(map[string]string),
+		Config:   *c,
+		Peers:    smap.New[Peer, PeerData](),
+		Sources:  smap.New[Source, Peer](),
+		links:    make(map[Peer]*link),
+		trusted:  make(map[string]string),
+		lastAuto: make(map[Peer]time.Time),
 	}
 }
 
@@ -255,6 +263,7 @@ func (s *Server) runAdv(ctx context.Context) {
 			}
 			// Run some cleanup/expire entries
 			s.PeersCleanup()
+			s.handshakeTick()
 		}
 	}
 }
@@ -278,6 +287,7 @@ func (s *Server) PeersCleanup() {
 		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
 		for _, peer := range toDelete {
 			s.dropLinkLocked(peer)
+			delete(s.lastAuto, peer)
 		}
 	}
 }
@@ -384,9 +394,11 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 					src.Port = data.Port
 					s.Sources.Set(src, peer)
 					s.dropLinkLocked(peer) // port change is also how we detect a restarted peer.
+					delete(s.lastAuto, peer)
 				}
 				// Update last seen and epoch
 				s.change(s.Peers.Set(peer, data))
+				s.autoConnectLocked(peer, data, time.Now())
 				s.stateMu.Unlock()
 				continue
 			}
@@ -402,6 +414,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 			log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
 				log.Any("Peer", peer), log.Any("Data", data))
 			s.change(nv)
+			s.autoConnectLocked(peer, data, time.Now())
 			s.stateMu.Unlock()
 		}
 	}

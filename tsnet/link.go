@@ -26,7 +26,9 @@ const (
 	maxFrameSize = MaxClipSize + 64
 
 	FrameHello = 'H' // first frame from the dialer, authenticates the connection.
-	FrameClip  = 'C' // clipboard (text) content.
+	FrameClip  = 'T' // clipboard: 8 bytes (big endian) unix nano time it was copied, then the text.
+	// FrameClipNoTime is the clipboard text without time, sent by older versions.
+	FrameClipNoTime = 'C'
 
 	linkDialTimeout  = 3 * time.Second
 	linkHelloTimeout = 5 * time.Second // also how long we wait for our side of the handshake to complete.
@@ -145,6 +147,7 @@ func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string) {
 	if !s.attach(peer, l, conn) {
 		return
 	}
+	s.sendLastClip(peer, l, conn)
 	s.readLoop(ctx, peer, l, conn)
 }
 
@@ -215,6 +218,7 @@ func (s *Server) handleIncoming(ctx context.Context, conn net.Conn) {
 		}
 		if found {
 			_ = conn.SetReadDeadline(time.Time{})
+			s.sendLastClip(peer, l, conn)
 			s.readLoop(ctx, peer, l, conn)
 			return
 		}
@@ -279,15 +283,22 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			return
 		}
 		switch plain[0] {
+		case FrameClipNoTime:
+			s.receivedClip(peer, l, string(plain[1:]), time.Now())
 		case FrameClip:
-			s.receivedClip(peer, l, string(plain[1:]))
+			if len(plain) < 9 {
+				log.Warnf("Invalid clipboard frame from %s (%d bytes)", peer.Name, len(plain))
+				continue
+			}
+			when := time.Unix(0, int64(binary.BigEndian.Uint64(plain[1:9]))) //nolint:gosec // any value is fine.
+			s.receivedClip(peer, l, string(plain[9:]), when)
 		default:
 			log.Warnf("Ignoring unknown frame type %q from %s", plain[0], peer.Name)
 		}
 	}
 }
 
-func (s *Server) receivedClip(peer Peer, l *link, clip string) {
+func (s *Server) receivedClip(peer Peer, l *link, clip string, when time.Time) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if s.links[peer] != l {
@@ -297,19 +308,49 @@ func (s *Server) receivedClip(peer Peer, l *link, clip string) {
 	if !ok {
 		return
 	}
+	// Resent on reconnect (or an older one racing with a newer one): keep the latest.
+	if !peerData.ClipTime.IsZero() && !when.After(peerData.ClipTime) {
+		log.LogVf("Ignoring not newer clipboard from %s (%v vs %v)", peer.Name, when, peerData.ClipTime)
+		return
+	}
 	log.Infof("Received %d bytes clipboard from %s", len(clip), peer.Name)
 	peerData.Clip = clip
-	peerData.ClipTime = time.Now()
+	peerData.ClipTime = when
 	s.change(s.Peers.Set(peer, peerData))
 }
 
+func clipPayload(clip string, when time.Time) []byte {
+	payload := make([]byte, 8, 8+len(clip))
+	binary.BigEndian.PutUint64(payload, uint64(when.UnixNano()))
+	return append(payload, clip...)
+}
+
+// sendLastClip sends our last clipboard (if any) to a newly linked peer.
+func (s *Server) sendLastClip(peer Peer, l *link, conn net.Conn) {
+	s.stateMu.Lock()
+	clip, when := s.lastClip, s.lastClipTime
+	s.stateMu.Unlock()
+	if when.IsZero() {
+		return
+	}
+	if err := l.send(conn, FrameClip, clipPayload(clip, when)); err != nil {
+		log.Errf("Failed to send last clipboard to %s: %v", peer.Name, err)
+		return
+	}
+	log.Infof("Sent last clipboard (%d bytes) to newly linked %s", len(clip), peer.Name)
+}
+
 // SendClip sends the clipboard text to all the peers we have a TCP link with.
+// It is also remembered and sent to peers that get linked later.
 // Returns how many peers it was sent to.
 func (s *Server) SendClip(clip string) (int, error) {
 	if len(clip) > MaxClipSize {
 		return 0, fmt.Errorf("clipboard too large: %d > %d", len(clip), MaxClipSize)
 	}
+	now := time.Now()
+	payload := clipPayload(clip, now)
 	s.stateMu.Lock()
+	s.lastClip, s.lastClipTime = clip, now
 	type target struct {
 		peer Peer
 		l    *link
@@ -325,7 +366,7 @@ func (s *Server) SendClip(clip string) (int, error) {
 	sent := 0
 	var errs []error
 	for _, t := range targets {
-		if err := t.l.send(t.conn, FrameClip, []byte(clip)); err != nil {
+		if err := t.l.send(t.conn, FrameClip, payload); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", t.peer.Name, err))
 			continue
 		}
