@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,15 @@ func TestSplitDropTokens(t *testing.T) {
 	}
 }
 
+// fileURL returns the file:// URL for an absolute path (file:///C:/... on Windows).
+func fileURL(p string) string {
+	p = filepath.ToSlash(p)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return (&url.URL{Scheme: "file", Path: p}).String()
+}
+
 func TestDroppedFiles(t *testing.T) {
 	dir := t.TempDir()
 	mk := func(name string) string {
@@ -47,7 +57,7 @@ func TestDroppedFiles(t *testing.T) {
 	spaced := mk("My File.txt")
 	quote := mk("it's.txt")
 	pct := mk("100% done.txt")
-	fileURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(spaced)}).String()
+	fileURI := fileURL(spaced)
 	for _, tc := range []struct {
 		name string
 		in   string
@@ -59,12 +69,15 @@ func TestDroppedFiles(t *testing.T) {
 		{"linux quote in name", "'" + strings.ReplaceAll(quote, "'", `'\''`) + "'", []string{quote}},
 		{"windows double quotes", `"` + spaced + `"`, []string{spaced}},
 		{"file uri", fileURI, []string{spaced}},
-		{"file uri with percent", (&url.URL{Scheme: "file", Path: filepath.ToSlash(pct)}).String(), []string{pct}},
+		{"file uri with percent", fileURL(pct), []string{pct}},
 		{"localhost file uri", strings.Replace(fileURI, "file://", "file://localhost", 1), []string{spaced}},
 		{"multiple", "'" + plain + "' '" + spaced + "' ", []string{plain, spaced}},
 		{"directory", dir, []string{dir}},
 		{"surrounding newline", plain + "\n", []string{plain}},
 	} {
+		if tc.name == "macos escaped" && runtime.GOOS == "windows" {
+			continue // backslashes are path separators there.
+		}
 		got, ok := DroppedFiles(tc.in)
 		if !ok || strings.Join(got, "|") != strings.Join(tc.out, "|") {
 			t.Errorf("%s: DroppedFiles(%q) = %q %v, expected %q", tc.name, tc.in, got, ok, tc.out)
