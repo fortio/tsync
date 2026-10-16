@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fortio.org/log"
+	"fortio.org/progressbar"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
 	"fortio.org/tsync/tsnet"
@@ -27,7 +28,9 @@ type FilePanel struct {
 
 type fileLine struct {
 	when  time.Time
-	text  string
+	lead  string // optional colored fixed width part (spinner, progress bar), not truncated.
+	leadW int    // its screen width.
+	text  string // plain text (truncated to fit).
 	color tcolor.BasicColor
 	offer *tsnet.Transfer // incoming offer (click/d to download).
 	y     int
@@ -73,13 +76,63 @@ func ShortPath(p string) string {
 	return p
 }
 
-func progressBar(done, size int64, width int) string {
+const barWidth = 20
+
+// progressBar renders a progress bar with 1/8th of a character resolution, same look as
+// fortio.org/progressbar (whose rendering isn't exported, only its building blocks), followed by the
+// percentage. Its screen width is width + 7.
+func progressBar(done, size int64, width int, color string) string {
 	frac := 1.0
 	if size > 0 {
-		frac = float64(done) / float64(size)
+		frac = min(1, float64(done)/float64(size))
 	}
-	filled := min(width, int(frac*float64(width)+0.5))
-	return fmt.Sprintf("%s%s %3.0f%%", strings.Repeat("█", filled), strings.Repeat("░", width-filled), 100*frac)
+	count := int(8*float64(width)*frac + 0.5)
+	full, rem := count/8, count%8
+	spaces := width - full
+	if rem > 0 {
+		spaces--
+	}
+	return color + strings.Repeat(progressbar.Full, full) + progressbar.FractionalBlocks[rem] +
+		strings.Repeat(progressbar.Space, spaces) + progressbar.Reset + fmt.Sprintf(" %5.1f%%", 100*frac)
+}
+
+// spinner returns the current spinner character (animated by repaints, ie progress updates).
+func spinner() string {
+	return progressbar.SpinnerChars[time.Now().UnixMilli()/100%int64(len(progressbar.SpinnerChars))]
+}
+
+// rateStr returns the transfer rate and, if not done, the estimated time left.
+func rateStr(done, size int64, elapsed time.Duration) string {
+	if done <= 0 || elapsed <= 0 {
+		return ""
+	}
+	speed := float64(done) / elapsed.Seconds()
+	res := HumanSize(int64(speed)) + "/s"
+	if done < size {
+		left := time.Duration(float64(size-done) / speed * float64(time.Second))
+		res += ", " + progressbar.HumanDuration(left) + " left"
+	}
+	return res
+}
+
+func activeLine(icon string, t tsnet.Transfer, color, dir string) fileLine {
+	return fileLine{
+		when:  t.Start,
+		lead:  icon + " " + spinner() + progressBar(t.Done, t.Size, barWidth, color),
+		leadW: 2 + 1 + 2 + barWidth + 7,
+		text: fmt.Sprintf(" %s/%s %s · %s %s %s", HumanSize(t.Done), HumanSize(t.Size),
+			rateStr(t.Done, t.Size, time.Since(t.Start)), t.Name, dir, SanitizeName(t.Peer.Name)),
+		color: tcolor.BrightBlue,
+	}
+}
+
+// doneStr is how long it took and the average speed.
+func doneStr(t tsnet.Transfer) string {
+	d := t.End.Sub(t.Start)
+	if d <= 0 || t.Size == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" in %s (%s)", progressbar.HumanDuration(d), rateStr(t.Size, t.Size, d))
 }
 
 // Offer offers the dropped file(s) to the linked peers, with feedback on errors.
@@ -118,17 +171,14 @@ func transferLine(t tsnet.Transfer) fileLine {
 		l.text = fmt.Sprintf("📥 %s offers %s (%s): click or press d to download", peer, t.Source, HumanSize(t.Size))
 		l.color, l.offer = tcolor.BrightYellow, &tc
 	case t.Incoming && t.State == tsnet.TransferActive:
-		l.text = fmt.Sprintf("📥 %s %s %s/%s from %s", t.Name, progressBar(t.Done, t.Size, 20),
-			HumanSize(t.Done), HumanSize(t.Size), peer)
-		l.color = tcolor.BrightBlue
+		return activeLine("📥", t, progressbar.GreenBar, "from")
 	case t.Incoming && t.State == tsnet.TransferDone:
-		l.text = fmt.Sprintf("✅ %s (%s) from %s saved as %s", t.Name, HumanSize(t.Size), peer, ShortPath(t.Path))
+		l.text = fmt.Sprintf("✅ %s (%s) from %s saved as %s%s", t.Name, HumanSize(t.Size), peer, ShortPath(t.Path), doneStr(t))
 		l.color = tcolor.BrightGreen
 	case t.State == tsnet.TransferActive:
-		l.text = fmt.Sprintf("📤 %s %s to %s", t.Name, progressBar(t.Done, t.Size, 20), peer)
-		l.color = tcolor.BrightBlue
+		return activeLine("📤", t, progressbar.BlueBar, "to")
 	case t.State == tsnet.TransferDone:
-		l.text = fmt.Sprintf("✅ %s (%s) sent to %s", t.Name, HumanSize(t.Size), peer)
+		l.text = fmt.Sprintf("✅ %s (%s) sent to %s%s", t.Name, HumanSize(t.Size), peer, doneStr(t))
 		l.color = tcolor.Green
 	default: // failed
 		dir := "from"
@@ -167,8 +217,8 @@ func (fp *FilePanel) Draw(y int, lines []fileLine) int {
 	ap.WriteAt(2, y, "%s", DarkGray(title))
 	for i, l := range lines {
 		l.y = y + 1 + i
-		text, _ := TruncateRightToFit(ap, l.text, ap.W-4)
-		ap.WriteAt(2, l.y, "%s", Color16(l.color, text))
+		text, _ := TruncateRightToFit(ap, l.text, ap.W-4-l.leadW)
+		ap.WriteAt(2, l.y, "%s%s", l.lead, Color16(l.color, text))
 		fp.rows = append(fp.rows, l)
 	}
 	return h

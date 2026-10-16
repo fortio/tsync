@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
@@ -19,11 +20,20 @@ func TestHumanSizeAndBar(t *testing.T) {
 			t.Errorf("HumanSize(%d) = %q, expected %q", tc.n, got, tc.out)
 		}
 	}
-	if got := progressBar(1, 4, 8); got != "██░░░░░░  25%" {
+	if got := progressBar(1, 4, 8, ""); got != "██      \x1b[0m  25.0%" {
 		t.Errorf("unexpected bar %q", got)
 	}
-	if got := progressBar(0, 0, 4); got != "████ 100%" {
+	if got := progressBar(3, 16, 4, ""); got != "▊   \x1b[0m  18.8%" { // 0.75 block: 1/8th resolution.
+		t.Errorf("unexpected fractional bar %q", got)
+	}
+	if got := progressBar(0, 0, 4, ""); got != "████\x1b[0m 100.0%" {
 		t.Errorf("unexpected bar for empty file %q", got)
+	}
+	if got := rateStr(1024, 4096, time.Second); got != "1.0 KiB/s, 3s left" {
+		t.Errorf("unexpected rate %q", got)
+	}
+	if got := rateStr(0, 4096, time.Second); got != "" {
+		t.Errorf("unexpected rate for nothing done %q", got)
 	}
 	home, _ := os.UserHomeDir()
 	if got := ShortPath(filepath.Join(home, "Downloads", "x")); got != "~"+string(filepath.Separator)+filepath.Join("Downloads", "x") {
@@ -67,14 +77,20 @@ func TestFilePanel(t *testing.T) {
 			`leno16 offers C:\x\Config.wtf (10 bytes): click or press d to download`,
 		},
 		{
-			tsnet.Transfer{Peer: peer, Incoming: true, Name: "a.bin", Size: 2048, Done: 1024, State: tsnet.TransferActive},
-			"a.bin ██████████░░░░░░░░░░  50% 1.0 KiB/2.0 KiB from leno16",
+			tsnet.Transfer{
+				Peer: peer, Incoming: true, Name: "a.bin", Size: 2048, Done: 1024, State: tsnet.TransferActive,
+				Start: time.Now().Add(-time.Second),
+			},
+			"s left · a.bin from leno16",
 		},
 		{
-			tsnet.Transfer{Peer: peer, Incoming: true, Name: "a.bin", Size: 1, Path: "/tmp/a.bin", State: tsnet.TransferDone},
-			"a.bin (1 byte) from leno16 saved as /tmp/a.bin",
+			tsnet.Transfer{
+				Peer: peer, Incoming: true, Name: "a.bin", Size: 2048, Path: "/tmp/a.bin", State: tsnet.TransferDone,
+				Start: time.Unix(10, 0), End: time.Unix(12, 0),
+			},
+			"a.bin (2.0 KiB) from leno16 saved as /tmp/a.bin in 2s (1.0 KiB/s)",
 		},
-		{tsnet.Transfer{Peer: peer, Name: "b", Size: 4, Done: 4, State: tsnet.TransferActive}, "b ████████████████████ 100% to leno16"},
+		{tsnet.Transfer{Peer: peer, Name: "b", Size: 4, Done: 4, State: tsnet.TransferActive}, "4 bytes/4 bytes 0 bytes/s · b to leno16"},
 		{tsnet.Transfer{Peer: peer, Name: "b", Size: 4, State: tsnet.TransferDone}, "b (4 bytes) sent to leno16"},
 		{tsnet.Transfer{Peer: peer, Name: "b", State: tsnet.TransferFailed, Err: "boom"}, "b to leno16: boom"},
 		{tsnet.Transfer{Peer: peer, Incoming: true, Name: "c", State: tsnet.TransferFailed, Err: "bad"}, "c from leno16: bad"},
