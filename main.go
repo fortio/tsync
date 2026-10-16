@@ -392,7 +392,7 @@ func Main() int {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
 	defer srv.Stop()
-	log.Infof("Started tsync with name %q, received files are saved in %s", srv.Name, cfg.FileDir)
+	log.Infof("Started tsync %s with name %q, received files are saved in %s", cli.LongVersion, srv.Name, cfg.FileDir)
 	log.Infof("Paste to send to connected peers, Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
