@@ -1,7 +1,8 @@
 #!/bin/bash
 # End to end test of the TUI: runs 2 tsync instances (separate identities) in tmux,
 # connects/accepts, pastes (raw bracketed paste with escape sequences) in A, checks
-# B shows the sanitized clip and that `c` on B copies it (OSC 52 -> tmux buffer).
+# B shows the sanitized clip and that `c` on B copies it (OSC 52 -> tmux buffer),
+# then that a restarted B auto reconnects (trusted) and gets the last clip again.
 # Needs tmux and multicast on the local interface.
 # Usage: scripts/e2e_tmux.sh [outdir] (default: a new temp dir, kept on failure)
 set -euo pipefail
@@ -75,6 +76,14 @@ if [ "$($T list-buffers | wc -l)" -ne 1 ]; then
 	fail "expected exactly 1 tmux buffer (escape injection?): $($T list-buffers)"
 fi
 echo "ok: clipboard has the sanitized clip"
+
+# Restart B (same identity): it should reconnect on its own (trusted) and get A's last clip again.
+$T kill-session -t B
+$T new-session -d -s B -x 100 -y 30 "env HOME=$OUT/hB $BIN $ARGS -name e2eB"
+wait_for B "Auto connecting to trusted peer e2eA" 15
+wait_for B "🔗 e2eA"
+wait_for A "🔗 e2eB"
+wait_for B "second    line red osc52:end"
 $T capture-pane -p -t A > "$OUT/A.txt"
 $T capture-pane -p -t B > "$OUT/B.txt"
 echo "PASS (screens in $OUT)"

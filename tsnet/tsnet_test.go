@@ -262,24 +262,77 @@ func TestHandshakeTrustedAndSimultaneous(t *testing.T) {
 			t.Fatalf("expected 1 trusted peer in %s, got %v %v", st.Dir, trusted, err)
 		}
 	}
-	// Restart both (same identities and storage): connect from A is auto accepted by B.
+	// Restart both (same identities and storage): they auto connect to each other (trusted).
 	serverA = startTestServer(ctx, t, "HostA", idA, storageA)
 	defer serverA.Stop()
 	serverB = startTestServer(ctx, t, "HostB", idB, storageB)
 	defer serverB.Stop()
 	peerB = waitForPeer(ctx, t, serverA, "HostB")
 	peerA = waitForPeer(ctx, t, serverB, "HostA")
-	if err := serverA.ConnectToPeer(peerB); err != nil {
-		t.Fatal(err)
-	}
 	waitForStatus(ctx, t, serverA, peerB, tsnet.Connected)
 	waitForStatus(ctx, t, serverB, peerA, tsnet.Connected)
 	checkClips(ctx, t, serverA, peerA, serverB, peerB)
-	// B going away: A's link drops back to NotLinked.
+	// B going away: A's link drops (and A then tries to auto reconnect).
 	serverB.Stop()
-	waitForStatus(ctx, t, serverA, peerB, tsnet.NotLinked)
-	if serverA.Linked(peerB) {
-		t.Errorf("A still linked to stopped B")
+	waitFor(ctx, t, "A no longer connected to stopped B", func() bool {
+		data, _ := serverA.Peers.Get(peerB)
+		return data.Status != tsnet.Connected && !serverA.Linked(peerB)
+	})
+}
+
+func TestRetryAndLastClipForNewLink(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	idA, _ := tcrypto.NewIdentity()
+	idB, _ := tcrypto.NewIdentity()
+	// A broadcasts slowly so B discovers it late: A's first connect request (as soon as it
+	// sees B) gets dropped by B as from an unknown peer, and must be resent.
+	cfgA := tsnet.Config{
+		Name: "HostA", Port: testPort, Mcast: testMultiCastAddr, Target: tsnet.DefaultTarget,
+		Identity: idA, BaseBroadcastInterval: 1500 * time.Millisecond,
+	}
+	serverA := cfgA.NewServer()
+	if err := serverA.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer serverA.Stop()
+	// Pasted before anyone is linked.
+	n, err := serverA.SendClip("early clip")
+	if err != nil || n != 0 {
+		t.Fatalf("SendClip with no peers: %d %v", n, err)
+	}
+	sentTime := time.Now()
+	serverB := startTestServer(ctx, t, "HostB", idB, nil)
+	defer serverB.Stop()
+	peerB := waitForPeer(ctx, t, serverA, "HostB")
+	if err = serverA.ConnectToPeer(peerB); err != nil {
+		t.Fatal(err)
+	}
+	peerA := waitForPeer(ctx, t, serverB, "HostA")
+	waitForStatus(ctx, t, serverB, peerA, tsnet.ReceivedConn)
+	if err = serverB.ConnectToPeer(peerA); err != nil {
+		t.Fatal(err)
+	}
+	var clipTime time.Time
+	waitFor(ctx, t, "B got A's early clip once linked", func() bool {
+		data, _ := serverB.Peers.Get(peerA)
+		clipTime = data.ClipTime
+		return data.Clip == "early clip"
+	})
+	if clipTime.After(sentTime) {
+		t.Errorf("clip time %v should be the original time (before %v)", clipTime, sentTime)
+	}
+	// Reconnecting resends it, but it's not newer so nothing changes.
+	if err = serverA.ConnectToPeer(peerB); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(ctx, t, serverA, peerB, tsnet.SentConn)
+	waitFor(ctx, t, "A linked again", func() bool { return serverA.Linked(peerB) })
+	waitFor(ctx, t, "B linked again", func() bool { return serverB.Linked(peerA) })
+	data, _ := serverB.Peers.Get(peerA)
+	if data.Clip != "early clip" || !data.ClipTime.Equal(clipTime) {
+		t.Errorf("unexpected clip after resend: %q %v (vs %v)", data.Clip, data.ClipTime, clipTime)
 	}
 }
 

@@ -29,7 +29,7 @@ func TestFrames(t *testing.T) {
 	if err = writeFrame(&buf, sessA, FrameClip, []byte("clip")); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"H", "Cclip"} {
+	for _, expected := range []string{"H", string(FrameClip) + "clip"} {
 		frame, rerr := readFrame(&buf)
 		if rerr != nil {
 			t.Fatal(rerr)

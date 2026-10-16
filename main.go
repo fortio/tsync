@@ -234,6 +234,7 @@ func Main() int {
 	fInterval := flag.Duration("interval", tsnet.DefaultBroadcastInterval,
 		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
 	fClipLines := flag.Int("clip-lines", 3, "Max number of lines shown for each clipboard box")
+	fAutoConnect := flag.Bool("auto-connect", true, "Automatically connect to trusted (previously accepted) peers")
 	cli.Main()
 	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
@@ -264,6 +265,7 @@ func Main() int {
 		Identity:              id,
 		BaseBroadcastInterval: *fInterval,
 		Storage:               storage,
+		NoAutoConnect:         !*fAutoConnect,
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
