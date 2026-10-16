@@ -46,6 +46,8 @@ type Config struct {
 	Identity              *tcrypto.Identity // long term identity for this server
 	BaseBroadcastInterval time.Duration     // default to 1.5s if 0
 	PeerTimeout           time.Duration     // default to 10s if 0
+	// Storage for the trusted peers (TOFU), if nil trust is only kept in memory.
+	Storage *tcrypto.Storage
 }
 
 type ConnectionStatus int
@@ -77,6 +79,10 @@ type Server struct {
 	Sources         *smap.Map[Source, Peer] // maps ip,port to peer
 	idStr           string
 	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
+	// Handshake/session state: stateMu serializes all read-modify-write of Peers data (status) and links.
+	stateMu sync.Mutex
+	links   map[Peer]*link
+	trusted map[string]string // trusted public keys -> name
 }
 
 type Source struct {
@@ -103,6 +109,8 @@ func (c *Config) NewServer() *Server {
 		Config:  *c,
 		Peers:   smap.New[Peer, PeerData](),
 		Sources: smap.New[Source, Peer](),
+		links:   make(map[Peer]*link),
+		trusted: make(map[string]string),
 	}
 }
 
@@ -120,6 +128,13 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	if s.PeerTimeout <= 0 {
 		s.PeerTimeout = DefaultPeerTimeout
+	}
+	if s.Storage != nil {
+		s.trusted, err = s.Storage.LoadTrusted()
+		if err != nil {
+			return err
+		}
+		log.Infof("Loaded %d trusted peers", len(s.trusted))
 	}
 	if s.Target == "" {
 		s.Target = DefaultTarget
@@ -223,6 +238,8 @@ func (s *Server) runAdv(ctx context.Context) {
 }
 
 func (s *Server) PeersCleanup() {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	var toDelete []Peer
 	var toDeleteSources []Source
 	now := time.Now()
@@ -237,6 +254,9 @@ func (s *Server) PeersCleanup() {
 		log.Infof("Removing %d expired peers: %v", len(toDelete), toDelete)
 		s.Peers.Delete(toDelete...)
 		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
+		for _, peer := range toDelete {
+			s.dropLinkLocked(peer)
+		}
 	}
 }
 
@@ -324,6 +344,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				}
 				continue
 			}
+			s.stateMu.Lock() // released at the end of this message processing
 			if v, ok := s.Peers.Get(peer); ok {
 				log.S(log.Verbose, "Already known peer", log.Any("Peer", peer), log.Any("OldData", v), log.Any("NewData", data))
 				// Transfer the human hash (same pub key so same human hash)
@@ -338,9 +359,15 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 					s.Sources.Delete(src)
 					src.Port = data.Port
 					s.Sources.Set(src, peer)
+					s.dropLinkLocked(peer)
+				} else if data.Epoch < v.Epoch {
+					log.Infof("Peer %q restarted (epoch %d -> %d)", peer, v.Epoch, data.Epoch)
+					data.Status = NotLinked
+					s.dropLinkLocked(peer)
 				}
 				// Update last seen and epoch
 				s.change(s.Peers.Set(peer, data))
+				s.stateMu.Unlock()
 				continue
 			}
 			pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
@@ -355,6 +382,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 			log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
 				log.Any("Peer", peer), log.Any("Data", data))
 			s.change(nv)
+			s.stateMu.Unlock()
 		}
 	}
 }
@@ -408,10 +436,9 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 
 const (
 	DiscoveryMessageFormat = "tsync1 %q %s e %d" // name, public key, epoch
-	ConnectMessageFormat   = "connect1 %q %q"    // requester_name, target_name
-	AcceptMessageFormat    = "accept1 %q"        // target_name
-	RejectMessageFormat    = "reject1 %q %q"     // target_name, reason
-	DataMessageFormat      = "data1 %q %s"       // target_name, signed_data
+	ConnectMessageFormat   = "connect1 %q %q %s" // from_name, target_name, signed ephemeral key
+	AcceptMessageFormat    = "accept1 %q %q %s"  // from_name, target_name, signed ephemeral key
+	RejectMessageFormat    = "reject1 %q %q %q"  // from_name, target_name, reason
 )
 
 func (s *Server) MCastMessageSend(epoch int32) error {
@@ -456,67 +483,4 @@ func PeerKVSort(a, b smap.KV[Peer, PeerData]) int {
 		return 0
 	}
 	return 1
-}
-
-// ConnectToPeer initiates a connection to the specified peer.
-func (s *Server) ConnectToPeer(peer Peer) error {
-	// Get peer's address from discovery data
-	peerData, exists := s.Peers.Get(peer)
-	if !exists {
-		return fmt.Errorf("peer %v not found (anymore) in peer list", peer)
-	}
-	directPeerAddr := &net.UDPAddr{
-		IP:   net.ParseIP(peer.IP),
-		Port: peerData.Port, // use the same port as discovery
-	}
-	// Send connection request using shared socket
-	message := fmt.Sprintf(ConnectMessageFormat, s.Name, peer.Name)
-	_, err := s.dualUDPSock.WriteToUDP([]byte(message), directPeerAddr)
-	if err != nil {
-		peerData.Status = Failed
-		s.Peers.Set(peer, peerData)
-		return err
-	}
-	// Update status to sent = connecting
-	peerData.Status = SentConn
-	s.Peers.Set(peer, peerData)
-	log.Infof("Connection request sent to %s (%s)", peer.Name, peer.IP)
-	return nil
-}
-
-// handleDirectMessage processes incoming direct connection messages.
-func (s *Server) handleDirectMessage(buf []byte, from *net.UDPAddr) {
-	msgStr := string(buf)
-
-	// Try to parse as connection request
-	var requesterName, targetName string
-	if n, err := fmt.Sscanf(msgStr, ConnectMessageFormat, &requesterName, &targetName); err == nil && n == 2 {
-		s.handleConnectionRequest(from, requesterName, targetName)
-		return
-	}
-
-	log.Warnf("Unknown direct message format from %v: %q", from, msgStr)
-}
-
-// handleConnectionRequest processes incoming connection requests.
-func (s *Server) handleConnectionRequest(from *net.UDPAddr, requesterName, targetName string) {
-	log.Infof("Received connection request from %v: %v to %v", from, requesterName, targetName)
-	src := Source{IP: from.IP.String(), Port: from.Port}
-	peer, exists := s.Sources.Get(src)
-	if !exists {
-		log.Errf("Connection request from unknown source %v (not in source to peer map)", src)
-		return
-	}
-	pData, found := s.Peers.Get(peer)
-	if !found {
-		log.Errf("Connection request from unknown peer %v (not in discovery map)", peer)
-		return
-	}
-	pData.Status = ReceivedConn
-	s.Peers.Set(peer, pData)
-	// Check if the target name matches our name
-	if targetName != s.Name {
-		log.Warnf("Connection request target name %q doesn't match our name %q", targetName, s.Name)
-		return
-	}
 }

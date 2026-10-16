@@ -24,7 +24,7 @@ func NoMCastOnMacInCI(t *testing.T) {
 	}
 }
 
-func TestPeerDiscovery(t *testing.T) { //nolint:gocognit // it's a test.
+func TestPeerDiscovery(t *testing.T) {
 	NoMCastOnMacInCI(t)
 
 	log.SetLogLevel(log.Info) // Set to Debug for more verbose output during test debugging
@@ -130,24 +130,111 @@ func TestPeerDiscovery(t *testing.T) { //nolint:gocognit // it's a test.
 		t.Fatalf("Failed to initiate connection from A to B: %v", err)
 	}
 
-	// Wait a bit for the connection message to be received
-	time.Sleep(200 * time.Millisecond)
+	waitForStatus(ctx, t, serverA, peerB, tsnet.SentConn)
+	waitForStatus(ctx, t, serverB, peerA, tsnet.ReceivedConn)
 
-	// Check that the connection was created on A's side
-	connA, exists := serverA.Peers.Get(peerB)
-	if !exists || connA.Status != tsnet.SentConn {
-		t.Fatal("Connection from A to B not found in A's connection map")
+	// B accepts (user clicking on A in B's UI).
+	if err = serverB.ConnectToPeer(peerA); err != nil {
+		t.Fatalf("Failed to accept connection from A on B: %v", err)
 	}
-	t.Logf("✓ Connection created on A's side: status %v", connA.Status)
-
-	// Check that the connection was received on B's side
-	connB, exists := serverB.Peers.Get(peerA)
-	if !exists || connB.Status != tsnet.ReceivedConn {
-		t.Fatal("Connection from A to B not found in B's connection map")
-	}
-	t.Logf("✓ Connection received on B's side: status %v", connB.Status)
-
+	waitForStatus(ctx, t, serverB, peerA, tsnet.Connected)
+	waitForStatus(ctx, t, serverA, peerB, tsnet.Connected)
 	t.Log("✓ Test completed successfully!")
+}
+
+// waitForStatus waits for srv to see peer in the given status.
+func waitForStatus(ctx context.Context, t *testing.T, srv *tsnet.Server, peer tsnet.Peer, status tsnet.ConnectionStatus) {
+	t.Helper()
+	for {
+		data, ok := srv.Peers.Get(peer)
+		if ok && data.Status == status {
+			t.Logf("✓ %s sees %s as %v", srv.Name, peer.Name, status)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("%s: timeout waiting for %s to be %v (is %v, found %t)", srv.Name, peer.Name, status, data.Status, ok)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// waitForPeer waits for srv to discover a peer with the given name.
+func waitForPeer(ctx context.Context, t *testing.T, srv *tsnet.Server, name string) tsnet.Peer {
+	t.Helper()
+	for {
+		for peer := range srv.Peers.All() {
+			if peer.Name == name {
+				return peer
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("%s: timeout waiting to discover %s", srv.Name, name)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func startTestServer(ctx context.Context, t *testing.T, name string, id *tcrypto.Identity, storage *tcrypto.Storage) *tsnet.Server {
+	t.Helper()
+	cfg := tsnet.Config{
+		Name:                  name,
+		Port:                  testPort,
+		Mcast:                 testMultiCastAddr,
+		Target:                tsnet.DefaultTarget,
+		Identity:              id,
+		BaseBroadcastInterval: 100 * time.Millisecond,
+		Storage:               storage,
+	}
+	srv := cfg.NewServer()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Failed to start %s: %v", name, err)
+	}
+	return srv
+}
+
+func TestHandshakeTrustedAndSimultaneous(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	idA, _ := tcrypto.NewIdentity()
+	idB, _ := tcrypto.NewIdentity()
+	storageA := &tcrypto.Storage{Dir: t.TempDir()}
+	storageB := &tcrypto.Storage{Dir: t.TempDir()}
+	// First session: simultaneous connect (both users click) -> connected without further accept.
+	serverA := startTestServer(ctx, t, "HostA", idA, storageA)
+	serverB := startTestServer(ctx, t, "HostB", idB, storageB)
+	peerB := waitForPeer(ctx, t, serverA, "HostB")
+	peerA := waitForPeer(ctx, t, serverB, "HostA")
+	if err := serverA.ConnectToPeer(peerB); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverB.ConnectToPeer(peerA); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(ctx, t, serverA, peerB, tsnet.Connected)
+	waitForStatus(ctx, t, serverB, peerA, tsnet.Connected)
+	serverA.Stop()
+	serverB.Stop()
+	for _, st := range []*tcrypto.Storage{storageA, storageB} {
+		trusted, err := st.LoadTrusted()
+		if err != nil || len(trusted) != 1 {
+			t.Fatalf("expected 1 trusted peer in %s, got %v %v", st.Dir, trusted, err)
+		}
+	}
+	// Restart both (same identities and storage): connect from A is auto accepted by B.
+	serverA = startTestServer(ctx, t, "HostA", idA, storageA)
+	defer serverA.Stop()
+	serverB = startTestServer(ctx, t, "HostB", idB, storageB)
+	defer serverB.Stop()
+	peerB = waitForPeer(ctx, t, serverA, "HostB")
+	peerA = waitForPeer(ctx, t, serverB, "HostA")
+	if err := serverA.ConnectToPeer(peerB); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(ctx, t, serverA, peerB, tsnet.Connected)
+	waitForStatus(ctx, t, serverB, peerA, tsnet.Connected)
 }
 
 func TestMultiplePeersDiscovery(t *testing.T) {
