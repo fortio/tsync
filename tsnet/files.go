@@ -47,6 +47,8 @@ const (
 	maxTransfers = 20
 	// progressInterval limits how often progress triggers OnChange.
 	progressInterval = 100 * time.Millisecond
+	// expiredOfferLinger is how long offers that can't be downloaded anymore stay listed.
+	expiredOfferLinger = 5 * time.Second
 )
 
 type TransferState int
@@ -91,6 +93,7 @@ type Transfer struct {
 	cancel   string // outgoing: set (reason) when the receiver aborted.
 	sent     bool   // outgoing: all sent, waiting for the receiver's confirmation.
 	lastProg time.Time
+	expired  bool // offer failed because the peer restarted or is gone: removed after a bit.
 }
 
 // offer is a file we offered (sent to our linked peers, and later linked ones).
@@ -332,7 +335,19 @@ func (s *Server) expireOffersLocked(peer Peer, why string) {
 	for _, t := range s.transfers {
 		if t.Incoming && t.Peer == peer && t.State == TransferOffered {
 			s.finishLocked(t, fmt.Errorf("no longer available (%s)", why))
+			t.expired = true
 		}
+	}
+}
+
+// pruneExpiredOffersLocked removes the expired offers once they've been shown for a bit.
+func (s *Server) pruneExpiredOffersLocked(now time.Time) {
+	n := len(s.transfers)
+	s.transfers = slices.DeleteFunc(s.transfers, func(t *Transfer) bool {
+		return t.expired && now.Sub(t.End) > expiredOfferLinger
+	})
+	if len(s.transfers) != n {
+		s.change(0)
 	}
 }
 

@@ -327,8 +327,13 @@ func TestPeersCleanupNotifiesChange(t *testing.T) {
 	if notified == 0 {
 		t.Errorf("OnChange not called after removing the last peer")
 	}
-	if offered.State != TransferFailed {
-		t.Errorf("offer from expired peer should be failed, got %v", offered.State)
+	if offered.State != TransferFailed || len(s.transfers) != 1 {
+		t.Errorf("offer from expired peer should be failed (and still listed), got %v", offered.State)
+	}
+	offered.End = offered.End.Add(-2 * expiredOfferLinger)
+	s.PeersCleanup()
+	if len(s.transfers) != 0 {
+		t.Errorf("expired offer should be removed after a bit")
 	}
 }
 

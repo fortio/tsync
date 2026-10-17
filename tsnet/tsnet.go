@@ -342,6 +342,7 @@ func (s *Server) PeersCleanup() {
 			delete(s.early, src)
 		}
 	}
+	s.pruneExpiredOffersLocked(now)
 }
 
 func (s *Server) OurAddress() *net.UDPAddr {
