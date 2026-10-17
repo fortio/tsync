@@ -327,11 +327,11 @@ func (s *Server) startSendLocked(peer Peer, l *link, conn net.Conn, id uint32) s
 	return ""
 }
 
-// expireOffersLocked fails the pending offers from peer (it restarted so they can't be downloaded anymore).
-func (s *Server) expireOffersLocked(peer Peer) {
+// expireOffersLocked fails the pending offers from peer (it restarted or is gone so they can't be downloaded anymore).
+func (s *Server) expireOffersLocked(peer Peer, why string) {
 	for _, t := range s.transfers {
 		if t.Incoming && t.Peer == peer && t.State == TransferOffered {
-			s.finishLocked(t, errors.New("no longer available (peer restarted)"))
+			s.finishLocked(t, fmt.Errorf("no longer available (%s)", why))
 		}
 	}
 }

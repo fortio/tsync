@@ -318,11 +318,57 @@ func TestPeersCleanupNotifiesChange(t *testing.T) {
 	peer := Peer{Name: "gone", IP: "10.0.0.1", PublicKey: "k"}
 	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now().Add(-2 * time.Second)})
 	s.Sources.Set(Source{IP: peer.IP, Port: 1234}, peer)
+	offered := &Transfer{Peer: peer, Incoming: true, State: TransferOffered}
+	s.addTransferLocked(offered)
 	s.PeersCleanup()
 	if s.Peers.Len() != 0 || s.Sources.Len() != 0 {
 		t.Errorf("expired peer not removed: %d peers, %d sources", s.Peers.Len(), s.Sources.Len())
 	}
 	if notified == 0 {
 		t.Errorf("OnChange not called after removing the last peer")
+	}
+	if offered.State != TransferFailed {
+		t.Errorf("offer from expired peer should be failed, got %v", offered.State)
+	}
+}
+
+// A connect request received before the sender's discovery is handled once it's discovered.
+func TestEarlyConnect(t *testing.T) {
+	id, _ := tcrypto.NewIdentity()
+	other, _ := tcrypto.NewIdentity()
+	s := (&Config{Name: "Us", Identity: id, NoAutoConnect: true, PeerTimeout: time.Minute}).NewServer()
+	s.idStr = id.PublicKeyToString()
+	s.runID = "ourrun"
+	s.ourSendAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000}
+	var err error
+	if s.dualUDPSock, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	defer s.dualUDPSock.Close()
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9} // discard port, nobody listens.
+	eph, _ := tcrypto.NewEphemeralKeys()
+	signed := other.SignEphemeral(eph, s.linkContext(Peer{Name: "Them"}, PeerData{RunID: "r1"}))
+	s.handleDirectMessage([]byte(fmt.Sprintf(ConnectMessageFormat, "Them", "Us", 1234, signed)), from)
+	if len(s.early) != 1 || s.Peers.Len() != 0 {
+		t.Fatalf("connect from unknown source should be stashed: %d early, %d peers", len(s.early), s.Peers.Len())
+	}
+	s.handleDiscovery([]byte(fmt.Sprintf(DiscoveryMessageFormat, "Them", other.PublicKeyToString(), 1, "r1")), from)
+	if len(s.early) != 0 {
+		t.Errorf("early message not consumed")
+	}
+	for p, d := range s.Peers.All() {
+		if p.Name != "Them" || d.Status != ReceivedConn {
+			t.Errorf("expected pending connection request from Them, got %v %+v", p, d)
+		}
+	}
+	// Stale ones are dropped.
+	s.handleDirectMessage([]byte("whatever"), &net.UDPAddr{IP: from.IP, Port: 10})
+	for src, e := range s.early {
+		e.at = e.at.Add(-2 * earlyMaxAge)
+		s.early[src] = e
+	}
+	s.PeersCleanup()
+	if len(s.early) != 0 {
+		t.Errorf("stale early message not dropped")
 	}
 }

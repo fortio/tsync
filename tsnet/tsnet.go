@@ -122,6 +122,8 @@ type Server struct {
 	tcpListen *net.TCPListener
 	tcpPort   int
 	ctx       context.Context //nolint:containedctx // server lifetime context, for dial goroutines.
+	// direct messages received before the sender's discovery, by source (see stashEarlyLocked).
+	early map[Source]earlyMsg
 }
 
 type Source struct {
@@ -156,6 +158,7 @@ func (c *Config) NewServer() *Server {
 		trusted:  make(map[string]string),
 		lastAuto: make(map[Peer]time.Time),
 		offers:   make(map[uint32]*offer),
+		early:    make(map[Source]earlyMsg),
 		// Random start so offer ids from different runs don't collide (eg in peers' lists).
 		nextFileID: rand.Uint32() >> 1, //nolint:gosec // not cryptographic.
 	}
@@ -330,8 +333,14 @@ func (s *Server) PeersCleanup() {
 		for _, peer := range toDelete {
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
+			s.expireOffersLocked(peer, "peer gone")
 		}
 		s.change(v) // UI refresh, otherwise the last peer to go away stays listed.
+	}
+	for src, e := range s.early {
+		if now.Sub(e.at) > earlyMaxAge {
+			delete(s.early, src)
+		}
 	}
 }
 
@@ -433,6 +442,12 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		}
 		return
 	}
+	var early []byte
+	defer func() { // runs after the unlock below.
+		if early != nil {
+			s.handleDirectMessage(early, addr)
+		}
+	}()
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if v, ok := s.Peers.Get(peer); ok {
@@ -454,11 +469,15 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 			s.Sources.Set(src, peer)
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
-			s.expireOffersLocked(peer)
+			s.expireOffersLocked(peer, "peer restarted")
+			s.sendDiscoveryTo(addr) // see below for new peers.
+			early = s.takeEarlyLocked(src)
 		}
 		// Update last seen and epoch
 		s.change(s.Peers.Set(peer, data))
-		s.autoConnectLocked(peer, data, time.Now())
+		if early == nil { // otherwise its connect request is handled instead.
+			s.autoConnectLocked(peer, data, time.Now())
+		}
 		return
 	}
 	pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
@@ -479,7 +498,9 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	// Tell the new peer about us right away (it may have just started and not seen our
 	// multicast yet) so a connect request from either side isn't from an unknown source.
 	s.sendDiscoveryTo(addr)
-	s.autoConnectLocked(peer, data, time.Now())
+	if early = s.takeEarlyLocked(src); early == nil {
+		s.autoConnectLocked(peer, data, time.Now())
+	}
 }
 
 // GetInternetInterface returns the interface used to reach a public IP (default route).
