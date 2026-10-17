@@ -325,12 +325,13 @@ func (s *Server) PeersCleanup() {
 	}
 	if len(toDelete) > 0 {
 		log.Infof("Removing %d expired peers: %v", len(toDelete), toDelete)
-		s.Peers.Delete(toDelete...)
+		v := s.Peers.Delete(toDelete...)
 		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
 		for _, peer := range toDelete {
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
 		}
+		s.change(v) // UI refresh, otherwise the last peer to go away stays listed.
 	}
 }
 
@@ -475,6 +476,9 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		log.Warnf("%s (%s) runs an older, incompatible tsync version: upgrade it to connect", peer.Name, peer.IP)
 	}
 	s.change(nv)
+	// Tell the new peer about us right away (it may have just started and not seen our
+	// multicast yet) so a connect request from either side isn't from an unknown source.
+	s.sendDiscoveryTo(addr)
 	s.autoConnectLocked(peer, data, time.Now())
 }
 
@@ -539,6 +543,17 @@ func newRunID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+func (s *Server) discoveryPayload(epoch int32) []byte {
+	return []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID))
+}
+
+// sendDiscoveryTo sends our discovery message directly to addr.
+func (s *Server) sendDiscoveryTo(addr *net.UDPAddr) {
+	if _, err := s.dualUDPSock.WriteToUDP(s.discoveryPayload(s.epoch.Load()), addr); err != nil {
+		log.LogVf("Error sending direct discovery to %v: %v", addr, err)
+	}
+}
+
 // discoveryPrefix is the start of DiscoveryMessageFormat.
 const discoveryPrefix = "tsync1 "
 
@@ -546,7 +561,7 @@ const discoveryPrefix = "tsync1 "
 // static peers and to the peers we know: when multicast only works one way (eg a NAT'ed
 // VM sees the host but not the other way around) or not at all, they still discover us.
 func (s *Server) directDiscovery(epoch int32) {
-	payload := []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID))
+	payload := s.discoveryPayload(epoch)
 	targets := slices.Clone(s.staticPeers)
 	for peer, data := range s.Peers.All() {
 		targets = append(targets, &net.UDPAddr{IP: net.ParseIP(peer.IP), Port: data.Port})

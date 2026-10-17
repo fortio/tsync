@@ -225,7 +225,17 @@ func TestHandleDiscovery(t *testing.T) {
 	s.idStr = id.PublicKeyToString()
 	s.runID = "ourrun"
 	s.ourSendAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000}
-	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 2000}
+	var err error
+	if s.dualUDPSock, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	defer s.dualUDPSock.Close()
+	them, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer them.Close()
+	from := them.LocalAddr().(*net.UDPAddr)
 	key := other.PublicKeyToString()
 	msg := func(name, k string, epoch int, run string) []byte {
 		return []byte(fmt.Sprintf(DiscoveryMessageFormat, name, k, epoch, run))
@@ -243,7 +253,14 @@ func TestHandleDiscovery(t *testing.T) {
 	s.handleDiscovery([]byte("garbage"), from) // decode error: ignored.
 	s.handleDiscovery(msg("Them", key, 1, "run1"), from)
 	peer, data := get("Them")
-	if data.RunID != "run1" || data.Port != 2000 || data.HumanHash != other.HumanID() || !data.Compatible() {
+	// New peer gets our discovery message right away.
+	_ = them.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, BufSize)
+	n, _, err := them.ReadFromUDP(buf)
+	if err != nil || !bytes.HasPrefix(buf[:n], []byte(discoveryPrefix+`"Us"`)) {
+		t.Errorf("expected our discovery sent to new peer, got %q, %v", buf[:n], err)
+	}
+	if data.RunID != "run1" || data.Port != from.Port || data.HumanHash != other.HumanID() || !data.Compatible() {
 		t.Errorf("unexpected new peer data %+v", data)
 	}
 	// Pretend we're connected, then it restarts (new run id): reset to NotLinked.
@@ -258,12 +275,12 @@ func TestHandleDiscovery(t *testing.T) {
 		t.Errorf("restart not detected: %+v", data)
 	}
 	// Port change also resets and updates the source map.
-	from2 := &net.UDPAddr{IP: from.IP, Port: 2001}
+	from2 := &net.UDPAddr{IP: from.IP, Port: from.Port + 1}
 	s.handleDiscovery(msg("Them", key, 2, "run2"), from2)
-	if p, ok := s.Sources.Get(Source{IP: "10.0.0.2", Port: 2001}); !ok || p != peer {
+	if p, ok := s.Sources.Get(Source{IP: "127.0.0.1", Port: from2.Port}); !ok || p != peer {
 		t.Errorf("source map not updated")
 	}
-	if _, ok := s.Sources.Get(Source{IP: "10.0.0.2", Port: 2000}); ok {
+	if _, ok := s.Sources.Get(Source{IP: "127.0.0.1", Port: from.Port}); ok {
 		t.Errorf("old source not removed")
 	}
 	// Older version (no run id): flagged, can't connect.
@@ -293,4 +310,19 @@ func TestHandleDiscovery(t *testing.T) {
 	// Dial me requests from unknown source or not connected peer are ignored.
 	s.handleDialMe(&net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1}, "x", "Us")
 	s.handleDialMe(from2, "Them", "Us")
+}
+
+func TestPeersCleanupNotifiesChange(t *testing.T) {
+	var notified uint64
+	s := (&Config{PeerTimeout: time.Second, OnChange: func(v uint64) { notified = v }}).NewServer()
+	peer := Peer{Name: "gone", IP: "10.0.0.1", PublicKey: "k"}
+	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now().Add(-2 * time.Second)})
+	s.Sources.Set(Source{IP: peer.IP, Port: 1234}, peer)
+	s.PeersCleanup()
+	if s.Peers.Len() != 0 || s.Sources.Len() != 0 {
+		t.Errorf("expired peer not removed: %d peers, %d sources", s.Peers.Len(), s.Sources.Len())
+	}
+	if notified == 0 {
+		t.Errorf("OnChange not called after removing the last peer")
+	}
 }
