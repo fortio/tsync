@@ -122,6 +122,8 @@ type Server struct {
 	tcpListen *net.TCPListener
 	tcpPort   int
 	ctx       context.Context //nolint:containedctx // server lifetime context, for dial goroutines.
+	// direct messages received before the sender's discovery, by source (see stashEarlyLocked).
+	early map[Source]earlyMsg
 }
 
 type Source struct {
@@ -156,6 +158,7 @@ func (c *Config) NewServer() *Server {
 		trusted:  make(map[string]string),
 		lastAuto: make(map[Peer]time.Time),
 		offers:   make(map[uint32]*offer),
+		early:    make(map[Source]earlyMsg),
 		// Random start so offer ids from different runs don't collide (eg in peers' lists).
 		nextFileID: rand.Uint32() >> 1, //nolint:gosec // not cryptographic.
 	}
@@ -325,13 +328,21 @@ func (s *Server) PeersCleanup() {
 	}
 	if len(toDelete) > 0 {
 		log.Infof("Removing %d expired peers: %v", len(toDelete), toDelete)
-		s.Peers.Delete(toDelete...)
+		v := s.Peers.Delete(toDelete...)
 		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
 		for _, peer := range toDelete {
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
+			s.expireOffersLocked(peer, "peer gone")
+		}
+		s.change(v) // UI refresh, otherwise the last peer to go away stays listed.
+	}
+	for src, e := range s.early {
+		if now.Sub(e.at) > earlyMaxAge {
+			delete(s.early, src)
 		}
 	}
+	s.pruneExpiredOffersLocked(now)
 }
 
 func (s *Server) OurAddress() *net.UDPAddr {
@@ -432,6 +443,12 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		}
 		return
 	}
+	var early []byte
+	defer func() { // runs after the unlock below.
+		if early != nil {
+			s.handleDirectMessage(early, addr)
+		}
+	}()
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if v, ok := s.Peers.Get(peer); ok {
@@ -453,11 +470,15 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 			s.Sources.Set(src, peer)
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
-			s.expireOffersLocked(peer)
+			s.expireOffersLocked(peer, "peer restarted")
+			s.sendDiscoveryTo(addr) // see below for new peers.
+			early = s.takeEarlyLocked(src)
 		}
 		// Update last seen and epoch
 		s.change(s.Peers.Set(peer, data))
-		s.autoConnectLocked(peer, data, time.Now())
+		if early == nil { // otherwise its connect request is handled instead.
+			s.autoConnectLocked(peer, data, time.Now())
+		}
 		return
 	}
 	pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
@@ -475,7 +496,12 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		log.Warnf("%s (%s) runs an older, incompatible tsync version: upgrade it to connect", peer.Name, peer.IP)
 	}
 	s.change(nv)
-	s.autoConnectLocked(peer, data, time.Now())
+	// Tell the new peer about us right away (it may have just started and not seen our
+	// multicast yet) so a connect request from either side isn't from an unknown source.
+	s.sendDiscoveryTo(addr)
+	if early = s.takeEarlyLocked(src); early == nil {
+		s.autoConnectLocked(peer, data, time.Now())
+	}
 }
 
 // GetInternetInterface returns the interface used to reach a public IP (default route).
@@ -539,6 +565,17 @@ func newRunID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+func (s *Server) discoveryPayload(epoch int32) []byte {
+	return []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID))
+}
+
+// sendDiscoveryTo sends our discovery message directly to addr.
+func (s *Server) sendDiscoveryTo(addr *net.UDPAddr) {
+	if _, err := s.dualUDPSock.WriteToUDP(s.discoveryPayload(s.epoch.Load()), addr); err != nil {
+		log.LogVf("Error sending direct discovery to %v: %v", addr, err)
+	}
+}
+
 // discoveryPrefix is the start of DiscoveryMessageFormat.
 const discoveryPrefix = "tsync1 "
 
@@ -546,7 +583,7 @@ const discoveryPrefix = "tsync1 "
 // static peers and to the peers we know: when multicast only works one way (eg a NAT'ed
 // VM sees the host but not the other way around) or not at all, they still discover us.
 func (s *Server) directDiscovery(epoch int32) {
-	payload := []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID))
+	payload := s.discoveryPayload(epoch)
 	targets := slices.Clone(s.staticPeers)
 	for peer, data := range s.Peers.All() {
 		targets = append(targets, &net.UDPAddr{IP: net.ParseIP(peer.IP), Port: data.Port})

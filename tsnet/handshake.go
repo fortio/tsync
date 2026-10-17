@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -235,6 +236,9 @@ func (s *Server) addTrustedLocked(peer Peer) {
 
 // handleDirectMessage processes incoming direct (handshake) messages.
 func (s *Server) handleDirectMessage(buf []byte, from *net.UDPAddr) {
+	if s.stashEarly(buf, from) {
+		return
+	}
 	msgStr := string(buf)
 	var fromName, toName, arg string
 	var tcpPort int
@@ -255,6 +259,47 @@ func (s *Server) handleDirectMessage(buf []byte, from *net.UDPAddr) {
 		return
 	}
 	log.Warnf("Unknown direct message format from %v: %q", from, msgStr)
+}
+
+const (
+	maxEarly    = 16              // max stashed early messages (one per source).
+	earlyMaxAge = 5 * time.Second // early messages are dropped if the discovery doesn't follow by then.
+)
+
+type earlyMsg struct {
+	msg []byte
+	at  time.Time
+}
+
+// stashEarly keeps a direct message from a source we didn't discover yet (it saw our discovery
+// before we saw its, eg we just started), so it's handled once its discovery arrives.
+func (s *Server) stashEarly(buf []byte, from *net.UDPAddr) bool {
+	src := Source{IP: from.IP.String(), Port: from.Port}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if _, known := s.Sources.Get(src); known {
+		return false
+	}
+	if _, ok := s.early[src]; !ok && len(s.early) >= maxEarly {
+		log.Warnf("Direct message from unknown source %v dropped (too many pending)", src)
+		return true
+	}
+	log.Infof("Direct message from %v before its discovery, will handle it once discovered", src)
+	s.early[src] = earlyMsg{msg: slices.Clone(buf), at: time.Now()}
+	return true
+}
+
+// takeEarlyLocked returns (and forgets) the recent early message from src, if any.
+func (s *Server) takeEarlyLocked(src Source) []byte {
+	e, ok := s.early[src]
+	if !ok {
+		return nil
+	}
+	delete(s.early, src)
+	if time.Since(e.at) > earlyMaxAge {
+		return nil
+	}
+	return e.msg
 }
 
 // senderLocked finds the discovered peer matching the source address and names of a direct message.
