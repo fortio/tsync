@@ -424,6 +424,12 @@ func (s *Server) streamFile(l *link, conn net.Conn, t *Transfer) error {
 	if total != t.Size {
 		return abort(fmt.Errorf("file changed size while sending (%d vs %d)", total, t.Size))
 	}
+	// Before sending the end: the receiver's confirmation can come back before we return.
+	s.stateMu.Lock()
+	if t.cancel == "" {
+		t.sent = true
+	}
+	s.stateMu.Unlock()
 	return l.send(conn, FrameFileEnd, append(binary.BigEndian.AppendUint32(nil, t.ID), h.Sum(nil)...))
 }
 
