@@ -555,6 +555,11 @@ func (s *Server) fileOffered(peer Peer, id uint32, payload []byte) {
 	defer s.stateMu.Unlock()
 	for _, t := range s.transfers {
 		if t.Incoming && t.Peer == peer && t.ID == id {
+			if t.expired { // failed because the peer looked restarted/gone but it is back with the offer.
+				t.State, t.Err, t.End, t.expired = TransferOffered, "", time.Time{}, false
+				s.change(0)
+				return
+			}
 			return // already known (eg resent on reconnect).
 		}
 	}
