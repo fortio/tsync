@@ -145,7 +145,7 @@ func SendPastes(srv *tsnet.Server, clips *ClipPanel, files *FilePanel, pastes []
 	sent := false
 	for _, p := range pastes {
 		if p.Truncated {
-			log.Errf("Paste too large (over %s), not sent", sizeStr(tsnet.MaxClipSize))
+			Notices.Errf("Paste too large (over %s), not sent", sizeStr(tsnet.MaxClipSize))
 			continue
 		}
 		if paths, ok := DroppedFiles(p.Text); ok {
@@ -156,7 +156,7 @@ func SendPastes(srv *tsnet.Server, clips *ClipPanel, files *FilePanel, pastes []
 		text := SanitizeClip(p.Text)
 		n, err := srv.SendClip(text)
 		if err != nil {
-			log.Errf("Error sending clipboard: %v", err)
+			Notices.Errf("Error sending clipboard: %v", err)
 		}
 		log.Infof("Sent %s to %d peers", sizeStr(len(text)), n)
 		clips.SetOurs(text, n)
@@ -257,20 +257,29 @@ func (t *TopArea) Draw(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) int {
 	t.files.Draw(tableHeight+boxesHeight, fileLines)
 	if top > 0 {
 		ap.MoveCursor(0, top-1)
-		banner, pending := PendingBanner(peers)
-		msg := t.help
-		if pending {
-			msg = banner
-		}
-		h, hw := TruncateRightToFit(ap, msg, ap.W-4)
-		left := (ap.W - hw) / 2
-		if pending {
-			h = tcolor.Inverse + Color16(tcolor.BrightYellow, h)
-		}
-		ap.WriteString(DarkGray(strings.Repeat("─", left)) + h + DarkGray(strings.Repeat("─", ap.W-left-hw)))
+		t.drawSeparator(peers)
 	}
 	t.bellOnNewPending(peers)
 	return tableWidth
+}
+
+// drawSeparator draws the bottom line of the top area: pending banner, else notice, else help.
+func (t *TopArea) drawSeparator(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) {
+	ap := t.ap
+	msg := t.help
+	style := ""
+	if nmsg, ncolor, ok := Notices.Current(); ok {
+		msg, style = nmsg, tcolor.Inverse+ncolor.Foreground()
+	}
+	if banner, pending := PendingBanner(peers); pending {
+		msg, style = banner, tcolor.Inverse+tcolor.BrightYellow.Foreground()
+	}
+	h, hw := TruncateRightToFit(ap, msg, ap.W-4)
+	left := (ap.W - hw) / 2
+	if style != "" {
+		h = style + h + tcolor.Reset
+	}
+	ap.WriteString(DarkGray(strings.Repeat("─", left)) + h + DarkGray(strings.Repeat("─", ap.W-left-hw)))
 }
 
 // HandleKey handles a key press, returns false to exit.
@@ -285,7 +294,7 @@ func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, files *FilePanel,
 			peer := peers[connectToPeerIdx-1]
 			InitiatePeerConnection(srv, peer.Key, peer.Value)
 		} else {
-			log.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
+			Notices.Warnf("No peer with index %d to connect to (max %d).", connectToPeerIdx, maxPeerIdx)
 		}
 	case 'd':
 		files.DownloadLatest()
@@ -293,7 +302,7 @@ func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, files *FilePanel,
 		if box, ok := clips.Latest(); ok {
 			clips.Copy(box)
 		} else {
-			log.Warnf("No received clipboard to copy yet")
+			Notices.Warnf("No received clipboard to copy yet")
 		}
 	case 'q', 'Q', 3: // Ctrl-C
 		log.Infof("Exiting on %q", c)
@@ -311,7 +320,7 @@ func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.P
 		log.Infof("Initiating connection to peer %q at %s:%d", peer.Name, peer.IP, peerData.Port)
 	}
 	if connErr := srv.ConnectToPeer(peer); connErr != nil {
-		log.Errf("Failed to connect to peer %s: %v", peer.Name, connErr)
+		Notices.Errf("Failed to connect to peer %s: %v", peer.Name, connErr)
 	}
 }
 
@@ -453,7 +462,7 @@ func Main() int {
 		other, pastes := paste.Feed(ap.Data)
 		ap.Data = other
 		ap.MouseDecodeAll()
-		if SendPastes(srv, clips, files, pastes) {
+		if SendPastes(srv, clips, files, pastes) || Notices.NeedsRepaint() {
 			prev = ^uint64(0) // force repaint
 		}
 		curVersion := version.Load()

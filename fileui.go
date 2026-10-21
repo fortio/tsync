@@ -237,7 +237,7 @@ func (fp *FilePanel) DownloadLatest() {
 		}
 	}
 	if latest == nil {
-		log.Warnf("No pending file offer to download")
+		Notices.Warnf("No pending file offer to download")
 		return
 	}
 	fp.download(latest)
@@ -245,6 +245,6 @@ func (fp *FilePanel) DownloadLatest() {
 
 func (fp *FilePanel) download(t *tsnet.Transfer) {
 	if err := fp.srv.AcceptFile(t.Peer, t.ID); err != nil {
-		log.Errf("Can't download %s from %s: %v", t.Name, SanitizeName(t.Peer.Name), err)
+		Notices.Errf("Can't download %s from %s: %v", t.Name, SanitizeName(t.Peer.Name), err)
 	}
 }
