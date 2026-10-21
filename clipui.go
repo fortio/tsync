@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"fortio.org/log"
 	"fortio.org/progressbar"
 	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
@@ -152,7 +151,7 @@ func (cp *ClipPanel) Latest() (clipBox, bool) {
 // Copy copies the box content to our clipboard (OSC 52).
 func (cp *ClipPanel) Copy(b clipBox) {
 	cp.ap.CopyToClipboard(b.entry.text)
-	log.Infof("Copied %s from %s to the clipboard", sizeStr(len(b.entry.text)), b.from)
+	Notices.Infof("Clipboard copied (%s from %s)", sizeStr(len(b.entry.text)), b.from)
 }
 
 // SanitizeName makes a (peer provided) name safe to display on one line.

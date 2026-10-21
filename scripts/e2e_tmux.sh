@@ -69,7 +69,7 @@ wait_for B "second    line red osc52:end"
 wait_for B "… (+3 lines)"
 
 $T send-keys -t B c
-wait_for B "Copied 57 b from e2eA to the clipboard"
+wait_for B "Clipboard copied (57 b from e2eA)"
 expected=$(printf 'hello from A\nsecond\tline red osc52:end\nthird\nfourth\nfifth')
 copied=$($T show-buffer)
 if [ "$copied" != "$expected" ]; then
