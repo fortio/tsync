@@ -76,10 +76,10 @@ func TestCheckFilesAndDownloadDir(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "ok.txt")
 	_ = os.WriteFile(f, []byte("x"), 0o644)
-	if err := CheckFiles([]string{f}); err != nil {
+	if err := CheckFiles([]string{f, dir}); err != nil {
 		t.Errorf("unexpected error %v", err)
 	}
-	for _, bad := range [][]string{{dir}, {f, filepath.Join(dir, "missing")}} {
+	for _, bad := range [][]string{{f, filepath.Join(dir, "missing")}} {
 		if err := CheckFiles(bad); err == nil {
 			t.Errorf("expected error for %v", bad)
 		}
@@ -95,7 +95,6 @@ func TestCheckFilesErrors(t *testing.T) {
 		path, msg string
 	}{
 		{filepath.Join(dir, "missing"), "missing\": "},
-		{dir, "not a regular file"},
 	} {
 		err := CheckFiles([]string{tc.path})
 		if err == nil || !strings.Contains(err.Error(), tc.msg) || strings.Contains(err.Error(), "stat ") {

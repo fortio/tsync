@@ -144,8 +144,8 @@ func TestFileTransfer(t *testing.T) {
 		}
 	}
 	checkNoPartial(t, dirB)
-	if _, err := serverA.OfferFile(src); err == nil {
-		t.Errorf("expected error offering a directory")
+	if _, err := serverA.OfferFile(filepath.Join(src, "nonexistent")); err == nil {
+		t.Errorf("expected error offering a missing file")
 	}
 	unreadable := filepath.Join(src, "unreadable.txt")
 	_ = os.WriteFile(unreadable, []byte("x"), 0o000)

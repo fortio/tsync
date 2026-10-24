@@ -67,7 +67,7 @@ type Config struct {
 	// Peers are host[:port] addresses we also send our discovery message to directly (unicast),
 	// for when multicast doesn't work (port defaults to Port).
 	Peers []string
-	// MaxRate limits the file sending rate in bytes per second (0 for unlimited).
+	// MaxRate limits the file sending rate in bytes per second, per peer link (0 for unlimited).
 	MaxRate int64
 }
 
@@ -112,7 +112,8 @@ type Server struct {
 	// file transfers
 	transfers  []*Transfer
 	nextFileID uint32
-	offers     map[uint32]*offer // our recent offers, by id.
+	offers     map[uint32]*offer   // our recent offers, by id.
+	rdirs      map[dirKey]*recvDir // directories being downloaded.
 	// resolved Config.Peers
 	staticPeers []*net.UDPAddr
 	// random id of this run, in our discovery messages (handshake context, restart detection).
@@ -160,6 +161,7 @@ func (c *Config) NewServer() *Server {
 		trusted:  make(map[string]string),
 		lastAuto: make(map[Peer]time.Time),
 		offers:   make(map[uint32]*offer),
+		rdirs:    make(map[dirKey]*recvDir),
 		early:    make(map[Source]earlyMsg),
 		// Random start so offer ids from different runs don't collide (eg in peers' lists).
 		nextFileID: rand.Uint32() >> 1, //nolint:gosec // not cryptographic.
