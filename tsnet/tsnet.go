@@ -331,7 +331,7 @@ func (s *Server) PeersCleanup() {
 		}
 	}
 	if len(toDelete) > 0 {
-		log.Infof("Removing %d expired peers: %v", len(toDelete), toDelete)
+		log.Infof("Removing %d expired peers: %q", len(toDelete), toDelete)
 		v := s.Peers.Delete(toDelete...)
 		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
 		for _, peer := range toDelete {
@@ -440,10 +440,11 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
 	if peer == us {
 		if theirEpoch <= s.epoch.Load() {
-			log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%v %v)", peer, data)
+			log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%q run %q epoch %d)", peer, data.RunID, data.Epoch)
 			s.Stop()
 		} else {
-			log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%v %v)", peer, data)
+			log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%q run %q epoch %d)",
+				peer, data.RunID, data.Epoch)
 		}
 		return
 	}
