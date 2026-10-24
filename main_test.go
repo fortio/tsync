@@ -126,3 +126,12 @@ func TestParseRate(t *testing.T) {
 		}
 	}
 }
+
+func TestRateString(t *testing.T) {
+	if got := RateString(0); got != "unlimited" {
+		t.Errorf("RateString(0) = %q", got)
+	}
+	if got := RateString(50 * 1024); got != "50 Kb/s" {
+		t.Errorf("RateString(50Kb) = %q", got)
+	}
+}

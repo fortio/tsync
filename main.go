@@ -162,6 +162,19 @@ func ParseRate(s string) (int64, error) {
 	return max(1, int64(v*float64(mult))), nil
 }
 
+func logStartup(srv *tsnet.Server, cfg *tsnet.Config) {
+	log.Infof("Started tsync %s with name %q, received files are saved in %s, max send rate: %s",
+		cli.LongVersion, srv.Name, cfg.FileDir, RateString(cfg.MaxRate))
+}
+
+// RateString is the rate in human form (eg 50 Kb/s) or "unlimited" if there is no limit.
+func RateString(rate int64) string {
+	if rate <= 0 {
+		return "unlimited"
+	}
+	return progressbar.HumanBytes(rate) + "/s"
+}
+
 // RateFlag defines a rate flag (see ParseRate) and returns a pointer to its value in bytes per second.
 func RateFlag(name string) *int64 {
 	var rate int64
@@ -437,7 +450,7 @@ func Main() int {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
 	defer srv.Stop()
-	log.Infof("Started tsync %s with name %q, received files are saved in %s", cli.LongVersion, srv.Name, cfg.FileDir)
+	logStartup(srv, &cfg)
 	log.Infof("Paste to send to connected peers, Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
