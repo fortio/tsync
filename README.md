@@ -63,6 +63,7 @@ tsync [flags] [file...]
 
 The useful ones:
 - `-name` to use another name than the hostname, eg to run 2 instances on one machine.
+- `-max-rate` limits the file sending rate, eg `-max-rate 10MB/s` (K, M, G are powers of 1024, case insensitive). Default is unlimited.
 - `-dir` for where received files are saved. Default is `~/Downloads` if it exists, else the current directory.
 - `-peers host[:port],...` to also send discovery directly to these addresses when multicast doesn't work at all (some VPNs, cloud VMs...). The port defaults to 29556.
 - `-auto-connect=false` to not reconnect automatically to accepted peers.

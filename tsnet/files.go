@@ -393,6 +393,12 @@ func (s *Server) streamFile(l *link, conn net.Conn, t *Transfer) error {
 	buf := make([]byte, 4+FileChunkSize)
 	binary.BigEndian.PutUint32(buf, t.ID)
 	var total int64
+	// With a max rate, send small chunks (about 10 per second) so progress stays smooth.
+	chunk := FileChunkSize
+	if s.Config.MaxRate > 0 {
+		chunk = int(min(int64(chunk), max(s.Config.MaxRate/10, 1)))
+	}
+	start := time.Now()
 	for {
 		s.stateMu.Lock()
 		cancel := t.cancel
@@ -400,7 +406,7 @@ func (s *Server) streamFile(l *link, conn net.Conn, t *Transfer) error {
 		if cancel != "" {
 			return nil // sendFile reports it.
 		}
-		n, rerr := f.Read(buf[4:])
+		n, rerr := f.Read(buf[4 : 4+chunk])
 		if n > 0 {
 			total += int64(n)
 			if total > t.Size {
@@ -413,6 +419,9 @@ func (s *Server) streamFile(l *link, conn net.Conn, t *Transfer) error {
 			s.stateMu.Lock()
 			s.progressLocked(t, int64(n))
 			s.stateMu.Unlock()
+			if s.Config.MaxRate > 0 {
+				time.Sleep(time.Until(start.Add(time.Duration(total * int64(time.Second) / s.Config.MaxRate))))
+			}
 		}
 		if errors.Is(rerr, io.EOF) {
 			break
