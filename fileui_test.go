@@ -99,3 +99,17 @@ func TestFilePanel(t *testing.T) {
 	}
 	fp.DownloadLatest() // no pending offer: just a warning.
 }
+
+func TestFilePanelOfferMaxRate(t *testing.T) {
+	ap, _, _ := newTestAP(100, 30)
+	id, _ := tcrypto.NewIdentity()
+	srv := (&tsnet.Config{Name: "test", Identity: id, MaxRate: 50 * 1024}).NewServer()
+	fp := NewFilePanel(ap, srv, t.TempDir(), 5)
+	f := filepath.Join(t.TempDir(), "doc.pdf")
+	_ = os.WriteFile(f, make([]byte, 2048), 0o644)
+	fp.Offer([]string{f})
+	lines := fp.Lines()
+	if len(lines) != 1 || !strings.Contains(lines[0].text, "offered "+f+" (2 Kb), will be sent (at max 50 Kb/s) to peers") {
+		t.Errorf("unexpected local lines %+v", lines)
+	}
+}

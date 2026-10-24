@@ -129,6 +129,10 @@ func (fp *FilePanel) Offer(paths []string) {
 			line.text = fmt.Sprintf("📤 offered %s (%s) to %d peer%s", p, progressbar.HumanBytes(fi.Size()), n, plural(n))
 			if n == 0 {
 				line.text = fmt.Sprintf("📤 offered %s (%s), will be sent to peers when they connect", p, progressbar.HumanBytes(fi.Size()))
+				if rate := fp.srv.Config.MaxRate; rate > 0 {
+					line.text = fmt.Sprintf("📤 offered %s (%s), will be sent (at max %s/s) to peers",
+						p, progressbar.HumanBytes(fi.Size()), progressbar.HumanBytes(rate))
+				}
 			}
 			line.color = tcolor.BrightCyan
 		}
