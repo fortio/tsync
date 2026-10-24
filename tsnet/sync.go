@@ -18,10 +18,10 @@ import (
 	"fortio.org/tsync/syncdir"
 )
 
-// Directory sync (dry run for now: nothing is written): each side scans its sync folders periodically, tells
-// its linked peers the names of its folders when the link is up, and sends its index (files and directories
-// with their hash) of the folders they have in common, again when it changes. Each side then decides what
-// sync would do for each path (see [syncdir.Plan]) and shows it.
+// Directory sync: each side scans its sync folders periodically, tells its linked peers the names of its
+// folders when the link is up, and sends its index (files and directories with their hash) of the folders
+// they have in common, again when it changes. Each side then decides what to do for each path (see
+// [syncdir.Plan]), shows it, and gets what the peer has newer (see syncpull.go).
 
 const (
 	FrameSyncFolders = 'F' // our sync folder names, newline separated (when the link is up).
@@ -70,6 +70,26 @@ type syncFolder struct {
 	ig     *syncdir.Ignore // rules of the last scan.
 	err    string          // last scan error.
 	peers  map[Peer]*syncPeer
+	// Getting what peers have newer.
+	kick       chan struct{}          // wakes up the folder's goroutine (start more pulls, rescan, save).
+	inflight   map[string]bool        // paths being synced (from any peer).
+	failed     map[string]syncFailure // paths that failed (retried after syncRetry).
+	recent     map[string]recentEntry // paths we synced, until a scan sees them.
+	rescan     bool                   // scan again soon (we got files, the peers should know).
+	trashDirty bool                   // versions were added to the trash (to prune).
+	toSave     []savedBase            // bases of peers no longer linked, to save.
+}
+
+type savedBase struct {
+	file string
+	b    syncdir.Base
+}
+
+func (f *syncFolder) kickLocked() {
+	select {
+	case f.kick <- struct{}{}:
+	default:
+	}
 }
 
 // syncPeer is the state of a folder with a linked peer that has it too.
@@ -80,6 +100,11 @@ type syncPeer struct {
 	ready   bool                     // remote is set.
 	base    syncdir.Base
 	summary syncdir.Summary
+	// Getting what the peer has newer.
+	todo     []syncdir.Item       // paths to get (or set the mode of), from the last plan.
+	pulls    map[uint32]*Transfer // downloads in progress.
+	baseFile string               // where base is saved ("" without storage).
+	dirty    bool                 // base changed since saved.
 }
 
 // SyncStatus is the state of a sync folder with a peer (zero Peer if no linked peer has it).
@@ -92,6 +117,10 @@ type SyncStatus struct {
 	Ready   bool   // we got the peer's index.
 	Err     string // last scan error.
 	Summary syncdir.Summary
+	// Downloads in progress, and the (first) file being downloaded.
+	Getting          int
+	CurFile          string
+	CurDone, CurSize int64
 }
 
 // SyncStatus returns the state of our sync folders with each linked peer that has them (sorted).
@@ -110,7 +139,12 @@ func (s *Server) SyncStatus() []SyncStatus {
 		}
 		for _, peer := range slices.SortedFunc(maps.Keys(f.peers), func(a, b Peer) int { return strings.Compare(a.Name, b.Name) }) {
 			sp := f.peers[peer]
-			st.Peer, st.Ready, st.Summary = peer, sp.ready, sp.summary
+			st.Peer, st.Ready, st.Summary, st.Getting = peer, sp.ready, sp.summary, len(sp.pulls)
+			st.CurFile, st.CurDone, st.CurSize = "", 0, 0
+			if len(sp.pulls) > 0 {
+				t := sp.pulls[slices.Min(slices.Collect(maps.Keys(sp.pulls)))]
+				st.CurFile, st.CurDone, st.CurSize = t.Source, t.Done, t.Size
+			}
 			res = append(res, st)
 		}
 	}
@@ -120,7 +154,10 @@ func (s *Server) SyncStatus() []SyncStatus {
 // startSync starts scanning our sync folders.
 func (s *Server) startSync(ctx context.Context) {
 	for _, sf := range s.Sync {
-		f := &syncFolder{SyncFolder: sf, peers: make(map[Peer]*syncPeer)}
+		f := &syncFolder{
+			SyncFolder: sf, peers: make(map[Peer]*syncPeer), kick: make(chan struct{}, 1), inflight: make(map[string]bool),
+			failed: make(map[string]syncFailure), recent: make(map[string]recentEntry),
+		}
 		s.syncFolders[sf.Name] = f
 		s.wg.Add(1)
 		go s.runSync(ctx, f)
@@ -134,24 +171,65 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		interval = DefaultSyncRescan
 	}
 	var prev syncdir.Index
+	timer := time.NewTimer(0) // first scan right away.
+	defer timer.Stop()
 	for {
-		ig, err := syncdir.LoadIgnore(f.Path)
-		var idx syncdir.Index
-		if err == nil {
-			idx, err = syncdir.Scan(f.Path, prev, ig)
-		}
-		if err == nil {
-			prev = idx
-		}
-		for _, t := range s.syncScanned(f, ig, idx, err) {
-			s.sendIndex(f, t.peer, t.l, t.conn)
-		}
 		select {
 		case <-ctx.Done():
+			s.saveBases(f)
 			return
-		case <-time.After(interval):
+		case <-timer.C:
+			prev = s.syncScan(f, prev)
+			timer.Reset(interval)
+		case <-f.kick:
+		}
+		s.stateMu.Lock()
+		rescan, prune := f.rescan, f.trashDirty && len(f.inflight) == 0
+		f.rescan, f.trashDirty = false, f.trashDirty && !prune
+		s.stateMu.Unlock()
+		if rescan {
+			prev = s.syncScan(f, prev)
+		}
+		if prune && s.SyncTrashMax > 0 {
+			pruneTrash(f.Path, s.SyncTrashMax)
+		}
+		s.startPulls(f)
+		s.saveBases(f)
+		s.stateMu.Lock()
+		retry := interval
+		for _, fail := range f.failed { // eg a file still being written there: don't wait for the next scan.
+			retry = min(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
+		}
+		s.stateMu.Unlock()
+		if retry < interval {
+			timer.Reset(retry)
 		}
 	}
+}
+
+// syncScan scans the folder (what we just synced counts as already scanned), sends the index to the
+// peers if it changed, returns the scan (for the next one).
+func (s *Server) syncScan(f *syncFolder, prev syncdir.Index) syncdir.Index {
+	s.stateMu.Lock()
+	if len(f.recent) > 0 && prev.Entries != nil {
+		prev.Entries = maps.Clone(prev.Entries)
+		for k, r := range f.recent {
+			prev.Entries[k] = r.e
+		}
+	}
+	s.stateMu.Unlock()
+	ig, err := syncdir.LoadIgnore(f.Path)
+	var idx syncdir.Index
+	if err == nil {
+		idx, err = syncdir.Scan(f.Path, prev, ig)
+	}
+	if err == nil {
+		prev = idx
+	}
+	for _, t := range s.syncScanned(f, ig, idx, err) {
+		s.sendIndex(f, t.peer, t.l, t.conn)
+	}
+	return prev
 }
 
 type syncTarget struct {
@@ -173,8 +251,20 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 		return nil
 	}
 	f.err = ""
+	seen := 0 // synced paths this scan saw (started after they were synced).
+	for k, r := range f.recent {
+		if r.at.Before(idx.Time) {
+			delete(f.recent, k)
+			seen++
+		}
+	}
 	if !f.local.Time.IsZero() && maps.EqualFunc(f.local.Entries, idx.Entries, sameEntry) {
 		f.local.Time = idx.Time
+		if seen > 0 {
+			for peer, sp := range f.peers {
+				s.replanLocked(f, peer, sp)
+			}
+		}
 		return nil
 	}
 	if f.local.Time.IsZero() {
@@ -329,6 +419,8 @@ func (s *Server) handleSyncFrame(peer Peer, l *link, conn net.Conn, plain []byte
 		if err := s.syncIndexReceived(peer, l, plain[1:]); err != nil {
 			log.Errf("Invalid sync index from %s: %v", peer.Name, err)
 		}
+	case FrameSyncGet:
+		s.syncGetReceived(peer, l, conn, plain[1:])
 	default:
 		return false
 	}
@@ -375,7 +467,8 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	}
 	sp := f.peers[peer]
 	if sp == nil || sp.l != l {
-		sp = &syncPeer{l: l, base: s.loadBaseLocked(f, peer)}
+		sp = &syncPeer{l: l, pulls: make(map[uint32]*Transfer)}
+		sp.base, sp.baseFile = s.loadBaseLocked(f, peer)
 		f.peers[peer] = sp
 	}
 	if flags&syncIndexFirst != 0 {
@@ -401,43 +494,70 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	return nil
 }
 
-// loadBaseLocked loads the base of the folder with that peer (empty if never synced or without storage).
-func (s *Server) loadBaseLocked(f *syncFolder, peer Peer) syncdir.Base {
+// loadBaseLocked loads the base of the folder with that peer (empty if never synced), returns it and its
+// file ("" without storage).
+func (s *Server) loadBaseLocked(f *syncFolder, peer Peer) (syncdir.Base, string) {
 	if s.Storage == nil {
-		return syncdir.Base{}
+		return syncdir.Base{}, ""
 	}
 	file := filepath.Join(s.Storage.Dir, "sync", f.Name, peer.PublicKey+".base")
 	b, err := syncdir.LoadBase(file)
 	if err != nil {
 		log.Errf("Can't load the sync base of %q with %s: %v", f.Name, peer.Name, err)
-		return syncdir.Base{}
+		return syncdir.Base{}, ""
 	}
-	return b
+	return b, file
 }
 
-// replanLocked decides what sync would do for the folder with the peer, logs it if it changed.
+// replanLocked decides what to do for the folder with the peer (what we just synced counts as scanned),
+// records what is in sync, starts getting what the peer has newer, logs the summary if it changed.
 func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 	if f.local.Time.IsZero() || !sp.ready {
 		return
 	}
-	sum := syncdir.Summarize(syncdir.Plan(f.local.Entries, sp.remote, sp.base, f.ig))
+	local := f.local.Entries
+	if len(f.recent) > 0 {
+		local = maps.Clone(local)
+		for k, r := range f.recent {
+			local[k] = r.e
+		}
+	}
+	items := syncdir.Plan(local, sp.remote, sp.base, f.ig)
+	if syncdir.UpdateBase(sp.base, items) {
+		sp.dirty = true
+	}
+	sp.todo = sp.todo[:0]
+	for _, it := range items {
+		if it.Action == syncdir.Pull || it.Action == syncdir.MetadataOnly {
+			sp.todo = append(sp.todo, it)
+		}
+	}
+	if len(sp.todo) > 0 || sp.dirty {
+		f.kickLocked()
+	}
+	sum := syncdir.Summarize(items)
 	if sum.Equal(sp.summary) {
 		return
 	}
 	sp.summary = sum
-	log.Infof("Sync %q with %s (dry run): %s", f.Name, peer.Name, sum.Describe(peer.Name))
+	log.Infof("Sync %q with %s: %s", f.Name, peer.Name, sum.Describe(peer.Name))
 	if len(sum.Conflicts) > 0 {
 		log.Warnf("Sync %q with %s: conflicts (changed on both sides): %q", f.Name, peer.Name, sum.Conflicts)
 	}
 }
 
-// syncLinkClosedLocked forgets the peers' state of a closed link.
+// syncLinkClosedLocked forgets the peers' state of a closed link (its downloads were already failed).
 func (s *Server) syncLinkClosedLocked(l *link) {
 	for _, f := range s.syncFolders {
 		for peer, sp := range f.peers {
-			if sp.l == l {
-				delete(f.peers, peer)
+			if sp.l != l {
+				continue
 			}
+			if sp.dirty && sp.baseFile != "" {
+				f.toSave = append(f.toSave, savedBase{sp.baseFile, maps.Clone(sp.base)})
+				f.kickLocked()
+			}
+			delete(f.peers, peer)
 		}
 	}
 }

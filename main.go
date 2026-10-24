@@ -16,6 +16,7 @@ import (
 	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
+	"fortio.org/tsync/syncdir"
 	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
@@ -151,12 +152,22 @@ func SplitList(s string) []string {
 // ParseRate parses a rate in bytes per second like "10MB/s", "500k" or "1024" (case insensitive,
 // K, M, G are powers of 1024 like elsewhere in tsync, the /s is optional). Empty is 0 (unlimited).
 func ParseRate(s string) (int64, error) {
+	v, err := ParseSize(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), "/s"))
+	if err != nil {
+		return 0, fmt.Errorf("can't parse %q as a rate (eg 10MB/s)", s)
+	}
+	return v, nil
+}
+
+// ParseSize parses a size in bytes like "1GB", "500k" or "1024" (case insensitive, K, M, G are powers of
+// 1024). Empty is 0.
+func ParseSize(s string) (int64, error) {
 	orig := s
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
 		return 0, nil
 	}
-	s = strings.TrimSuffix(strings.TrimSuffix(s, "/s"), "b")
+	s = strings.TrimSuffix(s, "b")
 	mult := int64(1)
 	if n := len(s); n > 0 {
 		if i := strings.IndexByte("kmg", s[n-1]); i >= 0 {
@@ -166,7 +177,7 @@ func ParseRate(s string) (int64, error) {
 	}
 	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("can't parse %q as a rate (eg 10MB/s)", orig)
+		return 0, fmt.Errorf("can't parse %q as a size (eg 1GB)", orig)
 	}
 	return max(1, int64(v*float64(mult))), nil
 }
@@ -175,7 +186,8 @@ func logStartup(srv *tsnet.Server, cfg *tsnet.Config) {
 	log.Infof("Started tsync %s with name %q, received files are saved in %s, max send rate: %s",
 		cli.LongVersion, srv.Name, cfg.FileDir, RateString(cfg.MaxRate))
 	for _, f := range cfg.Sync {
-		log.Infof("Sync folder %q: %s (dry run, nothing is written)", f.Name, f.Path)
+		log.Infof("Sync folder %q: %s (keeping %d replaced versions per file, trash pruned to %s)",
+			f.Name, f.Path, cfg.SyncKeep, progressbar.HumanBytes(cfg.SyncTrashMax))
 	}
 }
 
@@ -187,11 +199,30 @@ func RateString(rate int64) string {
 	return progressbar.HumanBytes(rate) + "/s"
 }
 
+// SizeFlag defines a size flag (see ParseSize) and returns a pointer to its value in bytes.
+func SizeFlag(name string, value int64, usage string) *int64 {
+	flag.Func(name, usage, func(s string) (err error) {
+		value, err = ParseSize(s)
+		return err
+	})
+	return &value
+}
+
+// SyncFlags defines the sync flags: folders, replaced versions to keep and trash size.
+func SyncFlags() (*[]tsnet.SyncFolder, *int, *int64) {
+	folders := SyncFlag("sync")
+	keep := flag.Int("sync-keep", 3, "How many replaced versions of each file sync keeps in the folder's "+
+		syncdir.TrashDir+" (0 for none)")
+	trashMax := SizeFlag("sync-trash-max", 1<<30, "Size the trash of a sync folder is pruned to, the latest "+
+		"version of each file is always kept (0 for no limit)")
+	return folders, keep, trashMax
+}
+
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
 func SyncFlag(name string) *[]tsnet.SyncFolder {
 	var folders []tsnet.SyncFolder
 	flag.Func(name, "Sync the directory `name=path` with the linked peers that have a sync folder with the same name"+
-		" (repeatable). Preview: only shows what sync would do, nothing is written yet",
+		" (repeatable). Files changed on both sides are left alone (conflicts), deletions aren't propagated",
 		func(s string) error {
 			f, err := ParseSyncFolder(s)
 			if err != nil {
@@ -447,7 +478,7 @@ func Main() int {
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	fMaxRate := RateFlag("max-rate")
-	fSync := SyncFlag("sync")
+	fSync, fSyncKeep, fSyncTrashMax := SyncFlags()
 	cli.ArgsHelp = "[file...]"
 	cli.MaxArgs = -1
 	cli.Main()
@@ -489,6 +520,8 @@ func Main() int {
 		FileDir:               DownloadDir(*fDir),
 		MaxRate:               *fMaxRate,
 		Sync:                  *fSync,
+		SyncKeep:              *fSyncKeep,
+		SyncTrashMax:          *fSyncTrashMax,
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {

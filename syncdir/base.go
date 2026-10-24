@@ -17,9 +17,13 @@ import (
 // BaseEntry is what both sides had for a path at the last sync.
 type BaseEntry struct {
 	Dir  bool
-	Mode fs.FileMode
-	Hash Hash // files only.
+	Mode fs.FileMode // ModeUnknown when the sides had different modes.
+	Hash Hash        // files only.
 }
+
+// ModeUnknown is the base mode when both sides had the same content but different modes: neither mode is
+// then propagated (each side keeps its own) until one changes.
+const ModeUnknown = fs.ModeIrregular
 
 // Base is the state at the last sync with a peer (one per synced directory and peer), by key.
 type Base map[string]BaseEntry
@@ -71,11 +75,15 @@ func parseBaseLine(line string) (string, BaseEntry, error) {
 		return "", e, errors.New("invalid line")
 	}
 	e.Dir = fields[0] == "d"
-	mode, err := strconv.ParseUint(fields[1], 8, 32)
-	if err != nil || mode > 0o777 {
-		return "", e, fmt.Errorf("invalid mode %q", fields[1])
+	if fields[1] == "?" {
+		e.Mode = ModeUnknown
+	} else {
+		mode, err := strconv.ParseUint(fields[1], 8, 32)
+		if err != nil || mode > 0o777 {
+			return "", e, fmt.Errorf("invalid mode %q", fields[1])
+		}
+		e.Mode = fs.FileMode(mode)
 	}
-	e.Mode = fs.FileMode(mode)
 	if e.Dir != (fields[2] == "-") {
 		return "", e, fmt.Errorf("invalid hash %q", fields[2])
 	}
@@ -112,7 +120,11 @@ func (b Base) Save(file string) error {
 		if e.Dir {
 			kind, hash = "d", "-"
 		}
-		_, _ = fmt.Fprintf(w, "%s %o %s %s\n", kind, uint32(e.Mode.Perm()), hash, strconv.Quote(key))
+		mode := strconv.FormatUint(uint64(e.Mode.Perm()), 8)
+		if e.Mode == ModeUnknown {
+			mode = "?"
+		}
+		_, _ = fmt.Fprintf(w, "%s %s %s %s\n", kind, mode, hash, strconv.Quote(key))
 	}
 	err = w.Flush()
 	if err == nil {
@@ -125,4 +137,37 @@ func (b Base) Save(file string) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), file)
+}
+
+// UpdateBase records the paths in sync in the plan (same content on both sides; with ModeUnknown if their
+// modes differ, unless the base already has that content) and forgets the ones absent on both sides.
+// Returns true if the base changed.
+func UpdateBase(base Base, items []Item) bool {
+	changed := false
+	seen := make(map[string]bool, len(items))
+	for _, it := range items {
+		seen[it.Path] = true
+		if it.Action != InSync || it.Local == nil || it.Remote == nil {
+			continue
+		}
+		want := BaseEntry{Dir: it.Local.Dir, Mode: it.Local.Mode, Hash: it.Local.Hash}
+		b, ok := base[it.Path]
+		if it.Local.Mode != it.Remote.Mode {
+			if ok && b.Dir == want.Dir && b.Hash == want.Hash {
+				continue // keep the mode we know (see decideMode).
+			}
+			want.Mode = ModeUnknown
+		}
+		if !ok || b != want {
+			base[it.Path] = want
+			changed = true
+		}
+	}
+	for p := range base {
+		if !seen[p] {
+			delete(base, p)
+			changed = true
+		}
+	}
+	return changed
 }

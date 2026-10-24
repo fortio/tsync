@@ -11,8 +11,8 @@ import (
 	"fortio.org/tsync/tsnet"
 )
 
-// SyncPanel shows the state of the sync folders (a dry run for now), one line per folder and linked peer
-// having it, in a box below the files one.
+// SyncPanel shows the state of the sync folders, one line per folder and linked peer having it, in a box
+// below the files one.
 type SyncPanel struct {
 	ap  *ansipixels.AnsiPixels
 	srv *tsnet.Server
@@ -40,6 +40,13 @@ func SyncLine(st tsnet.SyncStatus) syncLine {
 	}
 	peer := SanitizeName(st.Peer.Name)
 	what += " ↔ " + peer
+	if st.Getting > 0 {
+		percent := 100.
+		if st.CurSize > 0 {
+			percent = 100 * float64(st.CurDone) / float64(st.CurSize)
+		}
+		what += fmt.Sprintf(" · ⬇ %s %.0f%%", st.CurFile, percent)
+	}
 	switch {
 	case !st.Ready:
 		return syncLine{what + ": waiting for its list", tcolor.Cyan}
@@ -70,7 +77,7 @@ func (sp *SyncPanel) Draw(y int, lines []syncLine) int {
 	ap := sp.ap
 	h := len(lines) + 2
 	ap.DrawRoundBox(0, y, ap.W, h)
-	title, _ := TruncateRightToFit(ap, " 🔄 sync · dry run, nothing is written yet ", ap.W-4)
+	title, _ := TruncateRightToFit(ap, " 🔄 sync ", ap.W-4)
 	ap.WriteAt(2, y, "%s", DarkGray(title))
 	for i, l := range lines {
 		text, _ := TruncateRightToFit(ap, SanitizeName(l.text), ap.W-4)

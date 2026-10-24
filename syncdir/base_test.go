@@ -63,3 +63,37 @@ func TestLoadBaseErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateBase(t *testing.T) {
+	a, a755 := file('a', 0o644), file('a', 0o755)
+	b := syncdir.Base{"gone": {Hash: syncdir.Hash{'g'}}, "kept": {Mode: 0o644, Hash: syncdir.Hash{'a'}}}
+	items := []syncdir.Item{
+		{Path: "same", Action: syncdir.InSync, Local: a, Remote: a},
+		{Path: "modes", Action: syncdir.InSync, Local: a, Remote: a755},
+		{Path: "kept", Action: syncdir.InSync, Local: a, Remote: a755},
+		{Path: "new", Action: syncdir.Pull, Remote: a},
+		{Path: "only here", Action: syncdir.PeerPulls, Local: a},
+	}
+	if !syncdir.UpdateBase(b, items) {
+		t.Errorf("expected a change")
+	}
+	want := syncdir.Base{
+		"same":  {Mode: 0o644, Hash: syncdir.Hash{'a'}},
+		"modes": {Mode: syncdir.ModeUnknown, Hash: syncdir.Hash{'a'}},
+		"kept":  {Mode: 0o644, Hash: syncdir.Hash{'a'}}, // same content: the known mode stays.
+	}
+	if !maps.Equal(b, want) {
+		t.Errorf("got %+v, want %+v", b, want)
+	}
+	if syncdir.UpdateBase(b, items) {
+		t.Errorf("expected no change the 2nd time")
+	}
+	// ModeUnknown survives a save and load.
+	file := filepath.Join(t.TempDir(), "x.base")
+	if err := b.Save(file); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := syncdir.LoadBase(file); err != nil || !maps.Equal(got, b) {
+		t.Errorf("got %+v %v", got, err)
+	}
+}

@@ -73,6 +73,11 @@ type Config struct {
 	Sync []SyncFolder
 	// SyncRescan is how often the sync folders are scanned (DefaultSyncRescan if 0).
 	SyncRescan time.Duration
+	// SyncKeep is how many replaced versions of each file are kept in the sync folders' trash (0 for none).
+	SyncKeep int
+	// SyncTrashMax is the size the trash of a sync folder is pruned to (0 for no limit), the latest version of
+	// each file is always kept.
+	SyncTrashMax int64
 }
 
 type ConnectionStatus int
@@ -120,6 +125,7 @@ type Server struct {
 	rdirs      map[dirKey]*recvDir // directories being downloaded.
 	// sync folders by name.
 	syncFolders map[string]*syncFolder
+	nextSyncID  uint32 // for our sync downloads (with syncIDBit set).
 	// resolved Config.Peers
 	staticPeers []*net.UDPAddr
 	// random id of this run, in our discovery messages (handshake context, restart detection).
@@ -172,7 +178,8 @@ func (c *Config) NewServer() *Server {
 		syncFolders: make(map[string]*syncFolder),
 		early:       make(map[Source]earlyMsg),
 		// Random start so offer ids from different runs don't collide (eg in peers' lists).
-		nextFileID: rand.Uint32() >> 1, //nolint:gosec // not cryptographic.
+		// Below 2^30 so they never reach syncIDBit (even with the ids reserved by directory offers).
+		nextFileID: rand.Uint32() >> 2, //nolint:gosec // not cryptographic.
 	}
 }
 

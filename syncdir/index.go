@@ -31,6 +31,22 @@ type Entry struct {
 	Size  int64
 	MTime time.Time
 	Hash  Hash
+	// diskPath is the slash separated path as on disk when it differs from Path (not normalized).
+	diskPath string
+}
+
+// DiskPath returns the (slash separated, relative) path of the entry as on disk: what to open, which can
+// differ from Path (the key) by Unicode normalization.
+func (e *Entry) DiskPath() string {
+	if e.diskPath != "" {
+		return e.diskPath
+	}
+	return e.Path
+}
+
+// KeptMode is the mode tracked and set for a file or directory (see [Entry.Mode]).
+func KeptMode(mode fs.FileMode) fs.FileMode {
+	return keptMode(mode)
 }
 
 // Index is the scan of a synced directory.
@@ -85,6 +101,9 @@ func Scan(root string, prev Index, ig *Ignore) (Index, error) {
 			return nil
 		}
 		e.Path = key
+		if p != key {
+			e.diskPath = p
+		}
 		idx.Entries[key] = e
 		return nil
 	})

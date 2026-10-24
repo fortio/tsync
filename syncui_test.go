@@ -45,6 +45,11 @@ func TestSyncLine(t *testing.T) {
 	ready := func(sum syncdir.Summary) tsnet.SyncStatus {
 		return tsnet.SyncStatus{Folder: "d", Scanned: true, Peer: peer, Ready: true, Summary: sum}
 	}
+	getting := func(sum syncdir.Summary) tsnet.SyncStatus {
+		st := ready(sum)
+		st.Getting, st.CurFile, st.CurDone, st.CurSize = 1, "sub/f", 256, 1024
+		return st
+	}
 	for _, tc := range []struct {
 		st    tsnet.SyncStatus
 		text  string
@@ -57,6 +62,7 @@ func TestSyncLine(t *testing.T) {
 		{ready(inSync), "📁 d ↔ bob · in sync (3 items)", tcolor.BrightGreen},
 		{ready(conflict), "📁 d ↔ bob · 1 conflict", tcolor.BrightYellow},
 		{ready(pull), "📁 d ↔ bob · 2 to get (2 Kb)", tcolor.BrightCyan},
+		{getting(pull), "📁 d ↔ bob · ⬇ sub/f 25% · 2 to get (2 Kb)", tcolor.BrightCyan},
 	} {
 		l := SyncLine(tc.st)
 		if l.text != tc.text || l.color != tc.color {
@@ -77,7 +83,7 @@ func TestSyncPanel(t *testing.T) {
 		t.Errorf("unexpected height %d", h)
 	}
 	_ = bw.Flush()
-	if out := buf.String(); !strings.Contains(out, "sync · dry run") || strings.Contains(out, "]52;") {
+	if out := buf.String(); !strings.Contains(out, "🔄 sync") || strings.Contains(out, "]52;") {
 		t.Errorf("unexpected output %q", out)
 	}
 }

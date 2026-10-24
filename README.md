@@ -65,7 +65,7 @@ tsync [flags] [file...]
 The useful ones:
 - `-name` to use another name than the hostname, eg to run 2 instances on one machine.
 - `-max-rate` limits the file sending rate (per peer connection, whatever the number of files being sent), eg `-max-rate 10MB/s` (K, M, G are powers of 1024, case insensitive). Default is unlimited.
-- `-sync name=path` (preview, repeatable) shows what syncing that directory with the linked peers that have a `-sync` folder with the same name would do: files to get, to send, conflicts (changed on both sides), deletions. Nothing is written yet.
+- `-sync name=path` (repeatable) syncs that directory with the linked peers that have a `-sync` folder with the same name: each side gets what the other has new or changed. Files changed on both sides since the last sync are conflicts and left alone (shown, for you to sort out), deletions aren't propagated, hidden files are ignored unless there is a `.tsyncignore` (which then lists what to ignore). Replaced versions are kept in `.tsync-trash` (`-sync-keep`, default 3 per file; `-sync-trash-max`, default 1Gb).
 - `-dir` for where received files are saved. Default is `~/Downloads` if it exists, else the current directory.
 - `-peers host[:port],...` to also send discovery directly to these addresses when multicast doesn't work at all (some VPNs, cloud VMs...). The port defaults to 29556.
 - `-auto-connect=false` to not reconnect automatically to accepted peers.

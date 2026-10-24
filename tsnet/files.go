@@ -107,7 +107,9 @@ type Transfer struct {
 	// (the oldest of the ones in progress) and its progress.
 	CurFile          string
 	CurDone, CurSize int64
-	root             string // outgoing file of a directory: the directory, Source is opened within it.
+	root             string    // outgoing file of a directory: the directory, Source is opened within it.
+	pull             *syncPull // incoming file of a sync folder.
+	syncFolder       string    // outgoing file of a sync folder: its name.
 }
 
 // offer is a file we offered (sent to our linked peers, and later linked ones).
@@ -196,6 +198,9 @@ func (s *Server) finishLocked(t *Transfer, err error) {
 		t.State = TransferDone
 	}
 	s.change(0)
+	if t.pull != nil {
+		s.pullFinishedLocked(t, err)
+	}
 }
 
 // CheckFile checks that path is a regular file we can read, or a directory (that can be offered).
@@ -435,7 +440,7 @@ func (s *Server) pruneExpiredOffersLocked(now time.Time) {
 
 func (s *Server) sendFile(peer Peer, l *link, conn net.Conn, t *Transfer) {
 	defer s.wg.Done()
-	if t.parent == nil { // the directory's files are logged once done.
+	if t.parent == nil && t.syncFolder == "" { // the directory's and sync folder's files are logged once done.
 		log.Infof("Sending file %q (%d bytes) to %s", t.Name, t.Size, peer.Name)
 	}
 	err := s.streamFile(l, conn, t)
@@ -566,6 +571,8 @@ func (s *Server) outgoingResult(peer Peer, l *link, id uint32, err error) {
 	case err != nil:
 		err = fmt.Errorf("aborted by peer: %w", err)
 		log.Errf("Sending file %q to %s failed: %v", t.Name, peer.Name, err)
+	case t.syncFolder != "":
+		log.Infof("Sync %q: sent %q (%d bytes) to %s%s", t.syncFolder, t.Source, t.Size, peer.Name, rateStr(t))
 	case t.parent == nil: // the directory's files are logged by childFinishedLocked.
 		log.Infof("Sent file %q (%d bytes) to %s%s", t.Name, t.Size, peer.Name, rateStr(t))
 	}
@@ -635,6 +642,10 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 	case FrameFileData:
 		err = s.fileData(rf, payload)
 	case FrameFileEnd:
+		if rf.t.pull != nil {
+			s.syncFileEnd(l, conn, id, rf, payload)
+			return true
+		}
 		err = s.fileEnd(rf, payload)
 		if err == nil {
 			s.stateMu.Lock()
@@ -788,7 +799,11 @@ func (s *Server) dropIncomingLocked(l *link, id uint32, err error) {
 	}
 	delete(l.incoming, id)
 	_ = rf.f.Close()
-	_ = os.Remove(rf.f.Name())
+	if rf.t.pull != nil {
+		rf.t.pull.removeTemp() // its name is relative to the folder.
+	} else {
+		_ = os.Remove(rf.f.Name())
+	}
 	log.Warnf("Receiving file %q from %s failed: %v", rf.t.Name, rf.t.Peer.Name, err)
 	rf.t.Path = ""
 	s.finishLocked(rf.t, err)
