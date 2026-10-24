@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"fortio.org/log"
 	"fortio.org/tsync/tcrypto"
 )
 
@@ -375,5 +376,45 @@ func TestEarlyConnect(t *testing.T) {
 	s.PeersCleanup()
 	if len(s.early) != 0 {
 		t.Errorf("stale early message not dropped")
+	}
+}
+
+// Network provided strings (unauthenticated discovery and direct messages) are quoted in the
+// (text, terminal) logs so they can't inject escape sequences.
+func TestNoEscapesInLogs(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Config
+	log.Config.JSON = false
+	log.SetOutput(&buf)
+	t.Cleanup(func() {
+		log.Config = prev
+		log.SetOutput(os.Stderr)
+	})
+	s := (&Config{Name: "us", PeerTimeout: time.Second}).NewServer()
+	d, err := s.MCastMessageDecode([]byte("tsync1 \"x\" p.\x1b]52;c;aGk=\a e 1 r \x1b[2J"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := Peer{Name: d.Name, IP: "10.0.0.1", PublicKey: d.PublicKey}
+	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now(), RunID: d.RunID})
+	s.Sources.Set(Source{IP: peer.IP, Port: 1234}, peer)
+	from := &net.UDPAddr{IP: net.ParseIP(peer.IP), Port: 1234}
+	s.handleDirectMessage([]byte(`connect1 "\x1b[31mevil" "us" 1 s.x`), from)
+	s.handleDirectMessage([]byte(`accept1 "x" "\x1b[31mus" 1 s.x`), from)
+	s.handleConnect(from, "x", "us", 1, "s.x") // invalid public key.
+	// Reject (not signed) from a peer with a valid key.
+	id, _ := tcrypto.NewIdentity()
+	good := Peer{Name: "good", IP: "10.0.0.2", PublicKey: id.PublicKeyToString()}
+	s.Peers.Set(good, PeerData{Port: 1235, LastSeen: time.Now()})
+	s.Sources.Set(Source{IP: good.IP, Port: 1235}, good)
+	s.handleDirectMessage([]byte(`reject1 "good" "us" "\x1b]0;title\a"`), &net.UDPAddr{IP: net.ParseIP(good.IP), Port: 1235})
+	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now().Add(-2 * time.Second), RunID: d.RunID})
+	s.PeersCleanup()
+	out := buf.String()
+	if !strings.Contains(out, "Removing 1 expired peers") || !strings.Contains(out, "rejected by good") {
+		t.Errorf("expected log lines missing: %s", out)
+	}
+	if strings.ContainsAny(out, "\x1b\a") {
+		t.Errorf("escape sequences in the logs: %q", out)
 	}
 }
