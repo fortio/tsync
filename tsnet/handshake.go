@@ -312,7 +312,7 @@ func (s *Server) senderLocked(from *net.UDPAddr, fromName, toName string) (Peer,
 	}
 	peerData, found := s.Peers.Get(peer)
 	if !found {
-		log.Errf("Direct message from unknown peer %v (not in discovery map)", peer)
+		log.Errf("Direct message from unknown peer %q (not in discovery map)", peer)
 		return peer, peerData, nil, false
 	}
 	if fromName != peer.Name || toName != s.Name {
@@ -321,7 +321,7 @@ func (s *Server) senderLocked(from *net.UDPAddr, fromName, toName string) (Peer,
 	}
 	pub, err := tcrypto.IdentityPublicKeyString(peer.PublicKey)
 	if err != nil {
-		log.Errf("Invalid public key for peer %v: %v", peer, err)
+		log.Errf("Invalid public key for peer %q: %v", peer, err)
 		return peer, peerData, nil, false
 	}
 	return peer, peerData, pub, true
@@ -330,7 +330,7 @@ func (s *Server) senderLocked(from *net.UDPAddr, fromName, toName string) (Peer,
 func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName string, tcpPort int, signed string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	log.Infof("Received connection request from %v: %v to %v", from, fromName, toName)
+	log.Infof("Received connection request from %v: %q to %q", from, fromName, toName)
 	peer, peerData, pub, ok := s.senderLocked(from, fromName, toName)
 	if !ok {
 		return
@@ -379,7 +379,7 @@ func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName string, tcpPo
 func (s *Server) handleAccept(from *net.UDPAddr, fromName, toName string, tcpPort int, signed string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	log.Infof("Received connection accept from %v: %v to %v", from, fromName, toName)
+	log.Infof("Received connection accept from %v: %q to %q", from, fromName, toName)
 	peer, peerData, pub, ok := s.senderLocked(from, fromName, toName)
 	if !ok {
 		return
@@ -410,7 +410,7 @@ func (s *Server) handleReject(from *net.UDPAddr, fromName, toName, reason string
 	if !ok {
 		return
 	}
-	log.Warnf("Connection rejected by %s: %s", peer.Name, reason)
+	log.Warnf("Connection rejected by %s: %q", peer.Name, reason)
 	if peerData.Status == SentConn {
 		s.dropLinkLocked(peer)
 		s.setStatusLocked(peer, peerData, Failed)
