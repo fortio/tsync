@@ -43,7 +43,7 @@ Run `tsync` on each machine. The table lists the peers found, with this machine 
 - Click on a box, or press `c` for the latest one received, to copy it to your clipboard.
 - Drag and drop a file in tsync to offer it to the linked peers (terminals paste the dropped file's path, which tsync recognizes, quoted or not). Only its name and size are sent until someone downloads it, and peers connecting later see the offer too.
 - On the other machines, click the offer in the files box, or press `d` for the latest, to download it. Nothing is written before that. Files go to `~/Downloads` (or the current directory if there is none, or `-dir`) and never overwrite anything: you get `name-1.ext`, `name-2.ext`, etc.
-- Directories work too (drop one, or `tsync dir`): it is offered as one item, and downloaded with all its files (symlinks are skipped) into a new directory, `name`, or `name-1`, `name-2`... if that exists. Nothing is ever merged into an existing directory.
+- Directories work too (drop one, or `tsync dir`): it is offered as one item, and downloaded with all its files (symlinks are skipped) into a new directory, `name`, or `name-1`, `name-2`... if that exists. Nothing is ever merged into an existing directory. Hidden files, empty directories, permissions (except group/other write) and modification times are kept.
 - `tsync file1 dir2...` starts as usual and offers these files, useful over ssh where you can't drag and drop the remote files. If tsync was already running in another window of that machine, that one exits and the new one takes over.
 - `q` or Ctrl-C to quit.
 

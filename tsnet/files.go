@@ -119,6 +119,8 @@ type offer struct {
 	mtime time.Time
 	dir   []dirEntry // the files, for a directory offer.
 	root  string     // directory offer: its path with symlinks resolved, its files are opened within it.
+	dirs  []dirEntry // directory offer: its sub directories.
+	mode  fs.FileMode
 }
 
 // recvFile is an incoming file being written. The map is accessed with stateMu held,
@@ -127,7 +129,8 @@ type recvFile struct {
 	f    *os.File
 	hash hash.Hash
 	t    *Transfer
-	dest string // directory to save to if not FileDir (files of a directory).
+	dest string      // directory to save to if not FileDir (files of a directory).
+	mode fs.FileMode // files of a directory: the mode to set.
 }
 
 // Transfers returns a copy of the current and recent offers and transfers, oldest first.
@@ -746,7 +749,11 @@ func (s *Server) fileEnd(rf *recvFile, sum []byte) error {
 	if err := rf.f.Close(); err != nil {
 		return err
 	}
-	_ = os.Chmod(tmp, 0o644) // regular readable file, never executable.
+	mode := fs.FileMode(0o644) // single files: regular readable file, never executable.
+	if rf.dest != "" {
+		mode = rf.mode
+	}
+	_ = os.Chmod(tmp, mode)
 	_ = os.Chtimes(tmp, t.MTime, t.MTime)
 	dest := s.fileDir()
 	if rf.dest != "" {
@@ -842,6 +849,11 @@ func reserveName(dir, name string) (string, error) {
 // format characters (bidi overrides that can disguise the extension, zero width spaces...)
 // are removed.
 func SafeFileName(name string) string {
+	return safeFileName(name, false)
+}
+
+// safeFileName is [SafeFileName], optionally keeping a leading dot (hidden files inside a received directory).
+func safeFileName(name string, hidden bool) string {
 	name = strings.ToValidUTF8(name, "_")
 	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
 		name = name[i+1:]
@@ -863,7 +875,7 @@ func SafeFileName(name string) string {
 	if name == "" {
 		return "file"
 	}
-	if name[0] == '.' {
+	if name[0] == '.' && !hidden { // can't be "." or "..": no trailing dots.
 		name = "_" + name
 	}
 	if isWindowsReserved(name) {

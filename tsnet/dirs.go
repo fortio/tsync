@@ -18,18 +18,24 @@ import (
 )
 
 // Directory send: a directory is offered as one offer (FrameDirOffer). When accepted the
-// sender replies with the manifest (relative path, size, mtime of each regular file) and
-// the receiver then downloads the files one by one (a few in parallel) with the regular
-// file frames, using the ids following the directory's one (directory id + 1 + index).
-// The files are saved in a new directory (never an existing one: name-1, name-2...) and
-// the sender, receiver and the UI see a single aggregated transfer.
+// sender replies with the manifest (relative path, mode, size, mtime of each regular file,
+// then of each sub directory) and the receiver then downloads the files one by one (a few in
+// parallel) with the regular file frames, using the ids following the directory's one
+// (directory id + 1 + file index). The files are saved in a new directory (never an existing
+// one: name-1, name-2...) and the sender, receiver and the UI see a single aggregated transfer.
+// The permissions (except group/other write) and times of the files and directories are kept,
+// once all the files are received for the directories.
 
 // reasonAlreadySending is the abort reason when a file is requested again while being sent.
 const reasonAlreadySending = "already being sent"
 
 const (
-	FrameDirOffer    = 'M' // sender offers a directory: id (4) + size (8) + mtime (8) + file count (4) + path (on the sender).
-	FrameDirManifest = 'N' // sender's reply to the request: id (4) + entries (size (8) + mtime (8) + path length (2) + path).
+	FrameDirOffer = 'M' // sender offers a directory: id (4) + size (8) + mtime (8) + file count (4) + path (on the sender).
+	// FrameDirManifest is the sender's reply to the request: id (4) + directory mode (4) + entries:
+	// mode (4) + size (8) + mtime (8) + path length (2) + path; files first, then directories (ModeDir set).
+	FrameDirManifest = 'N'
+	// manifestEntrySize is the size of a manifest entry without its path.
+	manifestEntrySize = 22
 
 	// maxDirManifest is the maximum size of a manifest, so it fits in a frame.
 	maxDirManifest = MaxClipSize - 1024
@@ -39,10 +45,11 @@ const (
 	dirParallel = 4
 )
 
-// dirEntry is a file in an offered directory.
+// dirEntry is a file (or sub directory) in an offered directory.
 type dirEntry struct {
 	rel   string // slash separated path relative to the offered directory.
 	path  string // sender: absolute path.
+	mode  fs.FileMode
 	size  int64
 	mtime time.Time
 }
@@ -53,7 +60,9 @@ type recvDir struct {
 	l       *link
 	root    string
 	entries []recvEntry
-	next    int // next entry to request.
+	dirs    []recvEntry // sub directories (dir is the directory itself).
+	mode    fs.FileMode // of the directory itself.
+	next    int         // next entry to request.
 	started bool
 }
 
@@ -61,6 +70,7 @@ type recvEntry struct {
 	dir   string // destination directory (absolute).
 	name  string // sanitized file name.
 	rel   string // sanitized path relative to the directory (for display).
+	mode  fs.FileMode
 	size  int64
 	mtime time.Time
 }
@@ -70,8 +80,9 @@ type dirKey struct {
 	id   uint32
 }
 
-// walkDir lists the regular files of dir (not following symlinks), returns how many other entries were skipped.
-func walkDir(dir string) (entries []dirEntry, skipped int, err error) {
+// walkDir lists the regular files and the sub directories of dir (not following symlinks), returns how many
+// other entries were skipped.
+func walkDir(dir string) (files, dirs []dirEntry, skipped int, err error) {
 	size := 0
 	skip := func() error { //nolint:unparam // always nil: skipped entries aren't errors.
 		skipped++
@@ -84,11 +95,11 @@ func walkDir(dir string) (entries []dirEntry, skipped int, err error) {
 			}
 			return skip()
 		}
-		if d.IsDir() {
+		if p == dir {
 			return nil
 		}
 		fi, ierr := d.Info()
-		if ierr != nil || !fi.Mode().IsRegular() {
+		if ierr != nil || (!fi.Mode().IsRegular() && !fi.IsDir()) {
 			return skip()
 		}
 		if _, cerr := CheckFile(p); cerr != nil { // unreadable.
@@ -102,14 +113,20 @@ func walkDir(dir string) (entries []dirEntry, skipped int, err error) {
 		if strings.Count(rel, "/") >= maxDirDepth { // the receiver would refuse it.
 			return fmt.Errorf("directory too deep (over %d levels)", maxDirDepth)
 		}
-		size += 18 + len(rel)
+		size += manifestEntrySize + len(rel)
 		if size > maxDirManifest || len(rel) > 0xffff {
 			return errors.New("too many files (or too long names) in directory")
 		}
-		entries = append(entries, dirEntry{rel: rel, path: p, size: fi.Size(), mtime: fi.ModTime()})
+		e := dirEntry{rel: rel, path: p, mode: fi.Mode() & (fs.ModeDir | fs.ModePerm), mtime: fi.ModTime()}
+		if fi.IsDir() {
+			dirs = append(dirs, e)
+		} else {
+			e.size = fi.Size()
+			files = append(files, e)
+		}
 		return nil
 	})
-	return entries, skipped, err
+	return files, dirs, skipped, err
 }
 
 // listDir sets the files (and total size) of a directory offer.
@@ -119,7 +136,12 @@ func (o *offer) listDir() error {
 	if o.root, err = filepath.EvalSymlinks(o.path); err != nil {
 		return pathErr(err)
 	}
-	entries, skipped, err := walkDir(o.root)
+	fi, err := os.Stat(o.root)
+	if err != nil {
+		return pathErr(err)
+	}
+	o.mode = fi.Mode().Perm()
+	entries, dirs, skipped, err := walkDir(o.root)
 	if err != nil {
 		return pathErr(err)
 	}
@@ -129,7 +151,7 @@ func (o *offer) listDir() error {
 	if skipped > 0 {
 		log.Warnf("Skipped %d unreadable or special entries (eg symlinks) in %q", skipped, o.path)
 	}
-	o.dir, o.size = entries, 0
+	o.dir, o.dirs, o.size = entries, dirs, 0
 	for _, e := range entries {
 		o.size += e.size
 	}
@@ -145,7 +167,9 @@ func dirOfferPayload(o *offer) []byte {
 
 func manifestPayload(o *offer) []byte {
 	b := binary.BigEndian.AppendUint32(nil, o.id)
-	for _, e := range o.dir {
+	b = binary.BigEndian.AppendUint32(b, uint32(o.mode))
+	for _, e := range slices.Concat(o.dir, o.dirs) {
+		b = binary.BigEndian.AppendUint32(b, uint32(e.mode))
 		b = binary.BigEndian.AppendUint64(b, uint64(e.size)) //nolint:gosec // positive.
 		b = binary.BigEndian.AppendUint64(b, uint64(e.mtime.UnixNano()))
 		b = binary.BigEndian.AppendUint16(b, uint16(len(e.rel))) //nolint:gosec // checked in walkDir.
@@ -266,6 +290,9 @@ func (s *Server) childFinishedLocked(t *Transfer, err error) {
 	}
 	p.filesDone++
 	if p.filesDone >= p.Files {
+		if rd := s.rdirs[dirKey{p.Peer, p.ID}]; rd != nil && p.Incoming {
+			rd.setAttrs()
+		}
 		log.Infof("Directory %q (%d files, %d bytes) done with %s%s", p.Name, p.Files, p.Size, p.Peer.Name, rateStr(p))
 		s.finishLocked(p, nil)
 	}
@@ -278,7 +305,7 @@ func (s *Server) dirOffered(peer Peer, id uint32, payload []byte) {
 		return
 	}
 	files := int(binary.BigEndian.Uint32(payload[16:20]))
-	if files <= 0 || files > maxDirManifest/18 {
+	if files <= 0 || files > maxDirManifest/manifestEntrySize {
 		log.Warnf("Invalid directory offer (%d files) from %s", files, peer.Name)
 		return
 	}
@@ -321,7 +348,8 @@ func (s *Server) prepareDirLocked(l *link, t *Transfer) error {
 
 // safeRelPath validates a (peer provided) slash separated relative path and returns the sanitized directory
 // and file name parts. Each part goes through [SafeFileName] (so it can't be empty, "." or "..", or contain
-// separators, drive letters...) after backslashes, which are valid in unix file names, are replaced.
+// separators, drive letters...) after backslashes, which are valid in unix file names, are replaced, but
+// hidden files and directories (leading dot) are kept as such.
 func safeRelPath(rel string) ([]string, error) {
 	parts := strings.Split(rel, "/")
 	if len(parts) > maxDirDepth {
@@ -332,7 +360,7 @@ func safeRelPath(rel string) ([]string, error) {
 		if p == "" || p == "." || p == ".." {
 			return nil, fmt.Errorf("invalid path %q", sanitizeReason([]byte(rel)))
 		}
-		res[i] = SafeFileName(strings.ReplaceAll(p, `\`, "_"))
+		res[i] = safeFileName(strings.ReplaceAll(p, `\`, "_"), true)
 	}
 	return res, nil
 }
@@ -348,6 +376,9 @@ func (s *Server) dirManifest(peer Peer, l *link, conn net.Conn, id uint32, paylo
 	}
 	rd.started = true
 	err := s.parseManifestLocked(rd, payload)
+	if err == nil {
+		err = rd.makeDirs()
+	}
 	if err != nil {
 		log.Errf("Invalid directory manifest from %s: %v", peer.Name, err)
 		s.failDirLocked(rd, err)
@@ -360,32 +391,76 @@ func (s *Server) dirManifest(peer Peer, l *link, conn net.Conn, id uint32, paylo
 }
 
 func (s *Server) parseManifestLocked(rd *recvDir, b []byte) error {
+	if len(b) < 4 {
+		return errors.New("truncated")
+	}
+	rd.mode = fs.FileMode(binary.BigEndian.Uint32(b))
+	b = b[4:]
 	var total int64
 	for len(b) > 0 {
-		if len(b) < 18 {
+		if len(b) < manifestEntrySize {
 			return errors.New("truncated")
 		}
-		size := int64(binary.BigEndian.Uint64(b[0:8]))                 //nolint:gosec // checked below.
-		mtime := time.Unix(0, int64(binary.BigEndian.Uint64(b[8:16]))) //nolint:gosec // any value is fine.
-		n := int(binary.BigEndian.Uint16(b[16:18]))
-		if size < 0 || len(b) < 18+n || len(rd.entries) >= rd.t.Files {
+		mode := fs.FileMode(binary.BigEndian.Uint32(b[0:4]))
+		size := int64(binary.BigEndian.Uint64(b[4:12]))                 //nolint:gosec // checked below.
+		mtime := time.Unix(0, int64(binary.BigEndian.Uint64(b[12:20]))) //nolint:gosec // any value is fine.
+		n := int(binary.BigEndian.Uint16(b[20:22]))
+		isDir := mode.IsDir()
+		if size < 0 || len(b) < manifestEntrySize+n || (isDir && size != 0) || (!isDir && len(rd.entries) >= rd.t.Files) {
 			return errors.New("invalid entry")
 		}
-		parts, err := safeRelPath(string(b[18 : 18+n]))
+		parts, err := safeRelPath(string(b[manifestEntrySize : manifestEntrySize+n]))
 		if err != nil {
 			return err
 		}
-		b = b[18+n:]
-		dir := filepath.Join(append([]string{rd.root}, parts[:len(parts)-1]...)...)
-		rd.entries = append(rd.entries, recvEntry{
-			dir: dir, name: parts[len(parts)-1], rel: strings.Join(parts, "/"), size: size, mtime: mtime,
-		})
+		b = b[manifestEntrySize+n:]
+		e := recvEntry{
+			dir: filepath.Join(append([]string{rd.root}, parts[:len(parts)-1]...)...), name: parts[len(parts)-1],
+			rel: strings.Join(parts, "/"), mode: mode.Perm(), size: size, mtime: mtime,
+		}
+		if isDir {
+			e.dir = filepath.Join(e.dir, e.name)
+			rd.dirs = append(rd.dirs, e)
+			continue
+		}
+		rd.entries = append(rd.entries, e)
 		total += size
 	}
 	if len(rd.entries) != rd.t.Files || total != rd.t.Size {
 		return fmt.Errorf("manifest has %d files, %d bytes instead of %d, %d", len(rd.entries), total, rd.t.Files, rd.t.Size)
 	}
 	return nil
+}
+
+// makeDirs creates the sub directories (including empty ones) before the files are downloaded.
+func (rd *recvDir) makeDirs() error {
+	for _, d := range rd.dirs {
+		if err := os.MkdirAll(d.dir, 0o755); err != nil {
+			return pathErr(err)
+		}
+	}
+	return nil
+}
+
+// keptMode is the mode we set on received files and directories (of a directory): the sender's
+// permissions, except group and other write (eg Windows shows all files as writable by all).
+func keptMode(mode fs.FileMode) fs.FileMode {
+	return mode.Perm() &^ 0o022
+}
+
+// setAttrs sets the mode and times of the directories once all the files are written: deepest first so
+// a directory without write or search permission doesn't prevent setting its sub directories'.
+func (rd *recvDir) setAttrs() {
+	dirs := append(slices.Clone(rd.dirs), recvEntry{dir: rd.root, mode: rd.mode, mtime: rd.t.MTime})
+	for _, d := range slices.Backward(dirs) {
+		err := os.Chmod(d.dir, keptMode(d.mode))
+		if err == nil {
+			err = os.Chtimes(d.dir, d.mtime, d.mtime)
+		}
+		if err != nil {
+			log.Warnf("Can't set the mode or time of %q: %v", d.dir, pathErr(err))
+		}
+	}
 }
 
 // requestMoreFiles requests the next files of the directory, keeping dirParallel of them in flight.
@@ -445,7 +520,7 @@ func (s *Server) nextDirFile(l *link, parent *Transfer) (uint32, error) {
 		Start: time.Now(), State: TransferActive, parent: parent,
 	}
 	parent.addKid(child)
-	l.incoming[id] = &recvFile{f: f, hash: sha256.New(), t: child, dest: e.dir}
+	l.incoming[id] = &recvFile{f: f, hash: sha256.New(), t: child, dest: e.dir, mode: keptMode(e.mode)}
 	return id, nil
 }
 

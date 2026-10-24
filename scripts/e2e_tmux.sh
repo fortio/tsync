@@ -137,10 +137,15 @@ echo one > "$OUT/src/proj/one.txt"
 echo two > "$OUT/src/proj/sub/two.txt"
 head -c 100000 /dev/urandom > "$OUT/src/proj/sub/deep/rand.bin"
 ln -s one.txt "$OUT/src/proj/link"
+# Hidden files, modes (eg executable) and empty directories are kept.
+mkdir -p "$OUT/src/proj/.config" "$OUT/src/proj/empty"
+echo secret > "$OUT/src/proj/.config/.env"
+printf '#!/bin/sh\necho hi\n' > "$OUT/src/proj/run.sh"
+chmod 755 "$OUT/src/proj/run.sh"
 # shellcheck disable=SC2046 # we want word splitting of the hex bytes.
 $T send-keys -t A -H $( (printf '\033[200~'"'"; printf '%s' "$OUT/src/proj"; printf "' "'\033[201~') | od -An -tx1 )
-wait_for A "offered $OUT/src/proj (3 files, "
-wait_for B "e2eA offers $OUT/src/proj (directory, 3 files, "
+wait_for A "offered $OUT/src/proj (5 files, "
+wait_for B "e2eA offers $OUT/src/proj (directory, 5 files, "
 $T send-keys -t B d
 # A is rate limited: the directory bar and the one of the file in progress.
 wait_for B "of sub/deep/rand.bin"
@@ -149,9 +154,11 @@ wait_for B "proj from e2eA saved as" 30
 wait_for A "proj sent to e2eB"
 diff -r -x link "$OUT/src/proj" "$OUT/dlB/proj" || fail "downloaded directory differs"
 [ ! -e "$OUT/dlB/proj/link" ] || fail "symlink should not be sent"
+[ -x "$OUT/dlB/proj/run.sh" ] || fail "run.sh should still be executable"
+[ -d "$OUT/dlB/proj/empty" ] || fail "empty directory should be created"
 # shellcheck disable=SC2046 # we want word splitting of the hex bytes.
 $T send-keys -t A -H $( (printf '\033[200~'"'"; printf '%s' "$OUT/src/proj"; printf "' "'\033[201~') | od -An -tx1 )
-wait_for B "e2eA offers $OUT/src/proj (directory, 3 files, " # the new offer (not the pending arg file one).
+wait_for B "e2eA offers $OUT/src/proj (directory, 5 files, " # the new offer (not the pending arg file one).
 $T send-keys -t B d
 wait_for B "proj-1 from e2eA saved as" 30
 diff -r -x link "$OUT/src/proj" "$OUT/dlB/proj-1" || fail "2nd downloaded directory differs"

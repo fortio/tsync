@@ -47,13 +47,43 @@ func readTree(t *testing.T, root string) map[string]string {
 	return res
 }
 
-func TestDirectoryTransfer(t *testing.T) {
-	NoMCastOnMacInCI(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	dirB := t.TempDir()
-	serverA, serverB, peerA := linkedPair(ctx, t,
-		tsnet.Config{Name: "HostA"}, tsnet.Config{Name: "HostB", FileDir: dirB})
+// checkTree checks the received files and their content.
+func checkTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	got := readTree(t, root)
+	if len(got) != len(files) {
+		t.Errorf("%s: got %d files want %d: %v", root, len(got), len(files), got)
+	}
+	for rel, content := range files {
+		if got[rel] != content {
+			t.Errorf("%s: %s: content mismatch (%d vs %d bytes)", root, rel, len(got[rel]), len(content))
+		}
+	}
+}
+
+// checkAttrs checks the received modes (minus group/other write) and the directories times.
+func checkAttrs(t *testing.T, root string, modes map[string]os.FileMode, dirTime time.Time) {
+	t.Helper()
+	for _, rel := range []string{"sub/deep", "empty dir", "."} {
+		fi, err := os.Stat(filepath.Join(root, rel))
+		if err != nil || !fi.IsDir() || !fi.ModTime().Equal(dirTime) {
+			t.Errorf("%s: directory time not kept: %v %v", rel, fi, err)
+		}
+	}
+	if runtime.GOOS == "windows" { // only has a read only attribute.
+		return
+	}
+	for rel, mode := range modes {
+		fi, err := os.Stat(filepath.Join(root, rel))
+		if err != nil || fi.Mode().Perm() != mode&^0o022 {
+			t.Errorf("%s: mode %v, expected %v (%v)", rel, fi.Mode().Perm(), mode&^0o022, err)
+		}
+	}
+}
+
+// makeTestTree creates the "proj" directory to send: returns its path, files, modes and directories time.
+func makeTestTree(t *testing.T) (string, map[string]string, map[string]os.FileMode, time.Time) {
+	t.Helper()
 	src := filepath.Join(t.TempDir(), "proj")
 	files := map[string]string{
 		"a.txt":         "hello",
@@ -62,11 +92,40 @@ func TestDirectoryTransfer(t *testing.T) {
 		"sub/deep/c.go": string(bytes.Repeat([]byte("c"), 3*tsnet.FileChunkSize+7)),
 		"sub/deep/d":    "dee",
 		"e1":            "1", "e2": "2", "e3": "3", "e4": "4", "e5": "5", // more files than dirParallel.
+		".hidden/.env": "kept hidden",
+		"run.sh":       "#!/bin/sh\n",
 	}
 	writeTree(t, src, files)
 	if runtime.GOOS != "windows" {
 		_ = os.Symlink("a.txt", filepath.Join(src, "link")) // skipped.
 	}
+	// Modes and times are kept (except group/other write), including for (empty) directories.
+	dirTime := time.Date(2019, 5, 6, 7, 8, 9, 0, time.UTC)
+	modes := map[string]os.FileMode{"run.sh": 0o775, "a.txt": 0o640, "sub/deep": 0o750, "empty dir": 0o700}
+	if err := os.Mkdir(filepath.Join(src, "empty dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for rel, mode := range modes {
+		if err := os.Chmod(filepath.Join(src, rel), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rel := range []string{"sub/deep", "empty dir", "."} {
+		if err := os.Chtimes(filepath.Join(src, rel), dirTime, dirTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return src, files, modes, dirTime
+}
+
+func TestDirectoryTransfer(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dirB := t.TempDir()
+	serverA, serverB, peerA := linkedPair(ctx, t,
+		tsnet.Config{Name: "HostA"}, tsnet.Config{Name: "HostB", FileDir: dirB})
+	src, files, modes, dirTime := makeTestTree(t)
 	// 2nd time through a symlink with the same name (the directory itself is a link).
 	offered := []string{src, src}
 	if runtime.GOOS != "windows" {
@@ -104,19 +163,12 @@ func TestDirectoryTransfer(t *testing.T) {
 		if done.Path != filepath.Join(dirB, want) || done.Done != done.Size {
 			t.Errorf("unexpected done transfer %+v", done)
 		}
-		got := readTree(t, done.Path)
-		if len(got) != len(files) {
-			t.Errorf("run %d: got %d files want %d: %v", i, len(got), len(files), got)
-		}
-		for rel, content := range files {
-			if got[rel] != content {
-				t.Errorf("run %d: %s: content mismatch (%d vs %d bytes)", i, rel, len(got[rel]), len(content))
-			}
-		}
+		checkTree(t, done.Path, files)
 		fi, err := os.Stat(filepath.Join(done.Path, "sub", "b.txt"))
 		if err != nil || fi.ModTime().Year() != 2021 {
 			t.Errorf("mtime not preserved: %v %v", fi, err)
 		}
+		checkAttrs(t, done.Path, modes, dirTime)
 		checkNoPartial(t, done.Path)
 		checkNoPartial(t, filepath.Join(done.Path, "sub", "deep"))
 		// The offer from A is a new one each time (a new id).

@@ -24,7 +24,8 @@ func TestSafeRelPath(t *testing.T) {
 	}{
 		{"a/b c/con.txt", []string{"a", "b c", "_con.txt"}},
 		{`a\b`, []string{"a_b"}},
-		{`..\..\x`, []string{"_.._.._x"}},
+		{`..\..\x`, []string{".._.._x"}},
+		{".git/hooks/.x", []string{".git", "hooks", ".x"}},
 		{"a\x00b/c\nd", []string{"a_b", "c_d"}},
 		{"C:/x", []string{"C_", "x"}},
 		{"x:/c", []string{"x_", "c"}},
