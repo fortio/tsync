@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"fortio.org/progressbar"
 	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
@@ -111,5 +112,35 @@ func TestFilePanelOfferMaxRate(t *testing.T) {
 	lines := fp.Lines()
 	if len(lines) != 1 || !strings.Contains(lines[0].text, "offered "+f+" (2 Kb), will be sent (at max 50 Kb/s) to peers") {
 		t.Errorf("unexpected local lines %+v", lines)
+	}
+}
+
+func TestFilePanelOfferDir(t *testing.T) {
+	ap, _, _ := newTestAP(100, 30)
+	id, _ := tcrypto.NewIdentity()
+	srv := (&tsnet.Config{Name: "test", Identity: id}).NewServer()
+	fp := NewFilePanel(ap, srv, t.TempDir(), 5)
+	d := t.TempDir()
+	_ = os.WriteFile(filepath.Join(d, "a"), make([]byte, 2048), 0o644)
+	_ = os.WriteFile(filepath.Join(d, "b"), []byte("x"), 0o644)
+	fp.Offer([]string{d})
+	lines := fp.Lines()
+	if len(lines) != 1 || !strings.Contains(lines[0].text, "offered "+d+" (2 files, ") {
+		t.Errorf("unexpected local lines %+v", lines)
+	}
+}
+
+func TestFilePanelCurFileLine(t *testing.T) {
+	ap, _, _ := newTestAP(100, 30)
+	id, _ := tcrypto.NewIdentity()
+	srv := (&tsnet.Config{Name: "test", Identity: id}).NewServer()
+	fp := NewFilePanel(ap, srv, t.TempDir(), 5)
+	tr := tsnet.Transfer{
+		Peer: tsnet.Peer{Name: "p"}, Incoming: true, Dir: true, Files: 3, Name: "proj", Size: 4096, Done: 1024,
+		State: tsnet.TransferActive, CurFile: "sub/deep/rand.bin", CurDone: 512, CurSize: 2048,
+	}
+	l := fp.curFileLine(tr, progressbar.GreenBar)
+	if !strings.Contains(l.text, "2 Kb of sub/deep/rand.bin") || !strings.Contains(l.lead, "25.0%") {
+		t.Errorf("unexpected file line %+v", l)
 	}
 }

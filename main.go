@@ -119,6 +119,10 @@ func CheckFiles(files []string) error {
 		if err != nil {
 			return fmt.Errorf("%q: %w", f, err)
 		}
+		if fi.IsDir() {
+			log.LogVf("Directory %q ok to offer", f)
+			continue
+		}
 		size := progressbar.HumanBytes(fi.Size())
 		if fi.Size() >= 1024 {
 			size += fmt.Sprintf(" (%d bytes)", fi.Size())

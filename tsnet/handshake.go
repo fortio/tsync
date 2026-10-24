@@ -32,6 +32,7 @@ type link struct {
 	// held, incoming only by the link's read loop.
 	outgoing map[uint32]*Transfer
 	incoming map[uint32]*recvFile
+	pace     pacer // MaxRate is per link: shared by all the files sent on it.
 }
 
 const (

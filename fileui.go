@@ -74,11 +74,12 @@ type transferKey struct {
 	peer     tsnet.Peer
 	id       uint32
 	incoming bool
+	file     bool // the bar of the file in progress of a directory.
 }
 
 // bar returns the progress bar of an active transfer (kept between frames for its spinner).
-func (fp *FilePanel) bar(t tsnet.Transfer, color string) *progressbar.Bar {
-	k := transferKey{t.Peer, t.ID, t.Incoming}
+func (fp *FilePanel) bar(t tsnet.Transfer, color string, file bool) *progressbar.Bar {
+	k := transferKey{t.Peer, t.ID, t.Incoming, file}
 	b := fp.bars[k]
 	if b == nil {
 		cfg := progressbar.DefaultConfig()
@@ -96,13 +97,29 @@ func (fp *FilePanel) activeLine(icon string, t tsnet.Transfer, color, dir string
 	if t.Size > 0 {
 		percent = 100 * float64(t.Done) / float64(t.Size)
 	}
-	lead := icon + " " + fp.bar(t, color).Render(percent)
+	lead := icon + " " + fp.bar(t, color, false).Render(percent)
 	return fileLine{
 		when:  t.Start,
 		lead:  lead,
 		leadW: fp.ap.ScreenWidth(lead),
 		text: fmt.Sprintf(" %s · %s %s %s", progressbar.RateETA(t.Done, t.Size, time.Since(t.Start)),
 			t.Name, dir, SanitizeName(t.Peer.Name)),
+		color: tcolor.BrightBlue,
+	}
+}
+
+// curFileLine is the second line of an active directory transfer: the file in progress.
+func (fp *FilePanel) curFileLine(t tsnet.Transfer, color string) fileLine {
+	percent := 100.
+	if t.CurSize > 0 {
+		percent = 100 * float64(t.CurDone) / float64(t.CurSize)
+	}
+	lead := "   " + fp.bar(t, color, true).Render(percent)
+	return fileLine{
+		when:  t.Start,
+		lead:  lead,
+		leadW: fp.ap.ScreenWidth(lead),
+		text:  fmt.Sprintf(" %s of %s", progressbar.HumanBytes(t.CurSize), t.CurFile),
 		color: tcolor.BrightBlue,
 	}
 }
@@ -119,17 +136,20 @@ func doneStr(t tsnet.Transfer) string {
 // Offer offers the dropped file(s) to the linked peers, with feedback on errors.
 func (fp *FilePanel) Offer(paths []string) {
 	for _, p := range paths {
-		n, err := fp.srv.OfferFile(p)
+		off, err := fp.srv.OfferPath(p)
+		n := off.Peers
 		line := fileLine{when: time.Now()}
 		if err != nil {
 			log.Errf("Can't offer %s: %v", p, err)
 			line.text, line.color = fmt.Sprintf("❌ can't offer %s: %v", p, err), tcolor.BrightRed
 		} else {
-			fi, _ := os.Stat(p)
-			line.text = fmt.Sprintf("📤 offered %s (%s) to %d peer%s%s", p, progressbar.HumanBytes(fi.Size()), n, plural(n),
-				fp.rateNote())
+			what := progressbar.HumanBytes(off.Size)
+			if off.Files > 0 {
+				what = fmt.Sprintf("%d file%s, %s", off.Files, plural(off.Files), what)
+			}
+			line.text = fmt.Sprintf("📤 offered %s (%s) to %d peer%s%s", p, what, n, plural(n), fp.rateNote())
 			if n == 0 {
-				line.text = fp.pendingText(p, fi.Size())
+				line.text = fp.pendingText(p, what)
 			}
 			line.color = tcolor.BrightCyan
 		}
@@ -149,11 +169,19 @@ func (fp *FilePanel) rateNote() string {
 }
 
 // pendingText is the line for a file offered while no peer is linked (yet).
-func (fp *FilePanel) pendingText(path string, size int64) string {
+func (fp *FilePanel) pendingText(path, what string) string {
 	if fp.srv.Config.MaxRate > 0 {
-		return fmt.Sprintf("📤 offered %s (%s), will be sent%s to peers", path, progressbar.HumanBytes(size), fp.rateNote())
+		return fmt.Sprintf("📤 offered %s (%s), will be sent%s to peers", path, what, fp.rateNote())
 	}
-	return fmt.Sprintf("📤 offered %s (%s), will be sent to peers when they connect", path, progressbar.HumanBytes(size))
+	return fmt.Sprintf("📤 offered %s (%s), will be sent to peers when they connect", path, what)
+}
+
+// offerSize is the size of an offer, with the file count for a directory.
+func offerSize(t tsnet.Transfer) string {
+	if t.Dir {
+		return fmt.Sprintf("directory, %d file%s, %s", t.Files, plural(t.Files), progressbar.HumanBytes(t.Size))
+	}
+	return progressbar.HumanBytes(t.Size)
 }
 
 func plural(n int) string {
@@ -169,7 +197,7 @@ func (fp *FilePanel) transferLine(t tsnet.Transfer) fileLine {
 	peer := SanitizeName(t.Peer.Name)
 	switch {
 	case t.Incoming && t.State == tsnet.TransferOffered:
-		l.text = fmt.Sprintf("📥 %s offers %s (%s): click or press d to download", peer, t.Source, progressbar.HumanBytes(t.Size))
+		l.text = fmt.Sprintf("📥 %s offers %s (%s): click or press d to download", peer, t.Source, offerSize(t))
 		l.color, l.offer = tcolor.BrightYellow, &tc
 	case t.Incoming && t.State == tsnet.TransferActive:
 		return fp.activeLine("📥", t, progressbar.GreenBar, "from")
@@ -199,7 +227,15 @@ func (fp *FilePanel) Lines() []fileLine {
 	for _, t := range fp.srv.Transfers() {
 		lines = append(lines, fp.transferLine(t))
 		if t.State == tsnet.TransferActive {
-			active[transferKey{t.Peer, t.ID, t.Incoming}] = true
+			active[transferKey{t.Peer, t.ID, t.Incoming, false}] = true
+			if t.Dir && t.CurFile != "" {
+				color := progressbar.BlueBar
+				if t.Incoming {
+					color = progressbar.GreenBar
+				}
+				lines = append(lines, fp.curFileLine(t, color))
+				active[transferKey{t.Peer, t.ID, t.Incoming, true}] = true
+			}
 		}
 	}
 	for k := range fp.bars { // forget the bars of finished transfers.

@@ -126,11 +126,36 @@ wait_for B "My File.bin from e2eA saved as" 30
 wait_for A "My File.bin sent to e2eB"
 cmp "$OUT/src/My File.bin" "$OUT/dlB/My File.bin" || fail "downloaded file differs"
 drop
-wait_for B "click or press d" # new offer.
+wait_for B "e2eA offers $OUT/src/My File.bin (293.0 Kb): click or press d" # the new offer (not the pending arg file one).
 $T send-keys -t B d
 wait_for B "My File-1.bin" 30
 cmp "$OUT/src/My File.bin" "$OUT/dlB/My File-1.bin" || fail "2nd downloaded file differs"
 echo "ok: file dropped, offered, downloaded twice without overwrite"
+# Drop a directory (nested, with a symlink that is skipped): offered, downloaded in a new directory, twice.
+mkdir -p "$OUT/src/proj/sub/deep"
+echo one > "$OUT/src/proj/one.txt"
+echo two > "$OUT/src/proj/sub/two.txt"
+head -c 100000 /dev/urandom > "$OUT/src/proj/sub/deep/rand.bin"
+ln -s one.txt "$OUT/src/proj/link"
+# shellcheck disable=SC2046 # we want word splitting of the hex bytes.
+$T send-keys -t A -H $( (printf '\033[200~'"'"; printf '%s' "$OUT/src/proj"; printf "' "'\033[201~') | od -An -tx1 )
+wait_for A "offered $OUT/src/proj (3 files, "
+wait_for B "e2eA offers $OUT/src/proj (directory, 3 files, "
+$T send-keys -t B d
+# A is rate limited: the directory bar and the one of the file in progress.
+wait_for B "of sub/deep/rand.bin"
+wait_for A "of sub/deep/rand.bin"
+wait_for B "proj from e2eA saved as" 30
+wait_for A "proj sent to e2eB"
+diff -r -x link "$OUT/src/proj" "$OUT/dlB/proj" || fail "downloaded directory differs"
+[ ! -e "$OUT/dlB/proj/link" ] || fail "symlink should not be sent"
+# shellcheck disable=SC2046 # we want word splitting of the hex bytes.
+$T send-keys -t A -H $( (printf '\033[200~'"'"; printf '%s' "$OUT/src/proj"; printf "' "'\033[201~') | od -An -tx1 )
+wait_for B "e2eA offers $OUT/src/proj (directory, 3 files, " # the new offer (not the pending arg file one).
+$T send-keys -t B d
+wait_for B "proj-1 from e2eA saved as" 30
+diff -r -x link "$OUT/src/proj" "$OUT/dlB/proj-1" || fail "2nd downloaded directory differs"
+echo "ok: directory dropped, offered, downloaded twice into new directories"
 $T capture-pane -p -t A > "$OUT/A.txt"
 $T capture-pane -p -t B > "$OUT/B.txt"
 echo "PASS (screens in $OUT)"
