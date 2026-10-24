@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"fortio.org/log"
+	"fortio.org/progressbar"
 )
 
 // File transfer over the TCP link: the sender offers a file (name, size, time) to its
@@ -106,6 +107,7 @@ type Transfer struct {
 	// (the oldest of the ones in progress) and its progress.
 	CurFile          string
 	CurDone, CurSize int64
+	root             string // outgoing file of a directory: the directory, Source is opened within it.
 }
 
 // offer is a file we offered (sent to our linked peers, and later linked ones).
@@ -116,6 +118,7 @@ type offer struct {
 	size  int64
 	mtime time.Time
 	dir   []dirEntry // the files, for a directory offer.
+	root  string     // directory offer: its path with symlinks resolved, its files are opened within it.
 }
 
 // recvFile is an incoming file being written. The map is accessed with stateMu held,
@@ -247,19 +250,8 @@ func (s *Server) OfferPath(path string) (Offered, error) {
 	}
 	o := &offer{path: abs, name: filepath.Base(abs), size: fi.Size(), mtime: fi.ModTime()}
 	if fi.IsDir() {
-		entries, skipped, werr := walkDir(abs)
-		if werr != nil {
-			return Offered{}, pathErr(werr)
-		}
-		if len(entries) == 0 {
-			return Offered{}, errors.New("no files in directory")
-		}
-		if skipped > 0 {
-			log.Warnf("Skipped %d unreadable or special entries (eg symlinks) in %q", skipped, abs)
-		}
-		o.dir, o.size = entries, 0
-		for _, e := range entries {
-			o.size += e.size
+		if err = o.listDir(); err != nil {
+			return Offered{}, err
 		}
 	}
 	s.stateMu.Lock()
@@ -406,7 +398,7 @@ func (s *Server) startSendLocked(peer Peer, l *link, conn net.Conn, id uint32) s
 		return "no longer offered"
 	}
 	if l.outgoing[id] != nil {
-		return errAlreadySending
+		return reasonAlreadySending
 	}
 	t := &Transfer{Peer: peer, ID: id, Name: o.name, Path: o.path, Size: o.size, MTime: o.mtime, Start: time.Now()}
 	t.State = TransferActive
@@ -440,7 +432,9 @@ func (s *Server) pruneExpiredOffersLocked(now time.Time) {
 
 func (s *Server) sendFile(peer Peer, l *link, conn net.Conn, t *Transfer) {
 	defer s.wg.Done()
-	log.Infof("Sending file %q (%d bytes) to %s", t.Name, t.Size, peer.Name)
+	if t.parent == nil { // the directory's files are logged once done.
+		log.Infof("Sending file %q (%d bytes) to %s", t.Name, t.Size, peer.Name)
+	}
 	err := s.streamFile(l, conn, t)
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -457,6 +451,7 @@ func (s *Server) sendFile(peer Peer, l *link, conn net.Conn, t *Transfer) {
 	delete(l.outgoing, t.ID)
 	log.Errf("Sending file %q to %s failed: %v", t.Name, peer.Name, err)
 	s.finishLocked(t, err)
+	forgetDirLocked(l, t)
 }
 
 func (s *Server) streamFile(l *link, conn net.Conn, t *Transfer) error {
@@ -464,16 +459,22 @@ func (s *Server) streamFile(l *link, conn net.Conn, t *Transfer) error {
 		_ = l.send(conn, FrameFileAbort, idPayload(t.ID, reason.Error()))
 		return reason
 	}
-	f, err := os.Open(t.Path)
+	var f *os.File
+	var err error
+	if t.root != "" { // file of a directory: symlinks can't lead out of it (eg replaced since it was offered).
+		f, err = os.OpenInRoot(t.root, filepath.FromSlash(t.Source))
+	} else {
+		f, err = os.Open(t.Path)
+	}
 	if err != nil {
-		return abort(err)
+		return abort(pathErr(err))
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
 		return abort(err)
 	}
-	if fi.Size() != t.Size || !fi.ModTime().Equal(t.MTime) {
+	if !fi.Mode().IsRegular() || fi.Size() != t.Size || !fi.ModTime().Equal(t.MTime) {
 		return abort(errors.New("file changed since it was offered"))
 	}
 	h := sha256.New()
@@ -490,7 +491,9 @@ func (s *Server) streamFile(l *link, conn net.Conn, t *Transfer) error {
 		cancel := t.cancel
 		s.stateMu.Unlock()
 		if cancel != "" {
-			return nil // sendFile reports it.
+			// sendFile reports it. The receiver may not know (eg another file of the directory failed).
+			_ = l.send(conn, FrameFileAbort, idPayload(t.ID, cancel))
+			return nil
 		}
 		n, rerr := f.Read(buf[4 : 4+chunk])
 		if n > 0 {
@@ -540,6 +543,15 @@ func (s *Server) outgoingResult(peer Peer, l *link, id uint32, err error) {
 	if t == nil {
 		return
 	}
+	if t.Dir { // the receiver gave up on the directory.
+		if err != nil {
+			delete(l.outgoing, id)
+			err = fmt.Errorf("aborted by peer: %w", err)
+			log.Errf("Sending directory %q to %s failed: %v", t.Name, peer.Name, err)
+			s.failDirSendLocked(t, err)
+		}
+		return
+	}
 	if !t.sent {
 		if err != nil {
 			t.cancel = err.Error() // the sender goroutine will stop and finish it.
@@ -547,13 +559,24 @@ func (s *Server) outgoingResult(peer Peer, l *link, id uint32, err error) {
 		return
 	}
 	delete(l.outgoing, id)
-	if err == nil {
-		log.Infof("Sent file %q (%d bytes) to %s%s", t.Name, t.Size, peer.Name, rateStr(t))
-	} else {
+	switch {
+	case err != nil:
 		err = fmt.Errorf("aborted by peer: %w", err)
 		log.Errf("Sending file %q to %s failed: %v", t.Name, peer.Name, err)
+	case t.parent == nil: // the directory's files are logged by childFinishedLocked.
+		log.Infof("Sent file %q (%d bytes) to %s%s", t.Name, t.Size, peer.Name, rateStr(t))
 	}
 	s.finishLocked(t, err)
+	forgetDirLocked(l, t)
+}
+
+// rateStr is the average transfer rate of t since it started, with the size, time and speed (as in the UI) for the logs.
+func rateStr(t *Transfer) string {
+	d := time.Since(t.Start)
+	if d <= 0 || t.Size == 0 {
+		return ""
+	}
+	return ", " + progressbar.RateETA(t.Size, t.Size, d)
 }
 
 // handleFileFrame processes the file related frames (called from the link's read loop).

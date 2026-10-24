@@ -13,10 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"fortio.org/log"
-	"fortio.org/progressbar"
 )
 
 // Directory send: a directory is offered as one offer (FrameDirOffer). When accepted the
@@ -26,7 +24,8 @@ import (
 // The files are saved in a new directory (never an existing one: name-1, name-2...) and
 // the sender, receiver and the UI see a single aggregated transfer.
 
-const errAlreadySending = "already being sent"
+// reasonAlreadySending is the abort reason when a file is requested again while being sent.
+const reasonAlreadySending = "already being sent"
 
 const (
 	FrameDirOffer    = 'M' // sender offers a directory: id (4) + size (8) + mtime (8) + file count (4) + path (on the sender).
@@ -100,6 +99,9 @@ func walkDir(dir string) (entries []dirEntry, skipped int, err error) {
 			return skip()
 		}
 		rel = filepath.ToSlash(rel)
+		if strings.Count(rel, "/") >= maxDirDepth { // the receiver would refuse it.
+			return fmt.Errorf("directory too deep (over %d levels)", maxDirDepth)
+		}
 		size += 18 + len(rel)
 		if size > maxDirManifest || len(rel) > 0xffff {
 			return errors.New("too many files (or too long names) in directory")
@@ -108,6 +110,30 @@ func walkDir(dir string) (entries []dirEntry, skipped int, err error) {
 		return nil
 	})
 	return entries, skipped, err
+}
+
+// listDir sets the files (and total size) of a directory offer.
+func (o *offer) listDir() error {
+	var err error
+	// The walk doesn't follow symlinks, including the directory itself (eg o.path is a link to elsewhere).
+	if o.root, err = filepath.EvalSymlinks(o.path); err != nil {
+		return pathErr(err)
+	}
+	entries, skipped, err := walkDir(o.root)
+	if err != nil {
+		return pathErr(err)
+	}
+	if len(entries) == 0 {
+		return errors.New("no files in directory")
+	}
+	if skipped > 0 {
+		log.Warnf("Skipped %d unreadable or special entries (eg symlinks) in %q", skipped, o.path)
+	}
+	o.dir, o.size = entries, 0
+	for _, e := range entries {
+		o.size += e.size
+	}
+	return nil
 }
 
 // dirOfferPayload is the payload of a directory offer: the file one with the file count before the path.
@@ -131,7 +157,7 @@ func manifestPayload(o *offer) []byte {
 // startDirSend handles a request for a directory offer or one of its files (sender side).
 // Returns false if id isn't one of a directory.
 func (s *Server) startDirSend(peer Peer, l *link, conn net.Conn, id uint32) bool {
-	reason, manifest := s.startDirSendLocked(peer, l, conn, id)
+	handled, reason, manifest := s.startDirSendLocked(peer, l, conn, id)
 	switch {
 	case reason != "":
 		_ = l.send(conn, FrameFileAbort, idPayload(id, reason))
@@ -140,14 +166,7 @@ func (s *Server) startDirSend(peer Peer, l *link, conn net.Conn, id uint32) bool
 			log.Errf("Failed to send directory manifest to %s: %v", peer.Name, err)
 		}
 	}
-	return reason != "" || manifest != nil || s.isDirChild(id)
-}
-
-func (s *Server) isDirChild(id uint32) bool {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	o, _ := s.dirOfferForLocked(id)
-	return o != nil
+	return handled
 }
 
 // dirOfferForLocked returns the directory offer containing id (its own id, or one of its files) and the file index (-1 for itself).
@@ -160,16 +179,18 @@ func (s *Server) dirOfferForLocked(id uint32) (*offer, int) {
 	return nil, 0
 }
 
-func (s *Server) startDirSendLocked(peer Peer, l *link, conn net.Conn, id uint32) (string, []byte) {
+// startDirSendLocked takes the lock, returns whether id is a directory's (or one of its files), the
+// reason to abort if it can't be sent, and for the directory itself its manifest to send.
+func (s *Server) startDirSendLocked(peer Peer, l *link, conn net.Conn, id uint32) (bool, string, []byte) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	o, idx := s.dirOfferForLocked(id)
 	if o == nil {
-		return "", nil
+		return false, "", nil
 	}
 	if idx < 0 { // the directory itself.
 		if l.outgoing[id] != nil {
-			return errAlreadySending, nil
+			return true, reasonAlreadySending, nil
 		}
 		t := &Transfer{
 			Peer: peer, ID: id, Name: o.name, Path: o.path, Size: o.size, MTime: o.mtime, Start: time.Now(),
@@ -178,25 +199,43 @@ func (s *Server) startDirSendLocked(peer Peer, l *link, conn net.Conn, id uint32
 		s.addTransferLocked(t)
 		l.outgoing[id] = t
 		log.Infof("Sending directory %q (%d files, %d bytes) to %s", o.name, t.Files, t.Size, peer.Name)
-		return "", manifestPayload(o)
+		return true, "", manifestPayload(o)
 	}
 	parent := l.outgoing[o.id]
 	if parent == nil || parent.State != TransferActive {
-		return "directory not requested", nil
+		return true, "directory not requested", nil
 	}
 	if l.outgoing[id] != nil {
-		return errAlreadySending, nil
+		return true, reasonAlreadySending, nil
 	}
 	e := o.dir[idx]
 	t := &Transfer{
 		Peer: peer, ID: id, Name: filepath.Base(e.path), Source: e.rel, Path: e.path, Size: e.size, MTime: e.mtime,
-		Start: time.Now(), State: TransferActive, parent: parent,
+		Start: time.Now(), State: TransferActive, parent: parent, root: o.root,
 	}
 	parent.addKid(t)
 	l.outgoing[id] = t
 	s.wg.Add(1)
 	go s.sendFile(peer, l, conn, t)
-	return "", nil
+	return true, "", nil
+}
+
+// failDirSendLocked fails a directory we are sending and stops its files in progress (the
+// receiver is told with an abort for each).
+func (s *Server) failDirSendLocked(p *Transfer, err error) {
+	s.finishLocked(p, err)
+	for _, k := range p.kids {
+		if k.cancel == "" {
+			k.cancel = "directory transfer failed"
+		}
+	}
+}
+
+// forgetDirLocked removes the directory of a file we sent from the link's outgoing ones once it is finished.
+func forgetDirLocked(l *link, t *Transfer) {
+	if p := t.parent; p != nil && p.State != TransferActive {
+		delete(l.outgoing, p.ID)
+	}
 }
 
 // childFinishedLocked updates the directory transfer when one of its files is done (or failed).
@@ -217,7 +256,12 @@ func (s *Server) childFinishedLocked(t *Transfer, err error) {
 		return
 	}
 	if err != nil {
-		s.finishLocked(p, fmt.Errorf("%s: %w", t.Name, err))
+		err = fmt.Errorf("%s: %w", t.Source, err)
+		if p.Incoming {
+			s.finishLocked(p, err)
+		} else {
+			s.failDirSendLocked(p, err)
+		}
 		return
 	}
 	p.filesDone++
@@ -276,7 +320,8 @@ func (s *Server) prepareDirLocked(l *link, t *Transfer) error {
 }
 
 // safeRelPath validates a (peer provided) slash separated relative path and returns the sanitized directory
-// and file name parts.
+// and file name parts. Each part goes through [SafeFileName] (so it can't be empty, "." or "..", or contain
+// separators, drive letters...) after backslashes, which are valid in unix file names, are replaced.
 func safeRelPath(rel string) ([]string, error) {
 	parts := strings.Split(rel, "/")
 	if len(parts) > maxDirDepth {
@@ -284,13 +329,10 @@ func safeRelPath(rel string) ([]string, error) {
 	}
 	res := make([]string, len(parts))
 	for i, p := range parts {
-		if p == "" || p == "." || p == ".." || strings.ContainsAny(p, `\`+"\x00") || strings.ContainsFunc(p, unicode.IsControl) {
+		if p == "" || p == "." || p == ".." {
 			return nil, fmt.Errorf("invalid path %q", sanitizeReason([]byte(rel)))
 		}
-		if strings.ContainsRune(p, ':') && i == 0 && len(p) == 2 { // C:
-			return nil, fmt.Errorf("invalid path %q", sanitizeReason([]byte(rel)))
-		}
-		res[i] = SafeFileName(p)
+		res[i] = SafeFileName(strings.ReplaceAll(p, `\`, "_"))
 	}
 	return res, nil
 }
@@ -457,13 +499,4 @@ func (t *Transfer) setCurrent() {
 	if cur != nil {
 		t.CurFile, t.CurDone, t.CurSize = cur.Source, cur.Done, cur.Size
 	}
-}
-
-// rateStr is the average transfer rate of t since it started, with the size, time and speed (as in the UI) for the logs.
-func rateStr(t *Transfer) string {
-	d := time.Since(t.Start)
-	if d <= 0 || t.Size == 0 {
-		return ""
-	}
-	return ", " + progressbar.RateETA(t.Size, t.Size, d)
 }

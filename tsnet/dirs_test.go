@@ -67,9 +67,17 @@ func TestDirectoryTransfer(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		_ = os.Symlink("a.txt", filepath.Join(src, "link")) // skipped.
 	}
+	// 2nd time through a symlink with the same name (the directory itself is a link).
+	offered := []string{src, src}
+	if runtime.GOOS != "windows" {
+		offered[1] = filepath.Join(t.TempDir(), "proj")
+		if err := os.Symlink(src, offered[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for i, want := range []string{"proj", "proj-1"} {
 		before := len(serverB.Transfers())
-		off, err := serverA.OfferPath(src)
+		off, err := serverA.OfferPath(offered[i])
 		if err != nil || off.Peers != 1 || off.Files != len(files) {
 			t.Fatalf("OfferPath: %+v %v", off, err)
 		}
@@ -149,4 +157,39 @@ func TestDirectoryFileChanged(t *testing.T) {
 		t.Errorf("unexpected error %q", failed.Err)
 	}
 	waitTransfer(ctx, t, serverA, false, "chg", tsnet.TransferFailed)
+}
+
+// A file of an offered directory replaced by a symlink to outside of it (same size and time) isn't sent.
+func TestDirectorySymlinkSwap(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on windows")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dirB := t.TempDir()
+	serverA, serverB, peerA := linkedPair(ctx, t,
+		tsnet.Config{Name: "HostA"}, tsnet.Config{Name: "HostB", FileDir: dirB})
+	src := filepath.Join(t.TempDir(), "swap")
+	writeTree(t, src, map[string]string{"a": "aaaa"})
+	secret := filepath.Join(t.TempDir(), "secret")
+	writeTree(t, filepath.Dir(secret), map[string]string{"secret": "SSSS"}) // same size and mtime.
+	if _, err := serverA.OfferPath(src); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(ctx, t, "B got the offer", func() bool { return len(serverB.Transfers()) == 1 })
+	if err := os.Remove(filepath.Join(src, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(src, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverB.AcceptFile(peerA, serverB.Transfers()[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	waitTransfer(ctx, t, serverB, true, "swap", tsnet.TransferFailed)
+	waitTransfer(ctx, t, serverA, false, "swap", tsnet.TransferFailed)
+	if got := readTree(t, filepath.Join(dirB, "swap")); len(got) != 0 {
+		t.Errorf("nothing should have been received: %v", got)
+	}
 }
