@@ -263,7 +263,8 @@ func (fp *FilePanel) Draw(y int, lines []fileLine) int {
 	ap.WriteAt(2, y, "%s", DarkGray(title))
 	for i, l := range lines {
 		l.y = y + 1 + i
-		text, _ := TruncateRightToFit(ap, l.text, ap.W-4-l.leadW)
+		// Local file names (eg from an extracted archive) can have escape sequences too, not just the peers' ones.
+		text, _ := TruncateRightToFit(ap, SanitizeName(l.text), ap.W-4-l.leadW)
 		ap.WriteAt(2, l.y, "%s%s", l.lead, Color16(l.color, text))
 		fp.rows = append(fp.rows, l)
 	}

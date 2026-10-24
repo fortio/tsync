@@ -144,3 +144,16 @@ func TestFilePanelCurFileLine(t *testing.T) {
 		t.Errorf("unexpected file line %+v", l)
 	}
 }
+
+func TestFilePanelSanitizesLocalNames(t *testing.T) {
+	ap, buf, bw := newTestAP(100, 30)
+	id, _ := tcrypto.NewIdentity()
+	srv := (&tsnet.Config{Name: "test", Identity: id}).NewServer()
+	fp := NewFilePanel(ap, srv, t.TempDir(), 5)
+	fp.Draw(0, []fileLine{{text: "📤 offered /tmp/evil\x1b]52;c;aGFja2Vk\a\x1b[2J.txt"}})
+	_ = bw.Flush()
+	out := buf.String()
+	if strings.Contains(out, "]52;") || strings.Contains(out, "\x1b[2J") || !strings.Contains(out, "/tmp/evil.txt") {
+		t.Errorf("escape sequences not removed: %q", out)
+	}
+}
