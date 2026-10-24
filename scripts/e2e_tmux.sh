@@ -43,7 +43,7 @@ wait_for() {
 }
 
 echo "file given on the command line" > "$OUT/src/arg file.txt"
-$T new-session -d -s A -x 200 -y 40 "env HOME=$OUT/hA $BIN $ARGS -name e2eA '$OUT/src/arg file.txt'"
+$T new-session -d -s A -x 200 -y 40 "env HOME=$OUT/hA $BIN $ARGS -name e2eA -max-rate 50KB/s '$OUT/src/arg file.txt'"
 $T set -g set-clipboard on
 $T new-session -d -s B -x 200 -y 40 "env HOME=$OUT/hB $BIN $ARGS -name e2eB -dir $OUT/dlB"
 
@@ -91,25 +91,44 @@ wait_for B "second    line red osc52:end"
 
 # Drop a file in A (as GNOME/VTE does: single quoted path + space, in a bracketed paste):
 # offered to B, downloaded with `d`, same content; a 2nd download doesn't overwrite.
-head -c 600000 /dev/urandom > "$OUT/src/My File.bin"
+head -c 300000 /dev/urandom > "$OUT/src/My File.bin"
 drop() {
 	# shellcheck disable=SC2046 # we want word splitting of the hex bytes.
 	$T send-keys -t A -H $( (printf '\033[200~'"'"; printf '%s' "$OUT/src/My File.bin"; printf "' "'\033[201~') | od -An -tx1 )
 }
 drop
-wait_for A "offered $OUT/src/My File.bin (585.9 Kb) to 1 peer"
-wait_for B "e2eA offers $OUT/src/My File.bin (585.9 Kb): click or press d"
+wait_for A "offered $OUT/src/My File.bin (293.0 Kb) to 1 peer"
+wait_for B "e2eA offers $OUT/src/My File.bin (293.0 Kb): click or press d"
 if [ -n "$(ls -A "$OUT/dlB")" ]; then
 	fail "nothing should be written before accepting: $(ls -A "$OUT/dlB")"
 fi
 $T send-keys -t B d
-wait_for B "My File.bin from e2eA saved as"
+# A is rate limited (50KB/s, ~6s for this file): check the progress bars, also across resizes.
+wait_for B "%"
+wait_for A "%"
+# no_wider SESSION COLS: fails if a line of the screen is wider than COLS (display columns).
+go build -o "$OUT/maxwidth" ./scripts/maxwidth
+no_wider() {
+	$T capture-pane -p -t "$1" | "$OUT/maxwidth" "$2" || fail "$1 has lines wider than $2 after resize"
+}
+$T resize-window -t B -x 60 -y 24
+$T resize-window -t A -x 60 -y 24
+sleep 1
+wait_for B "%"
+wait_for A "%"
+wait_for B "📎 files"
+no_wider B 60
+no_wider A 60
+echo "ok: progress bars and boxes fit after shrinking to 60x24"
+$T resize-window -t B -x 200 -y 40
+$T resize-window -t A -x 200 -y 40
+wait_for B "My File.bin from e2eA saved as" 30
 wait_for A "My File.bin sent to e2eB"
 cmp "$OUT/src/My File.bin" "$OUT/dlB/My File.bin" || fail "downloaded file differs"
 drop
 wait_for B "click or press d" # new offer.
 $T send-keys -t B d
-wait_for B "My File-1.bin"
+wait_for B "My File-1.bin" 30
 cmp "$OUT/src/My File.bin" "$OUT/dlB/My File-1.bin" || fail "2nd downloaded file differs"
 echo "ok: file dropped, offered, downloaded twice without overwrite"
 $T capture-pane -p -t A > "$OUT/A.txt"

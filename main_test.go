@@ -103,3 +103,35 @@ func TestCheckFilesErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRate(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int64
+		bad  bool
+	}{
+		{"", 0, false},
+		{"1024", 1024, false},
+		{"1KB/s", 1024, false},
+		{"10mb/s", 10 << 20, false},
+		{"1.5k", 1536, false},
+		{" 2G ", 2 << 30, false},
+		{"abc", 0, true},
+		{"-1k", 0, true},
+		{"0", 0, true},
+	} {
+		got, err := ParseRate(tc.in)
+		if (err != nil) != tc.bad || got != tc.want {
+			t.Errorf("ParseRate(%q) = %d, %v; expected %d, bad=%v", tc.in, got, err, tc.want, tc.bad)
+		}
+	}
+}
+
+func TestRateString(t *testing.T) {
+	if got := RateString(0); got != "unlimited" {
+		t.Errorf("RateString(0) = %q", got)
+	}
+	if got := RateString(50 * 1024); got != "50 Kb/s" {
+		t.Errorf("RateString(50Kb) = %q", got)
+	}
+}

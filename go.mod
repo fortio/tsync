@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	fortio.org/cli v1.12.3
 	fortio.org/log v1.18.3
-	fortio.org/progressbar v1.3.0
+	fortio.org/progressbar v1.5.0
 	fortio.org/smap v1.1.0
 	fortio.org/terminal v0.66.0
 	golang.org/x/net v0.61.0

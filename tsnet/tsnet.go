@@ -67,6 +67,8 @@ type Config struct {
 	// Peers are host[:port] addresses we also send our discovery message to directly (unicast),
 	// for when multicast doesn't work (port defaults to Port).
 	Peers []string
+	// MaxRate limits the file sending rate in bytes per second (0 for unlimited).
+	MaxRate int64
 }
 
 type ConnectionStatus int

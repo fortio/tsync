@@ -139,6 +139,53 @@ func SplitList(s string) []string {
 	return res
 }
 
+// ParseRate parses a rate in bytes per second like "10MB/s", "500k" or "1024" (case insensitive,
+// K, M, G are powers of 1024 like elsewhere in tsync, the /s is optional). Empty is 0 (unlimited).
+func ParseRate(s string) (int64, error) {
+	orig := s
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return 0, nil
+	}
+	s = strings.TrimSuffix(strings.TrimSuffix(s, "/s"), "b")
+	mult := int64(1)
+	if n := len(s); n > 0 {
+		if i := strings.IndexByte("kmg", s[n-1]); i >= 0 {
+			mult = int64(1) << (10 * (i + 1))
+			s = s[:n-1]
+		}
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("can't parse %q as a rate (eg 10MB/s)", orig)
+	}
+	return max(1, int64(v*float64(mult))), nil
+}
+
+func logStartup(srv *tsnet.Server, cfg *tsnet.Config) {
+	log.Infof("Started tsync %s with name %q, received files are saved in %s, max send rate: %s",
+		cli.LongVersion, srv.Name, cfg.FileDir, RateString(cfg.MaxRate))
+}
+
+// RateString is the rate in human form (eg 50 Kb/s) or "unlimited" if there is no limit.
+func RateString(rate int64) string {
+	if rate <= 0 {
+		return "unlimited"
+	}
+	return progressbar.HumanBytes(rate) + "/s"
+}
+
+// RateFlag defines a rate flag (see ParseRate) and returns a pointer to its value in bytes per second.
+func RateFlag(name string) *int64 {
+	var rate int64
+	flag.Func(name, "Max file sending `rate` (eg 10MB/s, 1k), K, M, G are powers of 1024 bytes. Default unlimited",
+		func(s string) (err error) {
+			rate, err = ParseRate(s)
+			return err
+		})
+	return &rate
+}
+
 // SendPastes sends the completed pastes to the linked peers (dropped files are offered),
 // returns true if anything changed.
 func SendPastes(srv *tsnet.Server, clips *ClipPanel, files *FilePanel, pastes []Paste) bool {
@@ -356,6 +403,7 @@ func Main() int {
 		"Directory where received files are saved (default ~/Downloads if it exists, else current directory)")
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
+	fMaxRate := RateFlag("max-rate")
 	cli.ArgsHelp = "[file...]"
 	cli.MaxArgs = -1
 	cli.Main()
@@ -395,13 +443,14 @@ func Main() int {
 		NoAutoConnect:         !*fAutoConnect,
 		Peers:                 SplitList(*fPeers),
 		FileDir:               DownloadDir(*fDir),
+		MaxRate:               *fMaxRate,
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
 	}
 	defer srv.Stop()
-	log.Infof("Started tsync %s with name %q, received files are saved in %s", cli.LongVersion, srv.Name, cfg.FileDir)
+	logStartup(srv, &cfg)
 	log.Infof("Paste to send to connected peers, Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
