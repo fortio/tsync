@@ -128,11 +128,7 @@ func (fp *FilePanel) Offer(paths []string) {
 			fi, _ := os.Stat(p)
 			line.text = fmt.Sprintf("📤 offered %s (%s) to %d peer%s", p, progressbar.HumanBytes(fi.Size()), n, plural(n))
 			if n == 0 {
-				line.text = fmt.Sprintf("📤 offered %s (%s), will be sent to peers when they connect", p, progressbar.HumanBytes(fi.Size()))
-				if rate := fp.srv.Config.MaxRate; rate > 0 {
-					line.text = fmt.Sprintf("📤 offered %s (%s), will be sent (at max %s/s) to peers",
-						p, progressbar.HumanBytes(fi.Size()), progressbar.HumanBytes(rate))
-				}
+				line.text = fp.pendingText(p, fi.Size())
 			}
 			line.color = tcolor.BrightCyan
 		}
@@ -141,6 +137,15 @@ func (fp *FilePanel) Offer(paths []string) {
 	if len(fp.local) > fp.MaxLines {
 		fp.local = fp.local[len(fp.local)-fp.MaxLines:]
 	}
+}
+
+// pendingText is the line for a file offered while no peer is linked (yet).
+func (fp *FilePanel) pendingText(path string, size int64) string {
+	if rate := fp.srv.Config.MaxRate; rate > 0 {
+		return fmt.Sprintf("📤 offered %s (%s), will be sent (at max %s/s) to peers",
+			path, progressbar.HumanBytes(size), progressbar.HumanBytes(rate))
+	}
+	return fmt.Sprintf("📤 offered %s (%s), will be sent to peers when they connect", path, progressbar.HumanBytes(size))
 }
 
 func plural(n int) string {
