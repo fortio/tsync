@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -160,4 +162,25 @@ func scannedMode(mode fs.FileMode, prev *Entry) fs.FileMode {
 		mode = prev.Mode&^0o200 | mode&0o200
 	}
 	return mode
+}
+
+// maxDepth limits the depth of paths (received from a peer).
+const maxDepth = 64
+
+// ValidKey checks a key received from a peer: what [Key] returns for a relative path inside the synced
+// directory (no empty, "." or ".." parts, no backslash or control characters, limited depth and length).
+func ValidKey(key string) error {
+	if key == "" || len(key) > 0xffff || Key(key) != key {
+		return errors.New("invalid or not normalized path")
+	}
+	parts := strings.Split(key, "/")
+	if len(parts) > maxDepth {
+		return errors.New("path too deep")
+	}
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." || strings.ContainsRune(p, '\\') || strings.ContainsFunc(p, unicode.IsControl) {
+			return errors.New("invalid path")
+		}
+	}
+	return nil
 }

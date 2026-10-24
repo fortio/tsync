@@ -33,6 +33,8 @@ type link struct {
 	outgoing map[uint32]*Transfer
 	incoming map[uint32]*recvFile
 	pace     pacer // MaxRate is per link: shared by all the files sent on it.
+	// syncFolders are the peer's sync folder names (see FrameSyncFolders).
+	syncFolders map[string]bool
 }
 
 const (

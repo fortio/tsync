@@ -43,9 +43,17 @@ wait_for() {
 }
 
 echo "file given on the command line" > "$OUT/src/arg file.txt"
-$T new-session -d -s A -x 200 -y 40 "env HOME=$OUT/hA $BIN $ARGS -name e2eA -max-rate 50KB/s '$OUT/src/arg file.txt'"
+# Sync folders (dry run): same, only on one side, different on both.
+mkdir -p "$OUT/syncA" "$OUT/syncB"
+echo same > "$OUT/syncA/same.txt"
+echo same > "$OUT/syncB/same.txt"
+echo mine > "$OUT/syncA/onlyA.txt"
+echo theirs > "$OUT/syncB/onlyB.txt"
+echo A > "$OUT/syncA/both.txt"
+echo B > "$OUT/syncB/both.txt"
+$T new-session -d -s A -x 200 -y 40 "env HOME=$OUT/hA $BIN $ARGS -name e2eA -sync e2e=$OUT/syncA -max-rate 50KB/s '$OUT/src/arg file.txt'"
 $T set -g set-clipboard on
-$T new-session -d -s B -x 200 -y 40 "env HOME=$OUT/hB $BIN $ARGS -name e2eB -dir $OUT/dlB"
+$T new-session -d -s B -x 200 -y 40 "env HOME=$OUT/hB $BIN $ARGS -name e2eB -sync e2e=$OUT/syncB -dir $OUT/dlB"
 
 # Discovery both ways before connecting (or the request is dropped as from an unknown peer).
 wait_for A "e2eB"
@@ -56,6 +64,10 @@ wait_for B "wants to connect: check the hash, then click or press 1 to accept"
 $T send-keys -t B 1
 wait_for A "🔗 e2eB"
 wait_for B "🔗 e2eA"
+wait_for A "📁 e2e ↔ e2eB · 1 to get (7 b) · 1 for e2eB · 1 conflict"
+wait_for B "📁 e2e ↔ e2eA · 1 to get (5 b) · 1 for e2eA · 1 conflict"
+[ ! -e "$OUT/syncA/onlyB.txt" ] && [ ! -e "$OUT/syncB/onlyA.txt" ] || fail "sync dry run shouldn't write anything"
+echo "ok: sync dry run shows what sync would do on both sides"
 # File given as argument to A: offered once B is linked.
 wait_for B "e2eA offers $OUT/src/arg file.txt (31 b): click or press d"
 
@@ -83,7 +95,7 @@ echo "ok: clipboard has the sanitized clip"
 
 # Restart B (same identity): it should reconnect on its own (trusted) and get A's last clip again.
 $T kill-session -t B
-$T new-session -d -s B -x 200 -y 40 "env HOME=$OUT/hB $BIN $ARGS -name e2eB -dir $OUT/dlB"
+$T new-session -d -s B -x 200 -y 40 "env HOME=$OUT/hB $BIN $ARGS -name e2eB -sync e2e=$OUT/syncB -dir $OUT/dlB"
 wait_for B "Auto connecting to trusted peer e2eA" 15
 wait_for B "🔗 e2eA"
 wait_for A "🔗 e2eB"

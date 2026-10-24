@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,5 +145,21 @@ func TestScanUnreadableDir(t *testing.T) {
 	idx := scan(t, root, syncdir.Index{})
 	if _, ok := idx.Entries["locked"]; !ok || len(idx.Entries) != 2 || idx.Skipped != 1 {
 		t.Errorf("unreadable directory should be listed (not its content) and counted: %+v", idx)
+	}
+}
+
+func TestValidKey(t *testing.T) {
+	for _, ok := range []string{"a", "a/b c/d.txt", ".hidden", "é"} {
+		if err := syncdir.ValidKey(ok); err != nil {
+			t.Errorf("ValidKey(%q): %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"", "/abs", "a/", "a//b", ".", "..", "a/../b", "./a", `a\b`, "a\x00b", "a\nb", "é", // NFD.
+		strings.Repeat("d/", 64) + "f",
+	} {
+		if err := syncdir.ValidKey(bad); err == nil {
+			t.Errorf("ValidKey(%q) should fail", bad)
+		}
 	}
 }

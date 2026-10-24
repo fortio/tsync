@@ -802,6 +802,7 @@ func (s *Server) linkClosed(l *link) {
 		s.dropIncomingLocked(l, id, errors.New("link closed"))
 	}
 	s.failLinkDirsLocked(l, errors.New("link closed"))
+	s.syncLinkClosedLocked(l)
 	for id, t := range l.outgoing {
 		delete(l.outgoing, id)
 		s.finishLocked(t, errors.New("link closed"))

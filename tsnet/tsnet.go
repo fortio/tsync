@@ -69,6 +69,10 @@ type Config struct {
 	Peers []string
 	// MaxRate limits the file sending rate in bytes per second, per peer link (0 for unlimited).
 	MaxRate int64
+	// Sync are the directories to sync with the linked peers that have ones with the same names.
+	Sync []SyncFolder
+	// SyncRescan is how often the sync folders are scanned (DefaultSyncRescan if 0).
+	SyncRescan time.Duration
 }
 
 type ConnectionStatus int
@@ -114,6 +118,8 @@ type Server struct {
 	nextFileID uint32
 	offers     map[uint32]*offer   // our recent offers, by id.
 	rdirs      map[dirKey]*recvDir // directories being downloaded.
+	// sync folders by name.
+	syncFolders map[string]*syncFolder
 	// resolved Config.Peers
 	staticPeers []*net.UDPAddr
 	// random id of this run, in our discovery messages (handshake context, restart detection).
@@ -162,7 +168,9 @@ func (c *Config) NewServer() *Server {
 		lastAuto: make(map[Peer]time.Time),
 		offers:   make(map[uint32]*offer),
 		rdirs:    make(map[dirKey]*recvDir),
-		early:    make(map[Source]earlyMsg),
+		// sync folders are set in Start.
+		syncFolders: make(map[string]*syncFolder),
+		early:       make(map[Source]earlyMsg),
 		// Random start so offer ids from different runs don't collide (eg in peers' lists).
 		nextFileID: rand.Uint32() >> 1, //nolint:gosec // not cryptographic.
 	}
@@ -250,6 +258,7 @@ func (s *Server) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
 	s.stateMu.Lock()
 	s.ctx = ctx
+	s.startSync(ctx)
 	s.stateMu.Unlock()
 	s.wg.Add(4) // broadcast sender, multicast receiver, unicast receiver and tcp accept
 	go s.runAdv(ctx)

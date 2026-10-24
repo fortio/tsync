@@ -135,3 +135,28 @@ func TestPlan(t *testing.T) {
 		t.Errorf("unexpected entries in %+v / %+v", got[7], got[8])
 	}
 }
+
+func TestSummary(t *testing.T) {
+	items := []syncdir.Item{
+		{Path: "same", Action: syncdir.InSync},
+		{Path: "new", Action: syncdir.Pull, Remote: &syncdir.Entry{Size: 1500}},
+		{Path: "newdir", Action: syncdir.Pull, Remote: &syncdir.Entry{Dir: true}},
+		{Path: "mine", Action: syncdir.PeerPulls},
+		{Path: "both", Action: syncdir.Conflict},
+		{Path: "gone", Action: syncdir.DeletedThere},
+	}
+	sum := syncdir.Summarize(items)
+	if sum.Pending() != 5 || sum.PullBytes != 1500 || len(sum.Conflicts) != 1 || sum.Conflicts[0] != "both" {
+		t.Errorf("unexpected summary %+v", sum)
+	}
+	if got := sum.Describe("bob"); got != "2 to get (1.5 Kb) · 1 for bob · 1 conflict · 1 deleted on bob" {
+		t.Errorf("unexpected description %q", got)
+	}
+	if !sum.Equal(syncdir.Summarize(items)) || sum.Equal(syncdir.Summarize(items[:1])) {
+		t.Errorf("Equal mismatch")
+	}
+	inSync := syncdir.Summarize(items[:1])
+	if inSync.Pending() != 0 || inSync.Describe("bob") != "in sync (1 item)" {
+		t.Errorf("unexpected in sync summary %+v %q", inSync, inSync.Describe("bob"))
+	}
+}

@@ -5,9 +5,12 @@
 package syncdir
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
+
+	"fortio.org/progressbar"
 )
 
 // Action is what to do for a path, from our side (the peer decides the mirror action on its side).
@@ -197,4 +200,84 @@ func caseConflict(group []string, local, remote map[string]Entry) bool {
 		}
 	}
 	return false
+}
+
+// numActions is the number of actions.
+const numActions = int(DeletedThere) + 1
+
+// maxSummaryConflicts is how many conflicting paths a [Summary] keeps.
+const maxSummaryConflicts = 5
+
+// Summary counts the items of a plan by action.
+type Summary struct {
+	Counts    [numActions]int
+	PullBytes int64    // size of the files to pull.
+	Conflicts []string // the first conflicting paths.
+}
+
+// Summarize counts the items by action.
+func Summarize(items []Item) Summary {
+	var s Summary
+	for _, it := range items {
+		s.Counts[it.Action]++
+		switch it.Action {
+		case Pull:
+			if !it.Remote.Dir {
+				s.PullBytes += it.Remote.Size
+			}
+		case Conflict:
+			if len(s.Conflicts) < maxSummaryConflicts {
+				s.Conflicts = append(s.Conflicts, it.Path)
+			}
+		default:
+		}
+	}
+	return s
+}
+
+// Pending returns how many paths aren't in sync.
+func (s Summary) Pending() int {
+	n := 0
+	for a, c := range s.Counts {
+		if Action(a) != InSync {
+			n += c
+		}
+	}
+	return n
+}
+
+// Equal returns true if both summaries are the same.
+func (s Summary) Equal(o Summary) bool {
+	return s.Counts == o.Counts && s.PullBytes == o.PullBytes && slices.Equal(s.Conflicts, o.Conflicts)
+}
+
+// Describe describes the summary (eg "3 to get (1.2 Mb) · 1 for peer · 1 conflict"), "in sync (N items)"
+// (files and directories) when there is nothing to do.
+func (s Summary) Describe(peerName string) string {
+	var parts []string
+	add := func(n int, what string) {
+		if n > 0 {
+			parts = append(parts, strconv.Itoa(n)+" "+what)
+		}
+	}
+	if n := s.Counts[Pull]; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d to get (%s)", n, progressbar.HumanBytes(s.PullBytes)))
+	}
+	add(s.Counts[MetadataOnly], "mode changes to get")
+	add(s.Counts[PeerPulls], "for "+peerName)
+	add(s.Counts[Conflict], plural(s.Counts[Conflict], "conflict"))
+	add(s.Counts[DeletedHere], "deleted here")
+	add(s.Counts[DeletedThere], "deleted on "+peerName)
+	if len(parts) == 0 {
+		n := s.Counts[InSync]
+		return fmt.Sprintf("in sync (%d %s)", n, plural(n, "item"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
 }
