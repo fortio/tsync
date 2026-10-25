@@ -139,6 +139,9 @@ there. The peer only serves files.
 - The new file gets the peer's mode and modification time.
 - All writes go through Go's `os.Root`: nothing can be written outside the synced directory, even through a
   symlink in it.
+- Scans and these changes are serialized per synced directory, and a change is recorded before the next scan
+  can start: a scan never sees a change half done, nor mistakes a replaced file for the previous one (they can
+  have the same size and time).
 - The base is updated (and saved) for what got synced, and for what is found the same on both sides.
 
 ## Several machines
@@ -165,8 +168,15 @@ Within the encrypted link of each linked peer (see the README's security section
 ## Limits
 
 - Changes are noticed by rescanning, every `-sync-rescan`.
-- Indexes are kept in memory and sent whole when they change (fine for many thousands of files, at most a
-  million entries per peer index).
+- Size: meant for directories of up to some tens of thousands of files. Each side keeps its index in memory,
+  walks the whole directory at each scan (only changed files are hashed) and sends the whole index (about 1 MB
+  per 10k files) to each peer when anything changed; deciding takes about 70 ms for 100k files and is done at
+  most once a second while syncing. An initial sync of 100k small files took about 23s between 2 local
+  instances (so mostly the per file overhead, not the network). It works for more (up to a million entries per
+  index) but for a big tree, several `-sync` labels for its main sub directories are lighter.
+- Names Windows can't store (with one of `<>:"|?*`, ending with a dot or a space, or a device name like `CON`
+  or `com1.txt`) aren't synced to Windows machines (they warn); the other machines keep showing them as for that
+  machine to get.
 - Directory modification times aren't synced; empty directories are.
 - Names differing only by case (`A.txt` and `a.txt`) are a conflict unless both sides have both (case sensitive
   file systems on both).

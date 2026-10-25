@@ -111,3 +111,11 @@ func TestSyncFoldersClock(t *testing.T) {
 		t.Errorf("unexpected folders %v", l.syncFolders)
 	}
 }
+
+func TestFilterWindowsNames(t *testing.T) {
+	entries := []syncdir.Entry{{Path: "ok.txt"}, {Path: "a:b"}, {Path: "dir/con.txt"}, {Path: "dir/fine"}}
+	kept, skipped := filterWindowsNames(entries)
+	if len(kept) != 2 || kept[0].Path != "ok.txt" || kept[1].Path != "dir/fine" || len(skipped) != 2 {
+		t.Errorf("unexpected %+v %q", kept, skipped)
+	}
+}

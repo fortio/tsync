@@ -203,3 +203,25 @@ func ValidKey(key string) error {
 	}
 	return nil
 }
+
+// ValidWindowsKey checks that a key can be a path on Windows: no part with one of <>:"|?* (eg "a:b" would be
+// an alternate data stream of "a"), ending with a dot or a space (Windows drops them), or a reserved device
+// name (CON, NUL, COM1..., with or without an extension).
+func ValidWindowsKey(key string) error {
+	for part := range strings.SplitSeq(key, "/") {
+		if strings.ContainsAny(part, `<>:"|?*`) || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
+			return errors.New("invalid name on windows")
+		}
+		base := strings.ToUpper(part)
+		if i := strings.IndexByte(base, '.'); i >= 0 {
+			base = base[:i]
+		}
+		switch base = strings.TrimSpace(base); {
+		case base == "CON" || base == "PRN" || base == "AUX" || base == "NUL",
+			len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
+				base[3] >= '0' && base[3] <= '9':
+			return errors.New("reserved device name on windows")
+		}
+	}
+	return nil
+}

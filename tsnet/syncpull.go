@@ -48,6 +48,7 @@ const (
 // syncPull is getting (or creating, for directories, changing the mode of, moving, removing, keeping a
 // conflict copy of) a path from a peer.
 type syncPull struct {
+	s      *Server
 	f      *syncFolder
 	sp     *syncPeer
 	peer   Peer
@@ -55,6 +56,21 @@ type syncPull struct {
 	tmp    string // downloaded file (relative to the folder).
 	target string // relative to the folder, as on disk.
 	copy   string // ConflictCopy: where ours was kept (slash separated, may differ from item.Copy if taken).
+	// recorded is set once the result is recorded (see record).
+	recorded bool
+}
+
+// record records a successful sync (see recordSyncedLocked) right after the change on disk, with the folder's
+// ioMu still held: a scan then sees either the old file and the old record, or the new file and the new
+// record, never the new file with the old hash (a replacement can have the same size and time as before).
+func (p *syncPull) record() {
+	if p.s == nil {
+		return
+	}
+	p.s.stateMu.Lock()
+	p.s.recordSyncedLocked(p, time.Now())
+	p.recorded = true
+	p.s.stateMu.Unlock()
 }
 
 // syncFailure is when and why getting a path last failed, and how many times in a row.
@@ -91,17 +107,6 @@ func (s *Server) startPulls(f *syncFolder) {
 	var requests []pullRequest
 	s.stateMu.Lock()
 	now := time.Now()
-	todo := make(map[string]bool)
-	for _, sp := range f.peers {
-		for _, it := range sp.todo {
-			todo[it.Path] = true
-		}
-	}
-	for p := range f.failed { // no longer to get (eg in sync now, or a conflict).
-		if !todo[p] {
-			delete(f.failed, p)
-		}
-	}
 	for peer, sp := range f.peers {
 		if sp.ready && sp.l.conn != nil {
 			l, r := s.schedulePullsLocked(f, peer, sp, now)
@@ -129,9 +134,18 @@ func (s *Server) startPulls(f *syncFolder) {
 func (s *Server) schedulePullsLocked(f *syncFolder, peer Peer, sp *syncPeer, now time.Time) ([]*syncPull, []pullRequest) {
 	var local []*syncPull
 	var requests []pullRequest
-	for _, it := range slices.Clone(sp.todo) { // a failure replans (sp.todo changes).
+	// From the first item not done yet: sp.todoAt advances past the ones done since the plan (else a big
+	// folder's initial sync would look at all the done ones again for each file).
+	for i := sp.todoAt; i < len(sp.todo); i++ {
 		if len(sp.pulls) >= syncParallel {
 			break
+		}
+		it := sp.todo[i]
+		if r, ok := f.recent[it.Path]; ok && r.at.After(f.lastReplan) { // done since that plan.
+			if i == sp.todoAt {
+				sp.todoAt++
+			}
+			continue
 		}
 		if fail, failed := f.failed[it.Path]; f.inflight[it.Path] || (failed && now.Before(fail.retryAt())) {
 			continue
@@ -139,7 +153,7 @@ func (s *Server) schedulePullsLocked(f *syncFolder, peer Peer, sp *syncPeer, now
 		if it.From != nil && f.inflight[it.From.Path] {
 			continue
 		}
-		p := &syncPull{f: f, sp: sp, peer: peer, item: it, target: it.Path}
+		p := &syncPull{s: s, f: f, sp: sp, peer: peer, item: it, target: it.Path}
 		if it.Local != nil {
 			p.target = it.Local.DiskPath()
 		}
@@ -221,6 +235,14 @@ func (p *syncPull) localOp(keep int) error {
 		return err
 	}
 	defer r.Close()
+	if err = p.localOpIn(r, keep); err == nil {
+		p.record()
+	}
+	return err
+}
+
+func (p *syncPull) localOpIn(r *os.Root, keep int) error {
+	var err error
 	target := filepath.FromSlash(p.target)
 	switch p.item.Action {
 	case syncdir.Move:
@@ -377,7 +399,11 @@ func (p *syncPull) replace(keep int) error {
 			return fmt.Errorf("can't keep the replaced version: %w", err)
 		}
 	}
-	return pathErr(r.Rename(p.tmp, target))
+	if err = r.Rename(p.tmp, target); err != nil {
+		return pathErr(err)
+	}
+	p.record()
+	return nil
 }
 
 // keepOld keeps the file at target as a replaced (or removed, when move) version (OldDir/<key>~<time>), at
@@ -467,8 +493,24 @@ func (s *Server) syncDoneLocked(p *syncPull, err error) {
 			log.Warnf("Sync %q: can't get %q from %s (will retry): %v", f.Name, it.Path, p.peer.Name, err)
 		}
 		f.failed[it.Path] = syncFailure{now, err.Error(), prev.n + 1}
-	case it.Action == syncdir.DeletedThere:
+	case !p.recorded:
 		delete(f.failed, it.Path)
+		s.recordSyncedLocked(p, now)
+	default:
+		delete(f.failed, it.Path)
+	}
+	// Not replanned right away (a plan of a big folder takes a while, many files can be synced per second):
+	// see runSync, which also rescans once all is synced so the peers learn what we got.
+	f.replan, f.synced = true, f.synced || err == nil
+	f.kickLocked()
+	s.change(0)
+}
+
+// recordSyncedLocked records what we synced (as if scanned until the next scan sees it), and in the base.
+func (s *Server) recordSyncedLocked(p *syncPull, now time.Time) {
+	f, it := p.f, p.item
+	switch it.Action {
+	case syncdir.DeletedThere:
 		f.recent[it.Path] = recentEntry{at: now, deleted: true}
 		delete(p.sp.base, it.Path)
 		p.sp.dirty = true
@@ -477,11 +519,9 @@ func (s *Server) syncDoneLocked(p *syncPull, err error) {
 			where = "removed"
 		}
 		log.Infof("Sync %q: %q deleted on %s, %s", f.Name, it.Path, p.peer.Name, where)
-	case it.Action == syncdir.ConflictCopy:
-		delete(f.failed, it.Path)
+	case syncdir.ConflictCopy:
 		s.conflictCopyDoneLocked(p, now)
 	default:
-		delete(f.failed, it.Path)
 		e := *it.Remote
 		if it.Local != nil {
 			e = *it.Local // keeps its path on disk.
@@ -502,14 +542,6 @@ func (s *Server) syncDoneLocked(p *syncPull, err error) {
 			log.Infof("Sync %q: got %q (%d bytes) from %s", f.Name, it.Path, e.Size, p.peer.Name)
 		}
 	}
-	if len(f.inflight) == 0 {
-		f.rescan = true // so the peers learn what we got.
-	}
-	for peer, sp := range f.peers {
-		s.replanLocked(f, peer, sp)
-	}
-	f.kickLocked()
-	s.change(0)
 }
 
 // conflictCopyDoneLocked records a conflict resolved with a conflict copy of our version.
@@ -595,6 +627,7 @@ func (s *Server) startSyncSendLocked(peer Peer, l *link, conn net.Conn, id uint3
 // saveBases saves the bases that changed.
 func (s *Server) saveBases(f *syncFolder) {
 	s.stateMu.Lock()
+	f.lastSave = time.Now()
 	saves := f.toSave
 	f.toSave = nil
 	for _, sp := range f.peers {

@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -44,6 +45,10 @@ const (
 	MaxSyncNameLen = 64
 	// MaxClockSkew is how much the clocks of 2 peers syncing folders can differ before we warn.
 	MaxClockSkew = time.Second
+	// syncReplanEvery is how often at most a folder is replanned while syncing (Plan of 100k files: ~70ms).
+	syncReplanEvery = time.Second
+	// syncSaveEvery is how often at most the bases are saved while syncing (else once done).
+	syncSaveEvery = 5 * time.Second
 )
 
 // SyncFolder is a directory to sync with the linked peers that have one with the same name.
@@ -81,8 +86,12 @@ type syncFolder struct {
 	inflight map[string]bool        // paths being synced (from any peer).
 	failed   map[string]syncFailure // paths that failed (retried after syncRetry).
 	recent   map[string]recentEntry // paths we synced, until a scan sees them.
-	rescan   bool                   // scan again soon (we got files, the peers should know).
-	toSave   []savedBase            // bases of peers no longer linked, to save.
+	// Replanned at most every syncReplanEvery while syncing (see runSync).
+	replan     bool        // something got synced since the last plan.
+	lastReplan time.Time   // when.
+	synced     bool        // something got synced since the last scan (rescan once all done, for the peers).
+	lastSave   time.Time   // bases saved.
+	toSave     []savedBase // bases of peers no longer linked, to save.
 	// issueLines are the conflicts and deletions as last written (see writeConflicts).
 	issueLines []string
 	copies     []string // conflict copies in the folder (from the last scan, sorted).
@@ -111,7 +120,8 @@ type syncPeer struct {
 	base      syncdir.Base
 	summary   syncdir.Summary
 	// Getting what the peer has newer.
-	todo     []syncdir.Item       // paths to get (or set the mode of), from the last plan.
+	todo     []syncdir.Item       // paths to get (or set the mode of...), from the last plan.
+	todoAt   int                  // todo before this index is all done (see schedulePullsLocked).
 	pulls    map[uint32]*Transfer // downloads in progress.
 	baseFile string               // where base is saved ("" without storage).
 	dirty    bool                 // base changed since saved.
@@ -205,30 +215,67 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		case <-f.kick:
 		}
 		s.stateMu.Lock()
-		rescan := f.rescan
-		f.rescan = false
-		s.stateMu.Unlock()
-		if rescan {
-			prev = s.syncScan(f, prev)
+		if f.replan && (len(f.inflight) == 0 || time.Since(f.lastReplan) >= syncReplanEvery) {
+			s.replanAllLocked(f)
 		}
+		s.stateMu.Unlock()
 		s.startPulls(f)
-		s.saveBases(f)
-		s.writeConflicts(f)
 		s.stateMu.Lock()
+		idle := len(f.inflight) == 0 && !f.replan
+		rescan := idle && f.synced
+		if rescan {
+			f.synced = false
+		}
+		save := idle || time.Since(f.lastSave) >= syncSaveEvery
 		retry := interval
 		for _, fail := range f.failed { // eg a file still being written there: don't wait for the next scan.
 			retry = min(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
 		}
+		if f.replan {
+			retry = min(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
+		}
 		s.stateMu.Unlock()
+		if rescan { // so the peers learn what we got.
+			prev = s.syncScan(f, prev)
+		}
+		if save {
+			s.saveBases(f)
+		}
+		s.writeConflicts(f)
 		if retry < interval {
 			timer.Reset(retry)
 		}
 	}
 }
 
+// replanAllLocked replans the folder with all the peers, forgets the failures of what's no longer to do.
+func (s *Server) replanAllLocked(f *syncFolder) {
+	todo := make(map[string]bool)
+	for peer, sp := range f.peers {
+		s.replanLocked(f, peer, sp)
+		for _, it := range sp.todo {
+			todo[it.Path] = true
+		}
+	}
+	for p := range f.failed { // no longer to get (eg in sync now, or a conflict).
+		if !todo[p] {
+			delete(f.failed, p)
+		}
+	}
+	f.replan, f.lastReplan = false, time.Now()
+}
+
 // syncScan scans the folder (what we just synced counts as already scanned), sends the index to the
 // peers if it changed, returns the scan (for the next one).
 func (s *Server) syncScan(f *syncFolder, prev syncdir.Index) syncdir.Index {
+	ig, err := syncdir.LoadIgnore(f.Path)
+	if err == nil {
+		if text, _ := ig.Text(); len(text) > 0xffff { // sent with the index.
+			err = fmt.Errorf("%s too large", syncdir.IgnoreFile)
+		}
+	}
+	// What we synced is recorded with ioMu held (see syncPull.record): merged and scanned with it held too.
+	f.ioMu.Lock()
 	s.stateMu.Lock()
 	if len(f.recent) > 0 && prev.Entries != nil {
 		prev.Entries = maps.Clone(prev.Entries)
@@ -241,18 +288,11 @@ func (s *Server) syncScan(f *syncFolder, prev syncdir.Index) syncdir.Index {
 		}
 	}
 	s.stateMu.Unlock()
-	ig, err := syncdir.LoadIgnore(f.Path)
-	if err == nil {
-		if text, _ := ig.Text(); len(text) > 0xffff { // sent with the index.
-			err = fmt.Errorf("%s too large", syncdir.IgnoreFile)
-		}
-	}
 	var idx syncdir.Index
 	if err == nil {
-		f.ioMu.Lock()
 		idx, err = syncdir.Scan(f.Path, prev, ig)
-		f.ioMu.Unlock()
 	}
+	f.ioMu.Unlock()
 	if err == nil {
 		prev = idx
 	}
@@ -291,9 +331,7 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 	if !f.local.Time.IsZero() && maps.EqualFunc(f.local.Entries, idx.Entries, sameEntry) {
 		f.local.Time = idx.Time
 		if seen > 0 {
-			for peer, sp := range f.peers {
-				s.replanLocked(f, peer, sp)
-			}
+			s.replanAllLocked(f)
 		}
 		return nil
 	}
@@ -306,9 +344,7 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 		f.copies = copies
 		f.kickLocked() // to update the conflicts list.
 	}
-	for peer, sp := range f.peers {
-		s.replanLocked(f, peer, sp)
-	}
+	s.replanAllLocked(f)
 	s.change(0)
 	return s.syncTargetsLocked(f)
 }
@@ -417,6 +453,23 @@ func encodeEntry(b []byte, e syncdir.Entry) []byte {
 	}
 	b = binary.BigEndian.AppendUint16(b, uint16(len(e.Path))) //nolint:gosec // checked by the caller.
 	return append(b, e.Path...)
+}
+
+// skipWindowsNames is true on Windows: the peers' paths it can't store are skipped (see filterWindowsNames).
+var skipWindowsNames = runtime.GOOS == "windows"
+
+// filterWindowsNames returns the entries whose paths can be stored on Windows, and the paths of the others.
+func filterWindowsNames(entries []syncdir.Entry) ([]syncdir.Entry, []string) {
+	var skipped []string
+	kept := entries[:0]
+	for _, e := range entries {
+		if syncdir.ValidWindowsKey(e.Path) != nil {
+			skipped = append(skipped, e.Path)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept, skipped
 }
 
 // decodeRules decodes the ignore rules at the start of the first chunk of an index, returns them and the rest.
@@ -536,6 +589,14 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	if err != nil {
 		return err
 	}
+	if skipWindowsNames {
+		var skipped []string
+		entries, skipped = filterWindowsNames(entries)
+		if len(skipped) > 0 {
+			log.Warnf("Sync %q: %d paths from %s can't be stored on Windows (eg %q), not synced here",
+				name, len(skipped), peer.Name, skipped[0])
+		}
+	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	f := s.syncFolders[name]
@@ -610,7 +671,7 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 	if syncdir.UpdateBase(sp.base, items) {
 		sp.dirty = true
 	}
-	sp.todo = sp.todo[:0]
+	sp.todo, sp.todoAt = sp.todo[:0], 0
 	hadIssues := len(sp.issues) > 0
 	sp.issues = sp.issues[:0]
 	for _, it := range items {

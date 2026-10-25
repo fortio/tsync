@@ -163,3 +163,19 @@ func TestValidKey(t *testing.T) {
 		}
 	}
 }
+
+func TestValidWindowsKey(t *testing.T) {
+	for _, ok := range []string{"a", "dir/file.txt", "con2.txt", "com10", "x.y.z", "é"} {
+		if err := syncdir.ValidWindowsKey(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"a:b", "dir/x?", `q"`, "a|b", "<x>", "star*", "dot.", "space ", "CON", "nul.txt",
+		"dir/Aux", "com1", "LPT9.log", "dir/con/file",
+	} {
+		if syncdir.ValidWindowsKey(bad) == nil {
+			t.Errorf("%q should be invalid on windows", bad)
+		}
+	}
+}
