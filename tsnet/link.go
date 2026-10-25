@@ -338,7 +338,7 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			s.linkFailed(peer, l)
 			return
 		}
-		if s.Headless && ignoredHeadless(plain[0]) {
+		if s.Headless && !allowedHeadless(plain[0]) {
 			log.LogVf("Headless: ignoring frame %q from %q", plain[0], peer.Name)
 			continue
 		}
@@ -360,11 +360,12 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 	}
 }
 
-// ignoredHeadless is true for the frame types a headless server doesn't want: clipboard and file/directory offers.
-// (File data and get frames are shared with the sync downloads, so those are left alone.)
-func ignoredHeadless(ftype byte) bool {
+// allowedHeadless is true for the only frame types a headless server handles: the sync ones, and the file data
+// ones its downloads (and the peers' downloads from it) use. Anything else (clipboard, file offers... and whatever
+// gets added later) is ignored.
+func allowedHeadless(ftype byte) bool {
 	switch ftype {
-	case FrameClip, FrameClipNoTime, FrameFileOffer, FrameDirOffer, FrameDirManifest:
+	case FrameSyncFolders, FrameSyncIndex, FrameSyncGet, FrameFileData, FrameFileEnd, FrameFileAbort, FrameFileRefuse:
 		return true
 	}
 	return false
