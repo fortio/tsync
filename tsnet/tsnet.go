@@ -72,8 +72,11 @@ type Config struct {
 	MaxRate int64
 	// Sync are the directories to sync with the linked peers that have ones with the same names.
 	Sync []SyncFolder
-	// SyncRescan is how often the sync folders are scanned (DefaultSyncRescan if 0).
+	// SyncRescan is how often the sync folders are scanned (DefaultSyncRescan if 0) when not watched.
 	SyncRescan time.Duration
+	// SyncWatch watches the sync folders with file system notifications: only the directories that changed
+	// are scanned again (and all of it every 15 minutes, as a safety net). See syncwatch.go.
+	SyncWatch bool
 	// SyncKeep is how many replaced versions of each file are kept in the sync folders' OldDir (0 for none).
 	SyncKeep int
 	// SyncConflictList leaves the sync conflicts alone (listed) instead of resolving them with conflict copies.

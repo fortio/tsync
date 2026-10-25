@@ -8,7 +8,9 @@ require (
 	fortio.org/progressbar v1.5.0
 	fortio.org/smap v1.1.0
 	fortio.org/terminal v0.66.0
+	github.com/fsnotify/fsnotify v1.10.1
 	golang.org/x/net v0.61.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/text v0.43.0
 )
 
@@ -21,6 +23,5 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20250406160420-959f8f3db0fb // indirect
 	golang.org/x/image v0.47.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 )

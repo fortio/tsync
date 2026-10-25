@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -177,5 +178,73 @@ func TestValidWindowsKey(t *testing.T) {
 		if syncdir.ValidWindowsKey(bad) == nil {
 			t.Errorf("%q should be invalid on windows", bad)
 		}
+	}
+}
+
+func sameIndex(t *testing.T, got, want syncdir.Index) {
+	t.Helper()
+	if len(got.Entries) != len(want.Entries) {
+		t.Errorf("got %d entries, want %d", len(got.Entries), len(want.Entries))
+	}
+	for k, w := range want.Entries {
+		g, ok := got.Entries[k]
+		if !ok || g.Dir != w.Dir || g.Mode != w.Mode || g.Size != w.Size || !g.MTime.Equal(w.MTime) || g.Hash != w.Hash ||
+			g.DiskPath() != w.DiskPath() {
+			t.Errorf("%s: got %+v (%v), want %+v", k, g, ok, w)
+		}
+	}
+	for k := range got.Entries {
+		if _, ok := want.Entries[k]; !ok {
+			t.Errorf("unexpected %s", k)
+		}
+	}
+}
+
+func TestScanDirs(t *testing.T) {
+	root := t.TempDir()
+	old := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, p := range []string{"top.txt", "d1/a", "d1/b", "d2/c", "d4/x/y", "d4/z", "d5/m", "keep/k"} {
+		write(t, root, p, "v1 "+p, old)
+	}
+	prev := scan(t, root, syncdir.Index{})
+	// Changes: in d1 a file added, one edited (new time); d2/c removed; a new nested directory d3/sub/new;
+	// d4 removed with its content; d5 renamed d6; keep/ untouched.
+	write(t, root, "d1/added", "added", old)
+	write(t, root, "d1/a", "v2", time.Time{})
+	if err := os.Remove(filepath.Join(root, "d2", "c")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, "d3/sub/new", "new", old)
+	if err := os.RemoveAll(filepath.Join(root, "d4")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "d5"), filepath.Join(root, "d6")); err != nil {
+		t.Fatal(err)
+	}
+	// The directories file system notifications would report: d1, d2, and the root (d3, d4, d5, d6).
+	got, added, err := syncdir.ScanDirs(root, prev, []string{"d1", "d2", ""}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameIndex(t, got, scan(t, root, syncdir.Index{}))
+	slices.Sort(added)
+	if !slices.Equal(added, []string{"d3", "d3/sub", "d6"}) {
+		t.Errorf("unexpected new directories %q", added)
+	}
+	// Same size and time but rewritten: only seen when forced (eg a write notification for it).
+	write(t, root, "keep/k", "v2 keep/k", old) // same size as "v1 keep/k".
+	got2, _, err := syncdir.ScanDirs(root, got, []string{"keep"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.Entries["keep/k"].Hash != got.Entries["keep/k"].Hash {
+		t.Errorf("unforced: fast path expected")
+	}
+	got3, _, err := syncdir.ScanDirs(root, got, []string{"keep"}, nil, map[string]bool{"keep/k": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got3.Entries["keep/k"].Hash != hashOf("v2 keep/k") {
+		t.Errorf("forced: should be hashed again")
 	}
 }
