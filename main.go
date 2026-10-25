@@ -252,7 +252,7 @@ func SyncFlag(name string) *[]tsnet.SyncFolder {
 	var folders []tsnet.SyncFolder
 	flag.Func(name, "Sync the content of the directory `label=path` with the linked peers that use the same label"+
 		" (the directory can be anywhere and named anything on each machine). Repeatable. Files changed on both"+
-		" sides are left alone (conflicts), deletions aren't propagated",
+		" sides are conflicts (see -sync-conflicts), deletions are propagated (moved to "+syncdir.OldDir+" on the other side)",
 		func(s string) error {
 			f, err := ParseSyncFolder(s)
 			if err != nil {
