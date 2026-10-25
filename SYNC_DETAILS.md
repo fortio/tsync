@@ -26,13 +26,13 @@ recognized for *files*, by content (see [Moves](#moves-and-renames)), which cove
 Each sync directory is scanned every `-sync-rescan` (10s by default), and right after each batch of changes
 synced from a peer (so the other peers learn about them quickly). Unless watched:
 
-- With `-sync-watch` (default on Linux and Windows) the directories are watched for changes (file system
-  notifications: inotify on Linux, ReadDirectoryChangesW on Windows (one recursive watch: watching each
-  directory would prevent renaming or removing their parent directories), kqueue on macOS, which needs a file
-  descriptor per file, so it's off by default there). The point is not to walk hundreds of directories every
-  10s: only the directories notified are read again (their direct content; a new sub directory is scanned
-  whole, a removed one removed with all it had), once there was no notification for 2s (still being
-  written), or at most 10s after the first one. A file written to is hashed again even if its size and time
+- With `-sync-watch` (default on) the directories are watched for changes (file system notifications:
+  inotify on Linux, ReadDirectoryChangesW on Windows (one recursive watch: watching each directory would
+  prevent renaming or removing their parent directories), one recursive FSEvents stream on macOS (when built
+  with cgo; else kqueue, which needs a file descriptor per file, so it's off by default then)). The point is
+  not to walk hundreds of directories every 10s: only the directories notified are read again (their direct
+  content; a new sub directory is scanned whole, a removed one removed with all it had), once there was no
+  notification for 2s (still being written), or at most 10s after the first one. A file written to is hashed again even if its size and time
   didn't change. A change to `.tsyncignore`, or lost notifications (overflow), means a full scan.
 - Notifications are only hints: the whole directory is still scanned every 15 minutes (or `-sync-rescan` if
   longer). If that finds changes in directories that weren't notified (eg a network or shared folder, where
