@@ -292,6 +292,18 @@ func TestSyncWatch(t *testing.T) {
 	got("directory rename", filepath.Join(dirB, "renamed", "b.txt"), "b")
 	writeTree(t, dirA, map[string]string{"renamed/c.txt": "c"}) // the renamed directory is watched (again).
 	got("new file in the renamed directory", filepath.Join(dirB, "renamed", "c.txt"), "c")
+	// A directory with a watched sub directory (on Windows the watch keeps it open, which may prevent this).
+	if err := os.Rename(filepath.Join(dirA, "x"), filepath.Join(dirA, "x2")); err != nil {
+		t.Fatalf("can't rename a directory with a watched sub directory: %v", err)
+	}
+	got("parent directory rename", filepath.Join(dirB, "x2", "y", "z.txt"), "deep2")
+	if err := os.RemoveAll(filepath.Join(dirA, "x2")); err != nil {
+		t.Fatalf("can't remove a directory with a watched sub directory: %v", err)
+	}
+	waitFor(ctx, t, "parent directory removal", func() bool {
+		_, err := os.Stat(filepath.Join(dirB, "x2"))
+		return os.IsNotExist(err)
+	})
 	for _, srv := range []*tsnet.Server{serverA, serverB} {
 		syncStatus(ctx, t, srv, "docs", "still watched and in sync", func(st tsnet.SyncStatus) bool {
 			return st.Watching && inSync(st)
