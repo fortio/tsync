@@ -119,3 +119,16 @@ func TestFilterWindowsNames(t *testing.T) {
 		t.Errorf("unexpected %+v %q", kept, skipped)
 	}
 }
+
+func TestNewWindowsSkips(t *testing.T) {
+	f := &syncFolder{}
+	if added := f.newWindowsSkips([]string{"a:b", "c?"}); len(added) != 2 {
+		t.Errorf("expected 2 new, got %q", added)
+	}
+	if added := f.newWindowsSkips([]string{"c?", "a:b"}); len(added) != 0 { // eg the same from another peer.
+		t.Errorf("expected none new, got %q", added)
+	}
+	if added := f.newWindowsSkips([]string{"a:b", "d|e"}); len(added) != 1 || added[0] != "d|e" {
+		t.Errorf("expected only d|e, got %q", added)
+	}
+}

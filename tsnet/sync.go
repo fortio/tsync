@@ -95,6 +95,8 @@ type syncFolder struct {
 	// issueLines are the conflicts and deletions as last written (see writeConflicts).
 	issueLines []string
 	copies     []string // conflict copies in the folder (from the last scan, sorted).
+	// windowsSkips are the peers' paths we can't store (on Windows) and already warned about.
+	windowsSkips map[string]bool
 }
 
 type savedBase struct {
@@ -458,6 +460,21 @@ func encodeEntry(b []byte, e syncdir.Entry) []byte {
 // skipWindowsNames is true on Windows: the peers' paths it can't store are skipped (see filterWindowsNames).
 var skipWindowsNames = runtime.GOOS == "windows"
 
+// newWindowsSkips returns the skipped paths not seen before (from any peer), so they're only warned about once.
+func (f *syncFolder) newWindowsSkips(skipped []string) []string {
+	var added []string
+	for _, p := range skipped {
+		if !f.windowsSkips[p] {
+			if f.windowsSkips == nil {
+				f.windowsSkips = make(map[string]bool)
+			}
+			f.windowsSkips[p] = true
+			added = append(added, p)
+		}
+	}
+	return added
+}
+
 // filterWindowsNames returns the entries whose paths can be stored on Windows, and the paths of the others.
 func filterWindowsNames(entries []syncdir.Entry) ([]syncdir.Entry, []string) {
 	var skipped []string
@@ -589,13 +606,9 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	if err != nil {
 		return err
 	}
+	var skipped []string
 	if skipWindowsNames {
-		var skipped []string
 		entries, skipped = filterWindowsNames(entries)
-		if len(skipped) > 0 {
-			log.Warnf("Sync %q: %d paths from %s can't be stored on Windows (eg %q), not synced here",
-				name, len(skipped), peer.Name, skipped[0])
-		}
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -603,6 +616,10 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	if f == nil || s.links[peer] != l {
 		log.LogVf("Ignoring sync index of %q from %s", name, peer.Name)
 		return nil
+	}
+	if added := f.newWindowsSkips(skipped); len(added) > 0 {
+		log.Warnf("Sync %q: %d paths from %s can't be stored on Windows (eg %q), not synced here",
+			name, len(added), peer.Name, added[0])
 	}
 	sp := f.peers[peer]
 	if sp == nil || sp.l != l {
