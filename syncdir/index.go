@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -33,6 +35,9 @@ type Entry struct {
 	Hash  Hash
 	// diskPath is the slash separated path as on disk when it differs from Path (not normalized).
 	diskPath string
+	// racy is set when the file was hashed less than racyWindow after it was modified: it could have been
+	// modified again since with the same size and time, so it is hashed again on the next scan.
+	racy bool
 }
 
 // DiskPath returns the (slash separated, relative) path of the entry as on disk: what to open, which can
@@ -56,9 +61,9 @@ type Index struct {
 	Skipped int              // symlinks, special or unreadable files, name duplicates once normalized.
 }
 
-// racyWindow is how recent a file modification time can be for the hash to not be reused on the next scan
-// even if the size and time didn't change (it could have been modified again within the time granularity of
-// the file system, up to 2s for FAT, after we read it).
+// racyWindow is how recent a file modification time can be, when hashed, for the hash to not be reused on the
+// next scan even if the size and time didn't change (it could have been modified again within the time
+// granularity of the file system, up to 2s for FAT, after we read it).
 const racyWindow = 2 * time.Second
 
 // Key returns the index key of a (relative) path: slash separated and NFC normalized (macOS can give
@@ -69,7 +74,7 @@ func Key(path string) string {
 
 // Scan scans the directory root (not following symlinks) into an index, skipping what ig ignores (nil for
 // the default rules). Files are only hashed if new or changed since prev (zero for none): different size or
-// modification time, or a time too close to the previous scan's (see racyWindow).
+// modification time, or modified too close to when they were hashed (see racyWindow).
 func Scan(root string, prev Index, ig *Ignore) (Index, error) {
 	if ig == nil {
 		ig = DefaultIgnore()
@@ -80,7 +85,16 @@ func Scan(root string, prev Index, ig *Ignore) (Index, error) {
 		return idx, err
 	}
 	defer r.Close()
-	err = fs.WalkDir(r.FS(), ".", func(p string, d fs.DirEntry, werr error) error {
+	_, err = scanTree(r, ".", &idx, prev, ig, nil)
+	return idx, err
+}
+
+// scanTree adds to idx the entries of the tree at p (slash separated, relative to the root, as on disk; "."
+// for the whole root, which isn't added itself), returns the keys of its directories (p's included).
+// Files in force are hashed again even if their size and time didn't change.
+func scanTree(r *os.Root, p string, idx *Index, prev Index, ig *Ignore, force map[string]bool) ([]string, error) {
+	var dirs []string
+	err := fs.WalkDir(r.FS(), p, func(p string, d fs.DirEntry, werr error) error {
 		if p == "." {
 			return werr
 		}
@@ -95,19 +109,121 @@ func Scan(root string, prev Index, ig *Ignore) (Index, error) {
 			}
 			return nil
 		}
-		e, ok := scanEntry(r, p, d, prev.entry(key), prev.Time)
-		if _, dup := idx.Entries[key]; !ok || dup {
-			idx.Skipped++
+		if !addEntry(idx, r, p, key, d, prev.entry(key), force[key]) {
 			return nil
 		}
-		e.Path = key
-		if p != key {
-			e.diskPath = p
+		if d.IsDir() {
+			dirs = append(dirs, key)
 		}
-		idx.Entries[key] = e
 		return nil
 	})
-	return idx, err
+	return dirs, err
+}
+
+// addEntry adds the entry for p (key) to idx, returns false if skipped (special file, unreadable, duplicate key).
+func addEntry(idx *Index, r *os.Root, p, key string, d fs.DirEntry, prev *Entry, force bool) bool {
+	if force {
+		prev = nil
+	}
+	e, ok := scanEntry(r, p, d, prev)
+	if _, dup := idx.Entries[key]; !ok || dup {
+		idx.Skipped++
+		return false
+	}
+	e.Path = key
+	if p != key {
+		e.diskPath = p
+	}
+	idx.Entries[key] = e
+	return true
+}
+
+// ScanDirs is a partial [Scan]: prev updated for what changed in the given directories (keys, "" for the root),
+// eg the ones file system notifications said changed: their direct content is read again (files in force are
+// hashed again even if their size and time didn't change), new sub directories are scanned whole, removed ones
+// are removed with all they had. Returns the updated index and the new directories (keys, to watch).
+func ScanDirs(root string, prev Index, dirs []string, ig *Ignore, force map[string]bool) (Index, []string, error) {
+	if ig == nil {
+		ig = DefaultIgnore()
+	}
+	idx := Index{Entries: maps.Clone(prev.Entries), Time: time.Now(), Skipped: prev.Skipped}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return idx, nil, err
+	}
+	defer r.Close()
+	dirty := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		dirty[d] = true
+	}
+	gone := make(map[string]bool) // directories (children of dirty ones) not seen again (yet).
+	for k, e := range idx.Entries {
+		if dirty[parentKey(k)] {
+			delete(idx.Entries, k)
+			if e.Dir {
+				gone[k] = true
+			}
+		}
+	}
+	var added []string
+	for _, d := range dirs {
+		p := "."
+		if d != "" {
+			e, ok := prev.Entries[d]
+			if !ok || !e.Dir {
+				continue // new (found by scanning its parent) or not a directory anymore.
+			}
+			p = e.DiskPath()
+		}
+		children, rerr := fs.ReadDir(r.FS(), p)
+		if rerr != nil {
+			continue // gone (its parent should be dirty too) or unreadable.
+		}
+		for _, c := range children {
+			cp := path.Join(p, c.Name())
+			key := Key(cp)
+			if ig.Match(key, c.IsDir()) || !addEntry(&idx, r, cp, key, c, prev.entry(key), force[key]) || !c.IsDir() {
+				continue
+			}
+			if gone[key] {
+				delete(gone, key) // still there, its content (if not dirty itself) is unchanged.
+				continue
+			}
+			// New directory: all of it.
+			delete(idx.Entries, key)
+			newDirs, serr := scanTree(r, cp, &idx, prev, ig, force)
+			if serr != nil {
+				return idx, added, serr
+			}
+			added = append(added, newDirs...)
+		}
+	}
+	if len(gone) > 0 { // removed directories: and everything they had.
+		for k := range idx.Entries {
+			if inAny(k, gone) {
+				delete(idx.Entries, k)
+			}
+		}
+	}
+	return idx, added, nil
+}
+
+// parentKey returns the key of the directory containing key ("" for the root).
+func parentKey(key string) string {
+	if i := strings.LastIndexByte(key, '/'); i >= 0 {
+		return key[:i]
+	}
+	return ""
+}
+
+// inAny returns true if one of key's parent directories is in dirs.
+func inAny(key string, dirs map[string]bool) bool {
+	for p := parentKey(key); p != ""; p = parentKey(p) {
+		if dirs[p] {
+			return true
+		}
+	}
+	return false
 }
 
 func (idx Index) entry(key string) *Entry {
@@ -120,7 +236,7 @@ func (idx Index) entry(key string) *Entry {
 
 // scanEntry returns the entry for the directory or regular file at p, false for anything else (symlinks...)
 // or if it can't be read.
-func scanEntry(r *os.Root, p string, d fs.DirEntry, prev *Entry, prevTime time.Time) (Entry, bool) {
+func scanEntry(r *os.Root, p string, d fs.DirEntry, prev *Entry) (Entry, bool) {
 	fi, err := d.Info() // not following symlinks.
 	if err != nil || (!fi.IsDir() && !fi.Mode().IsRegular()) {
 		return Entry{}, false
@@ -130,7 +246,7 @@ func scanEntry(r *os.Root, p string, d fs.DirEntry, prev *Entry, prevTime time.T
 		return e, true
 	}
 	e.Size = fi.Size()
-	if prev != nil && !prev.Dir && prev.Size == e.Size && prev.MTime.Equal(e.MTime) && prevTime.Sub(e.MTime) > racyWindow {
+	if prev != nil && !prev.Dir && prev.Size == e.Size && prev.MTime.Equal(e.MTime) && !prev.racy {
 		e.Hash = prev.Hash
 		return e, true
 	}
@@ -138,7 +254,7 @@ func scanEntry(r *os.Root, p string, d fs.DirEntry, prev *Entry, prevTime time.T
 	if err != nil {
 		return Entry{}, false
 	}
-	e.Hash, e.Size, e.MTime = h, size, mtime
+	e.Hash, e.Size, e.MTime, e.racy = h, size, mtime, time.Since(mtime) <= racyWindow
 	return e, true
 }
 

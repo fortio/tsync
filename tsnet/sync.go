@@ -16,6 +16,7 @@ import (
 
 	"fortio.org/log"
 	"fortio.org/tsync/syncdir"
+	"github.com/fsnotify/fsnotify"
 )
 
 // Directory sync: each side scans its sync folders periodically, tells its linked peers the names of its
@@ -94,6 +95,9 @@ type syncFolder struct {
 	synced     bool        // something got synced since the last scan (rescan once all done, for the peers).
 	lastSave   time.Time   // bases saved.
 	toSave     []savedBase // bases of peers no longer linked, to save.
+	// noWatch: not watched (can't, or notifications missed changes), scanned every SyncRescan.
+	noWatch  bool
+	watching bool // for SyncStatus (stateMu).
 	// issueLines are the conflicts and deletions as last written (see writeConflicts).
 	issueLines []string
 	copies     []string // conflict copies in the folder (from the last scan, sorted).
@@ -163,6 +167,8 @@ type SyncStatus struct {
 	ClockSkew time.Duration
 	// CantStoreHere is how many of the peer's paths we can't store (eg on Windows), listed in ConflictsFile.
 	CantStoreHere int
+	// Watching is true when the folder is watched with file system notifications (see Config.SyncWatch).
+	Watching bool
 }
 
 // SyncStatus returns the state of our sync folders with each linked peer that has them (sorted).
@@ -174,7 +180,7 @@ func (s *Server) SyncStatus() []SyncStatus {
 		f := s.syncFolders[name]
 		st := SyncStatus{
 			Folder: f.Name, Path: f.Path, Files: len(f.local.Entries), Scanned: !f.local.Time.IsZero(), Err: f.err,
-			ConflictCopies: len(f.copies),
+			ConflictCopies: len(f.copies), Watching: f.watching,
 		}
 		if len(f.peers) == 0 {
 			res = append(res, st)
@@ -213,21 +219,61 @@ func (s *Server) startSync(ctx context.Context) {
 
 func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 	defer s.wg.Done()
-	interval := s.SyncRescan
-	if interval <= 0 {
-		interval = DefaultSyncRescan
-	}
 	var prev syncdir.Index
-	timer := time.NewTimer(0) // first scan right away.
-	defer timer.Stop()
+	var sw *syncWatch // when watching (see syncwatch.go).
+	defer func() { sw.close() }()
+	scan := time.NewTimer(0) // first (full) scan right away.
+	defer scan.Stop()
+	quiet := time.NewTimer(time.Hour) // scan of what was notified.
+	quiet.Stop()
+	defer quiet.Stop()
+	wake := time.NewTimer(time.Hour) // retries and throttled replans.
+	wake.Stop()
+	defer wake.Stop()
 	for {
+		var events <-chan fsnotify.Event
+		var errs <-chan error
+		if sw != nil {
+			events, errs = sw.w.Events, sw.w.Errors
+		}
 		select {
 		case <-ctx.Done():
 			s.saveBases(f)
 			return
-		case <-timer.C:
-			prev = s.syncScan(f, prev)
-			timer.Reset(interval)
+		case <-scan.C:
+			prev, sw = s.syncFullScan(f, prev, sw)
+			if sw != nil {
+				scan.Reset(s.syncWatchInterval())
+			} else {
+				scan.Reset(s.syncInterval())
+			}
+		case ev, ok := <-events:
+			if !ok {
+				s.stopWatch(f, sw, "notifications stopped")
+				sw = nil
+				scan.Reset(0)
+				continue
+			}
+			sw.event(ev)
+			quiet.Reset(sw.quietIn())
+		case err, ok := <-errs:
+			if !ok {
+				s.stopWatch(f, sw, "notifications stopped")
+				sw = nil
+				scan.Reset(0)
+				continue
+			}
+			if !errors.Is(err, fsnotify.ErrEventOverflow) {
+				log.Warnf("Sync %q: file system notifications error: %v", f.Name, err)
+			}
+			sw.full = true // some notifications may be lost.
+			sw.event(fsnotify.Event{Name: f.Path})
+			quiet.Reset(sw.quietIn())
+		case <-quiet.C:
+			if sw != nil {
+				prev, sw = s.syncWatchScan(f, prev, sw)
+			}
+		case <-wake.C:
 		case <-f.kick:
 		}
 		s.stateMu.Lock()
@@ -238,17 +284,17 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		s.startPulls(f)
 		s.stateMu.Lock()
 		idle := len(f.inflight) == 0 && !f.replan
-		rescan := idle && f.synced
-		if rescan {
+		rescan := idle && f.synced && sw == nil // when watching, what we wrote is notified (and scanned).
+		if idle {
 			f.synced = false
 		}
 		save := idle || time.Since(f.lastSave) >= syncSaveEvery
-		retry := interval
-		for _, fail := range f.failed { // eg a file still being written there: don't wait for the next scan.
-			retry = min(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
+		retry := time.Duration(0)
+		for _, fail := range f.failed { // eg a file still being written there.
+			retry = minPositive(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
 		}
 		if f.replan {
-			retry = min(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
+			retry = minPositive(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
 		}
 		s.stateMu.Unlock()
 		if rescan { // so the peers learn what we got.
@@ -258,10 +304,85 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 			s.saveBases(f)
 		}
 		s.writeConflicts(f)
-		if retry < interval {
-			timer.Reset(retry)
+		if retry > 0 {
+			wake.Reset(retry)
 		}
 	}
+}
+
+// minPositive is the min of a and b, ignoring a zero a.
+func minPositive(a, b time.Duration) time.Duration {
+	if a == 0 {
+		return b
+	}
+	return min(a, b)
+}
+
+// syncFullScan scans the whole folder; when watching (or to start watching after the first scan) checks no
+// change was missed by the notifications, else goes back to polling. Returns the scan and the watch state.
+func (s *Server) syncFullScan(f *syncFolder, prev syncdir.Index, sw *syncWatch) (syncdir.Index, *syncWatch) {
+	s.stateMu.Lock()
+	old := f.local
+	s.stateMu.Unlock()
+	idx := s.syncScan(f, prev)
+	s.stateMu.Lock()
+	scanErr := f.err
+	s.stateMu.Unlock()
+	if !s.SyncWatch || scanErr != "" {
+		return idx, sw
+	}
+	if sw == nil {
+		if f.noWatch {
+			return idx, nil
+		}
+		if sw = s.startWatch(f, idx); sw == nil {
+			f.noWatch = true
+		}
+		s.setWatching(f, sw != nil)
+		return idx, sw
+	}
+	if missed := sw.missed(old, idx); len(missed) > 0 && !sw.full {
+		s.stopWatch(f, sw, fmt.Sprintf("%d changes weren't notified (eg %q: a network or shared folder?)",
+			len(missed), missed[0]))
+		return idx, nil
+	}
+	sw.events = make(map[string]bool)
+	sw.reset()
+	if err := sw.update(idx, nil); err != nil {
+		s.stopWatch(f, sw, "can't watch all its directories: "+err.Error())
+		return idx, nil
+	}
+	return idx, sw
+}
+
+// stopWatch stops watching the folder (back to scanning it all every SyncRescan).
+func (s *Server) stopWatch(f *syncFolder, sw *syncWatch, why string) {
+	log.Warnf("Sync %q: %s, scanning every %v instead", f.Name, why, s.syncInterval())
+	sw.close()
+	f.noWatch = true
+	s.setWatching(f, false)
+}
+
+func (s *Server) setWatching(f *syncFolder, watching bool) {
+	s.stateMu.Lock()
+	f.watching = watching
+	s.change(0)
+	s.stateMu.Unlock()
+}
+
+// syncWatchScan scans again the directories notified (or all of it, eg after an overflow).
+func (s *Server) syncWatchScan(f *syncFolder, prev syncdir.Index, sw *syncWatch) (syncdir.Index, *syncWatch) {
+	if sw.full {
+		return s.syncFullScan(f, prev, sw)
+	}
+	dirs, force := slices.Sorted(maps.Keys(sw.dirty)), sw.force
+	sw.reset()
+	idx, added := s.syncScanDirs(f, prev, dirs, force)
+	if err := sw.update(idx, added); err != nil {
+		s.stopWatch(f, sw, "can't watch all its directories: "+err.Error())
+		return idx, nil
+	}
+	return idx, sw
 }
 
 // replanAllLocked replans the folder with all the peers, forgets the failures of what's no longer to do.
@@ -284,6 +405,14 @@ func (s *Server) replanAllLocked(f *syncFolder) {
 // syncScan scans the folder (what we just synced counts as already scanned), sends the index to the
 // peers if it changed, returns the scan (for the next one).
 func (s *Server) syncScan(f *syncFolder, prev syncdir.Index) syncdir.Index {
+	idx, _ := s.syncScanDirs(f, prev, nil, nil)
+	return idx
+}
+
+// syncScanDirs is syncScan of only the given directories (see [syncdir.ScanDirs]), all if dirs is nil;
+// also returns the new directories found.
+func (s *Server) syncScanDirs(f *syncFolder, prev syncdir.Index, dirs []string, force map[string]bool,
+) (syncdir.Index, []string) {
 	ig, err := syncdir.LoadIgnore(f.Path)
 	if err == nil {
 		if text, _ := ig.Text(); len(text) > 0xffff { // sent with the index.
@@ -305,17 +434,29 @@ func (s *Server) syncScan(f *syncFolder, prev syncdir.Index) syncdir.Index {
 	}
 	s.stateMu.Unlock()
 	var idx syncdir.Index
-	if err == nil {
+	var added []string
+	switch {
+	case err != nil:
+	case dirs == nil:
 		idx, err = syncdir.Scan(f.Path, prev, ig)
+	default:
+		idx, added, err = syncdir.ScanDirs(f.Path, prev, dirs, ig, force)
 	}
 	f.ioMu.Unlock()
 	if err == nil {
 		prev = idx
 	}
-	for _, t := range s.syncScanned(f, ig, idx, err) {
+	var rescanned map[string]bool
+	if dirs != nil {
+		rescanned = make(map[string]bool, len(dirs))
+		for _, d := range dirs {
+			rescanned[d] = true
+		}
+	}
+	for _, t := range s.syncScanned(f, ig, idx, rescanned, err) {
 		s.sendIndex(f, t.peer, t.l, t.conn)
 	}
-	return prev
+	return prev, added
 }
 
 type syncTarget struct {
@@ -324,8 +465,11 @@ type syncTarget struct {
 	conn net.Conn
 }
 
-// syncScanned records a scan, returns the linked peers to send the index to if it changed.
-func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Index, err error) []syncTarget {
+// syncScanned records a scan (of only the rescanned directories if not nil), returns the linked peers to send
+// the index to if it changed.
+func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Index, rescanned map[string]bool,
+	err error,
+) []syncTarget {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if err != nil {
@@ -337,9 +481,9 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 		return nil
 	}
 	f.err = ""
-	seen := 0 // synced paths this scan saw (started after they were synced).
+	seen := 0 // synced paths this scan saw (started after they were synced, in a directory it read).
 	for k, r := range f.recent {
-		if r.at.Before(idx.Time) {
+		if r.at.Before(idx.Time) && (rescanned == nil || rescanned[parentDir(k)]) {
 			delete(f.recent, k)
 			seen++
 		}
@@ -794,4 +938,12 @@ func (s *Server) syncLinkClosedLocked(l *link) {
 			f.kickLocked() // to save the base, update the conflicts list.
 		}
 	}
+}
+
+// parentDir returns the key of the directory containing key ("" for the root).
+func parentDir(key string) string {
+	if i := strings.LastIndexByte(key, '/'); i >= 0 {
+		return key[:i]
+	}
+	return ""
 }

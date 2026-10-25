@@ -249,3 +249,50 @@ func TestSyncCantStore(t *testing.T) {
 		return os.IsNotExist(errA) && os.IsNotExist(errB)
 	})
 }
+
+// With notifications only (scans every hour): changes still sync quickly.
+func TestSyncWatch(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	dirA, dirB := t.TempDir(), t.TempDir()
+	writeTree(t, dirA, map[string]string{"a.txt": "a", "sub/b.txt": "b"})
+	common := tsnet.Config{SyncRescan: time.Hour, SyncWatch: true}
+	cfgA, cfgB := common, common
+	cfgA.Name, cfgA.Sync = "HostA", []tsnet.SyncFolder{{Name: "docs", Path: dirA}}
+	cfgB.Name, cfgB.Sync = "HostB", []tsnet.SyncFolder{{Name: "docs", Path: dirB}}
+	serverA, serverB, _ := linkedPair(ctx, t, cfgA, cfgB)
+	for _, srv := range []*tsnet.Server{serverA, serverB} {
+		syncStatus(ctx, t, srv, "docs", "watched and in sync", func(st tsnet.SyncStatus) bool { return st.Watching && inSync(st) })
+	}
+	if content(t, filepath.Join(dirB, "sub", "b.txt")) != "b" {
+		t.Fatalf("initial sync failed")
+	}
+	got := func(what, p, want string) {
+		t.Helper()
+		waitFor(ctx, t, what, func() bool { return content(t, p) == want })
+	}
+	// New file, new nested directory (created after the watch), edit, deletion, directory rename: all notified.
+	writeTree(t, dirA, map[string]string{"new.txt": "new"})
+	got("new file", filepath.Join(dirB, "new.txt"), "new")
+	writeTree(t, dirA, map[string]string{"x/y/z.txt": "deep"})
+	got("new nested directory", filepath.Join(dirB, "x", "y", "z.txt"), "deep")
+	writeTree(t, dirA, map[string]string{"x/y/z.txt": "deep2"}) // edited in a directory watched since.
+	got("edit", filepath.Join(dirB, "x", "y", "z.txt"), "deep2")
+	if err := os.Remove(filepath.Join(dirB, "a.txt")); err != nil { // the other way.
+		t.Fatal(err)
+	}
+	waitFor(ctx, t, "deletion", func() bool {
+		_, err := os.Stat(filepath.Join(dirA, "a.txt"))
+		return os.IsNotExist(err)
+	})
+	if err := os.Rename(filepath.Join(dirA, "sub"), filepath.Join(dirA, "renamed")); err != nil {
+		t.Fatal(err)
+	}
+	got("directory rename", filepath.Join(dirB, "renamed", "b.txt"), "b")
+	for _, srv := range []*tsnet.Server{serverA, serverB} {
+		syncStatus(ctx, t, srv, "docs", "still watched and in sync", func(st tsnet.SyncStatus) bool {
+			return st.Watching && inSync(st)
+		})
+	}
+}

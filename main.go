@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -213,11 +214,13 @@ type syncFlags struct {
 	keep    *int
 	list    *bool
 	rescan  *time.Duration
+	watch   *bool
 }
 
 // Apply sets the sync flags values in the config.
 func (sf syncFlags) Apply(cfg *tsnet.Config) {
 	cfg.Sync, cfg.SyncKeep, cfg.SyncConflictList, cfg.SyncRescan = *sf.folders, *sf.keep, *sf.list, *sf.rescan
+	cfg.SyncWatch = *sf.watch
 }
 
 // SyncFlags defines the sync flags: folders, replaced versions to keep, conflicts handling and rescan interval.
@@ -225,7 +228,11 @@ func SyncFlags() syncFlags {
 	folders := SyncFlag("sync")
 	keep := flag.Int("sync-keep", 3, "How many replaced versions of each file sync keeps in the folder's "+
 		syncdir.OldDir+" (0 for none)")
-	rescan := flag.Duration("sync-rescan", tsnet.DefaultSyncRescan, "How often the sync folders are scanned for changes")
+	rescan := flag.Duration("sync-rescan", tsnet.DefaultSyncRescan, "How often the sync folders are scanned for changes"+
+		" when not watched (see -sync-watch)")
+	watch := flag.Bool("sync-watch", runtime.GOOS == "linux" || runtime.GOOS == "windows", "Watch the sync folders "+
+		"(file system notifications): only the directories that changed are scanned again, and all of it every 15m"+
+		" (default on Linux and Windows; on macOS it needs a file descriptor per file)")
 	list := false
 	flag.Func("sync-conflicts", "Sync conflicts (changed on both sides, or changed on one and deleted on the "+
 		"other) `handling`: copy (the newest version keeps the name, the other one is kept as a visible "+
@@ -238,7 +245,7 @@ func SyncFlags() syncFlags {
 			return fmt.Errorf("expected copy or list, got %q", s)
 		}
 	})
-	return syncFlags{folders, keep, &list, rescan}
+	return syncFlags{folders, keep, &list, rescan, watch}
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
