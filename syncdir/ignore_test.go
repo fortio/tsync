@@ -2,6 +2,7 @@ package syncdir_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -77,7 +78,7 @@ e` + "́" + `*
 	if err != nil || !self.Match(".tsyncignore", false) {
 		t.Errorf("an ignore file listing itself should be ignored: %v", err)
 	}
-	for _, bad := range []string{"!keep", "[", "/", "a//b"} {
+	for _, bad := range []string{"!", "!/", "[", "/", "a//b"} {
 		if _, err := syncdir.ParseIgnore("ok\n" + bad + "\n"); err == nil {
 			t.Errorf("expected an error for %q", bad)
 		}
@@ -103,5 +104,112 @@ func TestLoadIgnore(t *testing.T) {
 	}
 	if _, ok := idx.Entries[syncdir.IgnoreFile]; !ok || len(idx.Entries) != 1 {
 		t.Errorf("unexpected scan %+v", idx.Entries)
+	}
+}
+
+func TestIgnoreNegation(t *testing.T) {
+	for _, tc := range []struct {
+		name, rules string
+		cases       []match
+	}{
+		{"all but a file at the root", "*\n!keep.txt\n", []match{
+			{"keep.txt", false, false},
+			{"other.txt", false, true},
+			{"sub", true, true},
+			{"sub/keep.txt", false, true}, // its directory is ignored: can't be re-included.
+			{".tsyncignore", false, true}, // listed by *.
+		}},
+		{"all but go files (and directories)", "*\n!*/\n!*.go\n!.tsyncignore\n", []match{
+			{"a.go", false, false},
+			{"sub", true, false},
+			{"sub/b.go", false, false},
+			{"sub/c.txt", false, true},
+			{"sub/deep/d.go", false, false},
+			{".tsyncignore", false, false},
+		}},
+		{"all logs but one", "*.log\n!important.log\n", []match{
+			{"x.log", false, true},
+			{"important.log", false, false},
+			{"sub/important.log", false, false},
+			{"sub/x.log", false, true},
+		}},
+		{"order matters: the last match wins", "!keep.txt\n*\n", []match{
+			{"keep.txt", false, true},
+		}},
+		{"not inside an ignored directory", "logs/\n!logs/keep.log\n", []match{
+			{"logs/keep.log", false, true},
+			{"logs", true, true},
+		}},
+		{"re-included directory", "/build/\n!/build/\n", []match{
+			{"build/x", false, false},
+		}},
+	} {
+		ig, err := syncdir.ParseIgnore(tc.rules)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		checkMatches(t, tc.name, ig, tc.cases)
+	}
+}
+
+// Same answers as git for the rules both support (.gitignore with the same lines, `git check-ignore`).
+func TestIgnoreLikeGit(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not found")
+	}
+	paths := make([]match, 0, 25)
+	for _, d := range []string{"sub", "logs", "build", "a/b"} {
+		paths = append(paths, match{key: d, dir: true})
+	}
+	for _, f := range []string{
+		"keep.txt", "other.txt", "a.go", "x.log", "important.log", "top.txt", "sub/keep.txt", "sub/b.go", "sub/c.txt",
+		"sub/x.log", "sub/important.log", "sub/top.txt", "sub/deep/d.go", "logs/keep.log", "build/x", "a/x/y/b",
+		"a/b/c", "tmp", "x/tmp/z", "docs/a.md", "docs/sub/a.md",
+	} {
+		paths = append(paths, match{key: f})
+	}
+	for _, rules := range []string{
+		"*\n!keep.txt\n",
+		"*\n!*/\n!*.go\n",
+		"*.log\n!important.log\n",
+		"!keep.txt\n*\n",
+		"logs/\n!logs/keep.log\n",
+		"/build/\n!/build/\n",
+		"# comment\n\nbuild/\n*.log\n/top.txt\na/**/b\n**/tmp\ndocs/*.md\n",
+		"sub/\n!sub/\n*.txt\n!keep.txt\n",
+	} {
+		dir := t.TempDir()
+		if err = os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(rules), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, gerr := exec.Command(gitPath, "-C", dir, "init", "-q").CombinedOutput(); gerr != nil {
+			t.Fatalf("git init: %v %s", gerr, out)
+		}
+		for _, p := range paths { // git only applies directory rules to directories that exist.
+			full := filepath.Join(dir, filepath.FromSlash(p.key))
+			if p.dir {
+				err = os.MkdirAll(full, 0o755)
+			} else if err = os.MkdirAll(filepath.Dir(full), 0o755); err == nil {
+				err = os.WriteFile(full, nil, 0o644)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		ig, perr := syncdir.ParseIgnore(rules)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		for _, p := range paths {
+			arg := p.key
+			if p.dir {
+				arg += "/"
+			}
+			gitIgnored := exec.Command(gitPath, "-C", dir, "check-ignore", "-q", "--no-index", arg).Run() == nil
+			if got := ig.Match(p.key, p.dir); got != gitIgnored {
+				t.Errorf("rules %q: Match(%q, dir %v) = %v, git says %v", rules, p.key, p.dir, got, gitIgnored)
+			}
+		}
 	}
 }

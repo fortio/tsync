@@ -14,7 +14,7 @@ import (
 const (
 	// IgnoreFile is the ignore rules file at the root of a synced directory. Without one, hidden files and
 	// directories (name starting with a dot) are ignored; with one, only what it lists is (it is synced
-	// itself unless it lists itself).
+	// itself unless it lists itself, eg with `*`: add `!.tsyncignore` to keep syncing it).
 	IgnoreFile = ".tsyncignore"
 	// TrashDir is where replaced versions are kept (at the root of a synced directory), never synced.
 	TrashDir = ".tsync-trash"
@@ -31,11 +31,14 @@ type Ignore struct {
 // rule is a .tsyncignore line, a subset of the .gitignore syntax: `*`, `?` and `[...]` within a name, `**`
 // for any number of directories, a trailing `/` for directories only, and a pattern with a `/` (other than a
 // trailing one, eg `/top` or `a/b`) is matched from the root while one without (eg `*.log`) matches a name at
-// any level. Matching a directory ignores everything in it.
+// any level. A leading `!` re-includes what an earlier line ignored: the last matching line decides. Like
+// git, an ignored directory ignores everything in it (it can't be re-included in part): to ignore all but
+// some files, use eg `*` then `!*/` (keep the directories) then `!*.go`.
 type rule struct {
 	parts    []string // slash separated parts of the pattern.
 	anchored bool
 	dirOnly  bool
+	negate   bool // `!`: not ignored.
 }
 
 // DefaultIgnore returns the default rules (no IgnoreFile): hidden files and directories are ignored,
@@ -64,7 +67,8 @@ func ParseIgnore(content string) (*Ignore, error) {
 func parseRule(line string) (rule, error) {
 	var r rule
 	if line[0] == '!' {
-		return r, errors.New("negation (!) is not supported")
+		r.negate = true
+		line = line[1:]
 	}
 	if strings.HasSuffix(line, "/") {
 		r.dirOnly = true
@@ -109,12 +113,16 @@ func (ig *Ignore) Match(key string, dir bool) bool {
 		return key != IgnoreFile && hasDotPart(key)
 	}
 	parts := strings.Split(key, "/")
-	for i := 1; i <= len(parts); i++ {
+	for i := 1; i <= len(parts); i++ { // each parent directory, then the path itself.
 		isDir := dir || i < len(parts)
+		ignored := false
 		for _, r := range ig.rules {
 			if r.match(parts[:i], isDir) {
-				return true
+				ignored = !r.negate // the last matching rule decides.
 			}
+		}
+		if ignored {
+			return true
 		}
 	}
 	return false
