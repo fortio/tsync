@@ -27,6 +27,7 @@ const (
 
 	// Frame types (also in other files: files.go, dirs.go, sync.go, syncpull.go). When adding one, decide if a
 	// headless server needs it (see allowedHeadless) and update the table in SYNC_DETAILS.md.
+
 	FrameHello = 'H' // first frame from the dialer, authenticates the connection.
 	FrameClip  = 'T' // clipboard: 8 bytes (big endian) unix nano time it was copied, then the text.
 	// FrameClipNoTime is the clipboard text without time, sent by older versions.
