@@ -339,3 +339,14 @@ func TestPlanMoves(t *testing.T) {
 		t.Errorf("unexpected description %q", d)
 	}
 }
+
+func TestPlanCantStoreThere(t *testing.T) {
+	local := map[string]syncdir.Entry{"a:b": {Path: "a:b", Size: 1}, "ok": {Path: "ok", Size: 1}}
+	items := syncdir.Plan(local, nil, syncdir.Base{}, syncdir.PlanOptions{RemoteCantStore: map[string]bool{"a:b": true}})
+	if items[0].Path != "a:b" || items[0].Action != syncdir.CantStoreThere || items[1].Action != syncdir.PeerPulls {
+		t.Errorf("unexpected %+v", items)
+	}
+	if d := syncdir.Summarize(items).Describe("omen"); d != "1 for omen · 1 can't be stored on omen" {
+		t.Errorf("unexpected description %q", d)
+	}
+}

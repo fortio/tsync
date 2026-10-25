@@ -31,6 +31,7 @@ const (
 	PeerConflictCopy               // conflict the peer loses: nothing to do here, the peer makes the conflict copy.
 	Move                           // moved there (same content deleted at a path, new at another, see detectMoves): From to Path.
 	MovedAway                      // the From of a Move: nothing to do (the move takes care of it).
+	CantStoreThere                 // ours, but the peer can't store that path (eg "a:b" on Windows): not synced.
 )
 
 func (a Action) String() string {
@@ -59,6 +60,8 @@ func (a Action) String() string {
 		return "Move"
 	case MovedAway:
 		return "MovedAway"
+	case CantStoreThere:
+		return "CantStoreThere"
 	default:
 		return "Action(" + strconv.Itoa(int(a)) + ")"
 	}
@@ -164,6 +167,8 @@ type Item struct {
 type PlanOptions struct {
 	Ignore       *Ignore // ours, nil for the default rules.
 	RemoteIgnore *Ignore // the peer's, nil for the default rules.
+	// RemoteCantStore are our paths the peer told us it can't store (see CantStoreThere).
+	RemoteCantStore map[string]bool
 	// ConflictCopies resolves the conflicts between files (and modified vs deleted) instead of leaving them:
 	// the newest version keeps the name, the other one is renamed to a conflict copy (see ConflictCopyName),
 	// on the side that has it (see ConflictCopy), so it is synced like any other file.
@@ -218,6 +223,9 @@ func Plan(local, remote map[string]Entry, base Base, opts PlanOptions) []Item {
 		it.Action = Decide(it.Local, it.Remote, b)
 		if it.Remote == nil && it.Local != nil && remoteIg.Match(p, it.Local.Dir) {
 			it.Action = InSync // the peer doesn't sync it (not a deletion there).
+		}
+		if it.Remote == nil && it.Local != nil && opts.RemoteCantStore[p] {
+			it.Action = CantStoreThere
 		}
 		if opts.ConflictCopies {
 			resolveConflict(&it, b, opts.Name)
@@ -361,7 +369,7 @@ func caseConflict(group []string, local, remote map[string]Entry) bool {
 }
 
 // numActions is the number of actions.
-const numActions = int(MovedAway) + 1
+const numActions = int(CantStoreThere) + 1
 
 // maxSummaryConflicts is how many conflicting paths a [Summary] keeps.
 const maxSummaryConflicts = 5
@@ -430,6 +438,7 @@ func (s Summary) Describe(peerName string) string {
 	add(s.Counts[DeletionHeld], plural(s.Counts[DeletionHeld], "deletion")+" on "+peerName+" held (too many at once)")
 	add(s.Counts[ConflictCopy], copies(s.Counts[ConflictCopy])+" to make")
 	add(s.Counts[PeerConflictCopy], copies(s.Counts[PeerConflictCopy])+" for "+peerName+" to make")
+	add(s.Counts[CantStoreThere], "can't be stored on "+peerName)
 	if len(parts) == 0 {
 		n := s.Counts[InSync]
 		return fmt.Sprintf("in sync (%d %s)", n, plural(n, "item"))

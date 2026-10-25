@@ -160,8 +160,9 @@ README) peers, the indexes and contents only to the peers that use that label to
 Within the encrypted link of each linked peer (see the README's security section):
 
 - `F`: our time and our labels, when the link is up;
-- `I`: our index of a directory both use, in chunks of up to 512KB (the first one with our ignore rules), sent
-  again when it changes; paths are validated on receipt (normalized, no `..`, no control characters...);
+- `I`: our index of a directory both use, in chunks of up to 512KB (the first one with our ignore rules and
+  the peers' paths we can't store), sent again when it changes; paths are validated on receipt (normalized, no
+  `..`, no control characters...);
 - `Q`: get a file (path + expected sha256, with an id that can't collide with file sharing's), answered with the
   usual file data frames, or an abort with the reason (changed since, still being written...).
 
@@ -175,8 +176,9 @@ Within the encrypted link of each linked peer (see the README's security section
   instances (so mostly the per file overhead, not the network). It works for more (up to a million entries per
   index) but for a big tree, several `-sync` labels for its main sub directories are lighter.
 - Names Windows can't store (with one of `<>:"|?*`, ending with a dot or a space, or a device name like `CON`
-  or `com1.txt`) aren't synced to Windows machines (they warn); the other machines keep showing them as for that
-  machine to get.
+  or `com1.txt`) aren't synced to Windows machines. The Windows machine warns, and tells the others (in its
+  index): both sides show it on the sync line ("1 from mac can't be stored here", "1 can't be stored on
+  omen") and list the paths in their `conflicts.txt`, so you know which file to rename where it is.
 - Directory modification times aren't synced; empty directories are.
 - Names differing only by case (`A.txt` and `a.txt`) are a conflict unless both sides have both (case sensitive
   file systems on both).

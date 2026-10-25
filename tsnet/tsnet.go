@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,6 +78,8 @@ type Config struct {
 	SyncKeep int
 	// SyncConflictList leaves the sync conflicts alone (listed) instead of resolving them with conflict copies.
 	SyncConflictList bool
+	// WindowsNames skips (and lists) the peers' sync paths Windows can't store, always the case on Windows.
+	WindowsNames bool
 }
 
 type ConnectionStatus int
@@ -125,6 +128,8 @@ type Server struct {
 	// sync folders by name.
 	syncFolders map[string]*syncFolder
 	nextSyncID  uint32 // for our sync downloads (with syncIDBit set).
+	// windowsNames: see Config.WindowsNames.
+	windowsNames bool
 	// resolved Config.Peers
 	staticPeers []*net.UDPAddr
 	// random id of this run, in our discovery messages (handshake context, restart detection).
@@ -177,6 +182,7 @@ func (c *Config) NewServer() *Server {
 		syncFolders: make(map[string]*syncFolder),
 		early:       make(map[Source]earlyMsg),
 		// Random start so offer ids from different runs don't collide (eg in peers' lists).
+		windowsNames: c.WindowsNames || runtime.GOOS == "windows",
 		// Below 2^30 so they never reach syncIDBit (even with the ids reserved by directory offers).
 		nextFileID: rand.Uint32() >> 2, //nolint:gosec // not cryptographic.
 	}

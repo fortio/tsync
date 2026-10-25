@@ -53,7 +53,12 @@ func SyncLine(st tsnet.SyncStatus) syncLine {
 		return syncLine{what + ": waiting for its list", tcolor.Cyan}
 	}
 	text := what + " · " + st.Summary.Describe(peer)
-	warn := len(st.Summary.Conflicts) > 0 || st.Summary.Counts[syncdir.DeletionHeld] > 0
+	warn := len(st.Summary.Conflicts) > 0 || st.Summary.Counts[syncdir.DeletionHeld] > 0 ||
+		st.Summary.Counts[syncdir.CantStoreThere] > 0
+	if st.CantStoreHere > 0 {
+		text += fmt.Sprintf(" · %d from %s can't be stored here", st.CantStoreHere, peer)
+		warn = true
+	}
 	if n := st.ConflictCopies; n > 0 {
 		text += fmt.Sprintf(" · %d conflict %s to review", n, map[bool]string{true: "copy", false: "copies"}[n == 1])
 		warn = true

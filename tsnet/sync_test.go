@@ -202,3 +202,50 @@ func TestSyncDeletion(t *testing.T) {
 		}
 	}
 }
+
+// A name the peer can't store (eg on Windows) is listed on both sides until renamed.
+func TestSyncCantStore(t *testing.T) {
+	NoMCastOnMacInCI(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("can't create a:b on windows")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	dirA, dirB := t.TempDir(), t.TempDir()
+	writeTree(t, dirA, map[string]string{"a:b": "x", "ok.txt": "ok"})
+	storeA, storeB := &tcrypto.Storage{Dir: t.TempDir()}, &tcrypto.Storage{Dir: t.TempDir()}
+	cfgA := tsnet.Config{Name: "HostA", Storage: storeA, SyncRescan: 100 * time.Millisecond}
+	cfgA.Sync = []tsnet.SyncFolder{{Name: "docs", Path: dirA}}
+	cfgB := tsnet.Config{Name: "HostB", Storage: storeB, SyncRescan: 100 * time.Millisecond, WindowsNames: true}
+	cfgB.Sync = []tsnet.SyncFolder{{Name: "docs", Path: dirB}}
+	serverA, serverB, _ := linkedPair(ctx, t, cfgA, cfgB)
+	stB := syncStatus(ctx, t, serverB, "docs", "can't store a:b", func(st tsnet.SyncStatus) bool {
+		return inSync(st) && st.CantStoreHere == 1
+	})
+	stA := syncStatus(ctx, t, serverA, "docs", "a:b can't be stored there", func(st tsnet.SyncStatus) bool {
+		return st.Ready && st.Summary.Counts[syncdir.CantStoreThere] == 1 && st.Summary.Pending() == 1
+	})
+	if content(t, filepath.Join(dirB, "ok.txt")) != "ok" {
+		t.Errorf("ok.txt should be synced")
+	}
+	if _, err := os.Lstat(filepath.Join(dirB, "a:b")); err == nil {
+		t.Errorf("a:b shouldn't be synced")
+	}
+	waitFor(ctx, t, "listed on both sides", func() bool {
+		return strings.Contains(content(t, stB.ConflictsFile), "\ncan't store here\ta:b\there: absent\tHostA: has it") &&
+			strings.Contains(content(t, stA.ConflictsFile), "\ncan't be stored on HostB\ta:b\there: 1 b, ")
+	})
+	// Renamed where it is: synced, nothing left to list.
+	if err := os.Rename(filepath.Join(dirA, "a:b"), filepath.Join(dirA, "a_b")); err != nil {
+		t.Fatal(err)
+	}
+	syncStatus(ctx, t, serverA, "docs", "in sync after the rename", inSync)
+	syncStatus(ctx, t, serverB, "docs", "nothing it can't store", func(st tsnet.SyncStatus) bool {
+		return inSync(st) && st.CantStoreHere == 0 && content(t, filepath.Join(dirB, "a_b")) == "x"
+	})
+	waitFor(ctx, t, "lists removed", func() bool {
+		_, errA := os.Stat(stA.ConflictsFile)
+		_, errB := os.Stat(stB.ConflictsFile)
+		return os.IsNotExist(errA) && os.IsNotExist(errB)
+	})
+}

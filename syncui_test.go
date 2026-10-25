@@ -62,6 +62,11 @@ func TestSyncLine(t *testing.T) {
 		st.ConflictCopies = 2
 		return st
 	}
+	cantStore := func(sum syncdir.Summary) tsnet.SyncStatus {
+		st := listed(sum)
+		st.CantStoreHere = 2
+		return st
+	}
 	skewed := func(sum syncdir.Summary) tsnet.SyncStatus {
 		st := ready(sum)
 		st.ClockSkew = -2500 * time.Millisecond
@@ -83,6 +88,7 @@ func TestSyncLine(t *testing.T) {
 		{listed(conflict), "📁 d ↔ bob · 1 conflict (list in /x/conflicts.txt)", tcolor.BrightYellow},
 		{copies(inSync), "📁 d ↔ bob · in sync (3 items) · 2 conflict copies to review" + listedX, tcolor.BrightYellow},
 		{skewed(inSync), "📁 d ↔ bob · in sync (3 items) · ⚠ clocks differ by 2.5s", tcolor.BrightYellow},
+		{cantStore(inSync), "📁 d ↔ bob · in sync (3 items) · 2 from bob can't be stored here" + listedX, tcolor.BrightYellow},
 	} {
 		l := SyncLine(tc.st)
 		if l.text != tc.text || l.color != tc.color {

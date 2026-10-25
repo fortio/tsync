@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -59,10 +60,19 @@ func issueLinesLocked(f *syncFolder) []string {
 		e := f.local.Entries[p]
 		lines = append(lines, fmt.Sprintf("conflict copy\t%s\there: %s", quoteIfNeeded(p), entryDesc(&e)))
 	}
+	for _, peer := range slices.SortedFunc(maps.Keys(f.peers), func(a, b Peer) int { return strings.Compare(a.Name, b.Name) }) {
+		for _, p := range f.peers[peer].cantStore {
+			lines = append(lines, fmt.Sprintf("can't store here\t%s\there: absent\t%s: has it", quoteIfNeeded(p), peer.Name))
+		}
+	}
 	for _, is := range issues {
 		kind := "conflict"
-		if is.it.Action == syncdir.DeletionHeld {
+		switch is.it.Action {
+		case syncdir.DeletionHeld:
 			kind = "deletion held"
+		case syncdir.CantStoreThere:
+			kind = "can't be stored on " + is.peer
+		default:
 		}
 		lines = append(lines, fmt.Sprintf("%s\t%s\there: %s\t%s: %s", kind, quoteIfNeeded(is.it.Path),
 			entryDesc(is.it.Local), is.peer, entryDesc(is.it.Remote)))
@@ -133,6 +143,8 @@ func (s *Server) writeConflicts(f *syncFolder) {
 			"version: delete or move away\n#   the other one (on its side) and the remaining one is synced back.\n" +
 			"# deletion held: deleted on the peer at the same time as too many others (its folder not mounted?), so " +
 			"not done\n#   here: delete it here too if that was intended, or restore it there.\n" +
+			"# can't store here (or can't be stored on <peer>): that name isn't valid on this machine (or the peer's),\n" +
+			"#   eg on Windows <>:\"|?* or a trailing dot or space, or CON, NUL...: rename it where it is.\n" +
 			"# Columns (tab separated): kind, path, our version, the peer's.\n")
 		for _, l := range lines {
 			_, _ = w.WriteString(l + "\n")

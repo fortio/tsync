@@ -23,7 +23,7 @@ func TestIndexChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunks := indexChunks("photos", entries, ig, 300)
+	chunks := indexChunks("photos", entries, ig, []string{"a:b", "c?"}, 300)
 	if len(chunks) < 5 {
 		t.Fatalf("expected several chunks, got %d", len(chunks))
 	}
@@ -37,11 +37,15 @@ func TestIndexChunks(t *testing.T) {
 			t.Errorf("chunk %d/%d: unexpected flags %d", i, len(chunks), flags)
 		}
 		b := c[8:]
-		if i == 0 { // our ignore rules first.
-			if b[0] != 1 || int(b[1])<<8|int(b[2]) != 4 || string(b[3:7]) != "*.o\n" {
-				t.Fatalf("unexpected rules header %q", b[:7])
+		if i == 0 { // our ignore rules and the paths we can't store first.
+			rules, cantStore, rest, herr := decodeHeader(b)
+			if herr != nil {
+				t.Fatal(herr)
 			}
-			b = b[7:]
+			if text, custom := rules.Text(); text != "*.o\n" || !custom || len(cantStore) != 2 || !cantStore["a:b"] || !cantStore["c?"] {
+				t.Fatalf("unexpected header %q %v %v", text, custom, cantStore)
+			}
+			b = rest
 		}
 		es, err := decodeEntries(b)
 		if err != nil {
@@ -59,8 +63,8 @@ func TestIndexChunks(t *testing.T) {
 			t.Errorf("%s: got %+v, want %+v", p, got[p], e)
 		}
 	}
-	empty := indexChunks("x", nil, nil, maxSyncChunk) // default rules: not custom, empty.
-	if len(empty) != 1 || empty[0][2] != syncIndexFirst|syncIndexLast || len(empty[0]) != 6 || empty[0][3] != 0 {
+	empty := indexChunks("x", nil, nil, nil, maxSyncChunk) // default rules: not custom, empty; nothing we can't store.
+	if len(empty) != 1 || empty[0][2] != syncIndexFirst|syncIndexLast || len(empty[0]) != 8 || empty[0][3] != 0 {
 		t.Errorf("unexpected empty index chunks %q", empty)
 	}
 }

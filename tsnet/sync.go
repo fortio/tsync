@@ -9,7 +9,6 @@ import (
 	"maps"
 	"net"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -29,7 +28,8 @@ const (
 	// resolved by modification time) + our sync folder names, newline separated (when the link is up).
 	FrameSyncFolders = 'F'
 	// FrameSyncIndex is a chunk of our index of a folder: name length (1) + name + flags (1) + (first chunk
-	// only: our ignore rules: 1 if from a .tsyncignore (1) + its length (2) + its content) + entries:
+	// only: our ignore rules: 1 if from a .tsyncignore (1) + its length (2) + its content, then the peers'
+	// paths we can't store (eg on Windows): count (2) + for each: length (2) + path) + entries:
 	// kind 'f' or 'd' (1) + mode (4) + size (8) + mtime (8) + sha256 (32, files only) + path length (2) + path.
 	FrameSyncIndex = 'I'
 
@@ -39,6 +39,8 @@ const (
 	maxSyncChunk = 512 * 1024
 	// maxRemoteEntries limits the size of an index received from a peer.
 	maxRemoteEntries = 1_000_000
+	// maxCantStore limits how many paths we can't store we tell the peers about (the others still show as to get).
+	maxCantStore = 1000
 	// DefaultSyncRescan is how often sync folders are scanned by default.
 	DefaultSyncRescan = 10 * time.Second
 	// MaxSyncNameLen is the maximum length of a sync folder name.
@@ -97,6 +99,8 @@ type syncFolder struct {
 	copies     []string // conflict copies in the folder (from the last scan, sorted).
 	// windowsSkips are the peers' paths we can't store (on Windows) and already warned about.
 	windowsSkips map[string]bool
+	// cantStoreSent are the peers' paths we can't store we last told them about (see cantStoreChangedLocked).
+	cantStoreSent []string
 }
 
 type savedBase struct {
@@ -113,14 +117,21 @@ func (f *syncFolder) kickLocked() {
 
 // syncPeer is the state of a folder with a linked peer that has it too.
 type syncPeer struct {
-	l         *link
-	remote    map[string]syncdir.Entry // the peer's last complete index.
-	remoteIg  *syncdir.Ignore          // and its ignore rules.
-	pending   map[string]syncdir.Entry // chunks being received.
-	pendingIg *syncdir.Ignore
-	ready     bool // remote is set.
-	base      syncdir.Base
-	summary   syncdir.Summary
+	l        *link
+	remote   map[string]syncdir.Entry // the peer's last complete index.
+	remoteIg *syncdir.Ignore          // and its ignore rules,
+	// and our paths it can't store (it told us).
+	remoteCantStore map[string]bool
+	// cantStore are its paths we can't store (eg on Windows), from its last index.
+	cantStore []string
+	// For the index being received.
+	pendingCantStore map[string]bool
+	pendingSkipped   []string
+	pending          map[string]syncdir.Entry // chunks being received.
+	pendingIg        *syncdir.Ignore
+	ready            bool // remote is set.
+	base             syncdir.Base
+	summary          syncdir.Summary
 	// Getting what the peer has newer.
 	todo     []syncdir.Item       // paths to get (or set the mode of...), from the last plan.
 	todoAt   int                  // todo before this index is all done (see schedulePullsLocked).
@@ -150,6 +161,8 @@ type SyncStatus struct {
 	ConflictCopies int
 	// ClockSkew is how much the peer's clock is behind ours (ahead if negative), roughly.
 	ClockSkew time.Duration
+	// CantStoreHere is how many of the peer's paths we can't store (eg on Windows), listed in ConflictsFile.
+	CantStoreHere int
 }
 
 // SyncStatus returns the state of our sync folders with each linked peer that has them (sorted).
@@ -171,7 +184,8 @@ func (s *Server) SyncStatus() []SyncStatus {
 			sp := f.peers[peer]
 			st.Peer, st.Ready, st.Summary, st.Getting = peer, sp.ready, sp.summary, len(sp.pulls)
 			st.CurFile, st.CurDone, st.CurSize, st.ConflictsFile, st.ClockSkew = "", 0, 0, "", sp.l.clockSkew
-			if len(sp.issues) > 0 || len(f.copies) > 0 {
+			st.CantStoreHere = len(sp.cantStore)
+			if len(sp.issues) > 0 || len(f.copies) > 0 || len(sp.cantStore) > 0 {
 				st.ConflictsFile = s.conflictsFile(f)
 			}
 			if len(sp.pulls) > 0 {
@@ -386,9 +400,9 @@ func (s *Server) sendIndex(f *syncFolder, peer Peer, l *link, conn net.Conn) {
 	f.sendMu.Lock()
 	defer f.sendMu.Unlock()
 	s.stateMu.Lock()
-	entries, ig := f.local.Entries, f.ig // not modified once scanned (a new scan makes a new map).
+	entries, ig, cantStore := f.local.Entries, f.ig, f.cantStoreSent // not modified once set (new ones are made).
 	s.stateMu.Unlock()
-	chunks := indexChunks(f.Name, entries, ig, maxSyncChunk)
+	chunks := indexChunks(f.Name, entries, ig, cantStore, maxSyncChunk)
 	for _, c := range chunks {
 		if err := l.send(conn, FrameSyncIndex, c); err != nil {
 			log.Errf("Failed to send sync folder %q index to %s: %v", f.Name, peer.Name, err)
@@ -401,7 +415,8 @@ func (s *Server) sendIndex(f *syncFolder, peer Peer, l *link, conn net.Conn) {
 // indexChunks returns the FrameSyncIndex payloads for the entries (sorted) and ignore rules (nil for the
 // default ones), each with at most maxChunk bytes of entries (at least one entry per chunk, and one chunk for
 // an empty index).
-func indexChunks(name string, entries map[string]syncdir.Entry, ig *syncdir.Ignore, maxChunk int) [][]byte {
+func indexChunks(name string, entries map[string]syncdir.Entry, ig *syncdir.Ignore, cantStore []string, maxChunk int,
+) [][]byte {
 	header := append([]byte{byte(len(name))}, name...) //nolint:gosec // validated, at most MaxSyncNameLen.
 	flagsAt := len(header)
 	var chunks [][]byte
@@ -415,6 +430,11 @@ func indexChunks(name string, entries map[string]syncdir.Entry, ig *syncdir.Igno
 		cur[len(cur)-1] = 1
 	}
 	cur = append(binary.BigEndian.AppendUint16(cur, uint16(len(rules))), rules...) //nolint:gosec // checked when loaded.
+	cantStore = cantStore[:min(len(cantStore), maxCantStore)]
+	cur = binary.BigEndian.AppendUint16(cur, uint16(len(cantStore))) //nolint:gosec // limited above.
+	for _, p := range cantStore {
+		cur = append(binary.BigEndian.AppendUint16(cur, uint16(len(p))), p...) //nolint:gosec // validated keys.
+	}
 	n := 0
 	for _, key := range slices.Sorted(maps.Keys(entries)) {
 		e := entries[key]
@@ -457,9 +477,6 @@ func encodeEntry(b []byte, e syncdir.Entry) []byte {
 	return append(b, e.Path...)
 }
 
-// skipWindowsNames is true on Windows: the peers' paths it can't store are skipped (see filterWindowsNames).
-var skipWindowsNames = runtime.GOOS == "windows"
-
 // newWindowsSkips returns the skipped paths not seen before (from any peer), so they're only warned about once.
 func (f *syncFolder) newWindowsSkips(skipped []string) []string {
 	var added []string
@@ -489,20 +506,36 @@ func filterWindowsNames(entries []syncdir.Entry) ([]syncdir.Entry, []string) {
 	return kept, skipped
 }
 
-// decodeRules decodes the ignore rules at the start of the first chunk of an index, returns them and the rest.
-func decodeRules(b []byte) (*syncdir.Ignore, []byte, error) {
+// decodeHeader decodes the start of the first chunk of an index: the peer's ignore rules and the paths it can't
+// store, returns them and the rest.
+func decodeHeader(b []byte) (*syncdir.Ignore, map[string]bool, []byte, error) {
 	if len(b) < 3 || len(b) < 3+int(binary.BigEndian.Uint16(b[1:3])) {
-		return nil, nil, errors.New("truncated rules")
+		return nil, nil, nil, errors.New("truncated rules")
 	}
 	n := int(binary.BigEndian.Uint16(b[1:3]))
-	if b[0] == 0 {
-		return syncdir.DefaultIgnore(), b[3+n:], nil
+	ig := syncdir.DefaultIgnore()
+	if b[0] != 0 {
+		var err error
+		if ig, err = syncdir.ParseIgnore(string(b[3 : 3+n])); err != nil {
+			return nil, nil, nil, fmt.Errorf("invalid ignore rules: %w", err)
+		}
 	}
-	ig, err := syncdir.ParseIgnore(string(b[3 : 3+n]))
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid ignore rules: %w", err)
+	b = b[3+n:]
+	if len(b) < 2 {
+		return nil, nil, nil, errors.New("truncated paths it can't store")
 	}
-	return ig, b[3+n:], nil
+	count := int(binary.BigEndian.Uint16(b))
+	b = b[2:]
+	cantStore := make(map[string]bool, count)
+	for range count {
+		if len(b) < 2 || len(b) < 2+int(binary.BigEndian.Uint16(b)) {
+			return nil, nil, nil, errors.New("truncated paths it can't store")
+		}
+		n = int(binary.BigEndian.Uint16(b))
+		cantStore[string(b[2:2+n])] = true
+		b = b[2+n:]
+	}
+	return ig, cantStore, b, nil
 }
 
 // decodeEntries decodes (and validates) the entries of a FrameSyncIndex.
@@ -595,10 +628,11 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 		return errors.New("truncated")
 	}
 	name, flags, b := string(b[1:1+b[0]]), b[1+b[0]], b[2+b[0]:]
-	var ig *syncdir.Ignore // the peer's rules (first chunk).
+	var ig *syncdir.Ignore        // the peer's rules (first chunk).
+	var cantStore map[string]bool // and the paths it can't store.
 	if flags&syncIndexFirst != 0 {
 		var err error
-		if ig, b, err = decodeRules(b); err != nil {
+		if ig, cantStore, b, err = decodeHeader(b); err != nil {
 			return err
 		}
 	}
@@ -607,7 +641,7 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 		return err
 	}
 	var skipped []string
-	if skipWindowsNames {
+	if s.windowsNames {
 		entries, skipped = filterWindowsNames(entries)
 	}
 	s.stateMu.Lock()
@@ -628,11 +662,12 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 		f.peers[peer] = sp
 	}
 	if flags&syncIndexFirst != 0 {
-		sp.pending, sp.pendingIg = make(map[string]syncdir.Entry), ig
+		sp.pending, sp.pendingIg, sp.pendingCantStore, sp.pendingSkipped = make(map[string]syncdir.Entry), ig, cantStore, nil
 	}
 	if sp.pending == nil {
 		return errors.New("chunk without a first one")
 	}
+	sp.pendingSkipped = append(sp.pendingSkipped, skipped...)
 	for _, e := range entries {
 		sp.pending[e.Path] = e
 	}
@@ -643,11 +678,41 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	if flags&syncIndexLast == 0 {
 		return nil
 	}
-	sp.remote, sp.remoteIg, sp.pending, sp.ready = sp.pending, sp.pendingIg, nil, true
+	sp.remote, sp.remoteIg, sp.remoteCantStore, sp.pending, sp.ready = sp.pending, sp.pendingIg, sp.pendingCantStore, nil, true
+	sp.cantStore, sp.pendingSkipped = sp.pendingSkipped, nil
+	slices.Sort(sp.cantStore)
 	log.LogVf("Received sync folder %q index from %s (%d entries)", name, peer.Name, len(sp.remote))
 	s.replanLocked(f, peer, sp)
+	s.cantStoreChangedLocked(f)
 	s.change(0)
 	return nil
+}
+
+// cantStoreLocked returns the peers' paths we can't store (sorted), for the peers to know.
+func cantStoreLocked(f *syncFolder) []string {
+	all := make(map[string]bool)
+	for _, sp := range f.peers {
+		for _, p := range sp.cantStore {
+			all[p] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(all))
+}
+
+// cantStoreChangedLocked sends our index again to the peers if the paths we can't store changed (they're in it).
+func (s *Server) cantStoreChangedLocked(f *syncFolder) {
+	cantStore := cantStoreLocked(f)
+	if slices.Equal(cantStore, f.cantStoreSent) {
+		return
+	}
+	f.cantStoreSent = cantStore
+	f.kickLocked() // to update the conflicts list.
+	if f.local.Time.IsZero() {
+		return // sent once scanned.
+	}
+	for _, t := range s.syncTargetsLocked(f) {
+		s.wg.Go(func() { s.sendIndex(f, t.peer, t.l, t.conn) })
+	}
 }
 
 // loadBaseLocked loads the base of the folder with that peer (empty if never synced), returns it and its
@@ -683,7 +748,8 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 		}
 	}
 	items := syncdir.Plan(local, sp.remote, sp.base, syncdir.PlanOptions{
-		Ignore: f.ig, RemoteIgnore: sp.remoteIg, ConflictCopies: !s.SyncConflictList, Name: s.Name,
+		Ignore: f.ig, RemoteIgnore: sp.remoteIg, RemoteCantStore: sp.remoteCantStore,
+		ConflictCopies: !s.SyncConflictList, Name: s.Name,
 	})
 	if syncdir.UpdateBase(sp.base, items) {
 		sp.dirty = true
@@ -695,7 +761,7 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 		switch it.Action {
 		case syncdir.Pull, syncdir.MetadataOnly, syncdir.DeletedThere, syncdir.ConflictCopy, syncdir.Move:
 			sp.todo = append(sp.todo, it)
-		case syncdir.Conflict, syncdir.DeletionHeld:
+		case syncdir.Conflict, syncdir.DeletionHeld, syncdir.CantStoreThere:
 			sp.issues = append(sp.issues, it)
 		default:
 		}
