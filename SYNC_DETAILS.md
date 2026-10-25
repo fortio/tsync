@@ -193,7 +193,7 @@ any new type: **when adding a frame type, decide if headless needs it and update
 
 | Frame | Meaning | Headless | Notes |
 |---|---|---|---|
-| `H` hello | first frame of a link, authenticates the dialer | needed | read during the link setup, before the whitelist applies |
+| `H` hello | first frame of a link, authenticates the dialer | n/a | read during the link setup, before the whitelist applies (always handled) |
 | `F` sync folders | our time and our labels, when the link is up | yes | both directions |
 | `I` sync index | our index of a shared directory, in chunks | yes | both directions |
 | `Q` sync get | pull a file (path + sha256) | yes | the puller sends it, the other side serves it |
