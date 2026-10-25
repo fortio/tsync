@@ -214,6 +214,8 @@ type syncFlags struct {
 	list    *bool
 	rescan  *time.Duration
 	watch   *bool
+	// headless is -headless, here to keep Main short.
+	headless *bool
 }
 
 // Apply sets the sync flags values in the config.
@@ -244,7 +246,9 @@ func SyncFlags() syncFlags {
 			return fmt.Errorf("expected copy or list, got %q", s)
 		}
 	})
-	return syncFlags{folders, keep, &list, rescan, watch}
+	headless := flag.Bool("headless", false, "Run without a UI: only directory sync (-sync) with already trusted peers (pair "+
+		"once with the UI first), no clipboard or file offers. Stop with Ctrl-C or SIGTERM")
+	return syncFlags{folders, keep, &list, rescan, watch, headless}
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
@@ -492,7 +496,7 @@ func MouseInsideBox(ap *ansipixels.AnsiPixels, tableWidth, numPeers int) (int, b
 	return -1, false
 }
 
-func Main() int {
+func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
 	// echo -n "ts" | od -d -> 29556
 	fPort := flag.Int("port", tsnet.DefaultDiscoveryPort, "Discovery port to use")
@@ -517,6 +521,12 @@ func Main() int {
 	// Files to offer (eg from a ssh session where drag and drop isn't possible): check them before starting.
 	if err := CheckFiles(flag.Args()); err != nil {
 		return log.FErrf("Can't offer %v", err)
+	}
+	if *fSync.headless {
+		return RunHeadless(flag.Args(), tsnet.Config{
+			Name: *fName, Port: *fPort, Mcast: *fMcast, Target: *fTarget, BaseBroadcastInterval: *fInterval,
+			Peers: SplitList(*fPeers), FileDir: DownloadDir(*fDir), MaxRate: *fMaxRate,
+		}, fSync, *fTsyncDir)
 	}
 	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {

@@ -3,7 +3,7 @@
 # identities and state (-tsync-dir), own port and multicast group (so a real tsync doesn't see them), each with
 # a "docs" sync folder. Scenarios: initial sync, an edit, a deletion and a directory rename going around, an
 # offline machine (C stopped) edited on both sides then back (conflict copy, the newest version wins), and a
-# mass deletion while offline (held by the others, not applied).
+# mass deletion while offline (held by the others, not applied), and a machine restarted headless.
 # Needs tmux and multicast on the local interface.
 # Usage: scripts/e2e_sync.sh [outdir] (default: a new temp dir, kept on failure)
 set -euo pipefail
@@ -172,7 +172,19 @@ has "40" "$OUT/A/bulk/f40" "$OUT/B/bulk/f40" || fail "mass deletion shouldn't be
 grep -q "^deletion held	bulk/f01	" "$OUT/idA/sync/docs/conflicts.txt" || fail "held deletions not listed on A"
 echo "ok: mass deletion held"
 
-for s in A B C; do
+# 8. C restarted headless (no UI, already trusted peers only): reconnects by itself and syncs, stops on Ctrl-C.
+stop C
+echo "for headless" > "$OUT/A/headless.txt"
+$T new-session -d -s C -x 200 -y 50 \
+	"$BIN $ARGS -headless -name e2eC -tsync-dir $OUT/idC -dir $OUT/dlC -sync docs=$OUT/C"
+wait_until "headless sync" has "for headless" $(on headless.txt)
+echo "from headless" > "$OUT/C/from-headless.txt"
+wait_until "headless change propagated" has "from headless" $(on from-headless.txt)
+$T send-keys -t C C-c
+wait_until "headless stopped by Ctrl-C" bash -c "! $T has-session -t C"
+echo "ok: headless"
+
+for s in A B; do
 	$T capture-pane -p -t $s > "$OUT/$s.txt"
 done
 echo "PASS (screens in $OUT)"

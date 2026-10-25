@@ -171,6 +171,9 @@ a time.
 Using the same label on both sides is the consent: labels are announced to the linked (already trusted, see the
 README) peers, the indexes and contents only to the peers that use that label too.
 
+A headless instance (`-headless`, no UI) does the same, but only links with peers it already trusts, and
+only handles the sync frames and the file data ones they use, and ignores all the others (clipboard, file and directory offers...): sync is all it does (see the table below).
+
 ## On the wire
 
 Within the encrypted link of each linked peer (see the README's security section):
@@ -181,6 +184,30 @@ Within the encrypted link of each linked peer (see the README's security section
   `..`, no control characters...);
 - `Q`: get a file (path + expected sha256, with an id that can't collide with file sharing's), answered with the
   usual file data frames, or an abort with the reason (changed since, still being written...).
+
+### All the frame types, and headless
+
+Every frame on the link starts with one of these type bytes. A headless instance (`-headless`) only handles
+the ones marked yes (the `allowedHeadless` whitelist in `tsnet/link.go`) and ignores all the others, including
+any new type: **when adding a frame type, decide if headless needs it and update the whitelist and this table.**
+
+| Frame | Meaning | Headless | Notes |
+|---|---|---|---|
+| `H` hello | first frame of a link, authenticates the dialer | n/a | read during the link setup, before the whitelist applies (always handled) |
+| `F` sync folders | our time and our labels, when the link is up | yes | both directions |
+| `I` sync index | our index of a shared directory, in chunks | yes | both directions |
+| `Q` sync get | pull a file (path + sha256) | yes | the puller sends it, the other side serves it |
+| `D` file data | file bytes | yes | the server sends it, the puller receives it |
+| `E` file end | sha256 trailer | yes | same direction as `D` |
+| `A` file saved | the receiver confirms the file is saved | yes | the puller sends it, the server receives it (and logs "sent") |
+| `X` file abort | the sender gives up (changed since, still being written...) | yes | error path |
+| `R` file refuse | the receiver fails (bad hash, can't write...) | yes | error path |
+| `G` file get | get a file that was offered | no | file and directory sharing only: sync uses `Q` |
+| `O` file offer | offer a file | no | file sharing only |
+| `M` directory offer | offer a directory | no | directory send only |
+| `N` directory manifest | manifest of an offered directory | no | directory send only |
+| `T` clipboard | clipboard text with the time it was copied | no | by design: it could be a password |
+| `C` clipboard, no time | same, from older versions | no | by design |
 
 ## Limits
 

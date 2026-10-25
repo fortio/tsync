@@ -25,6 +25,9 @@ const (
 	// maxFrameSize leaves room for the frame type and the AEAD tag.
 	maxFrameSize = MaxClipSize + 64
 
+	// Frame types (also in other files: files.go, dirs.go, sync.go, syncpull.go). When adding one, decide if a
+	// headless server needs it (see allowedHeadless) and update the table in SYNC_DETAILS.md.
+
 	FrameHello = 'H' // first frame from the dialer, authenticates the connection.
 	FrameClip  = 'T' // clipboard: 8 bytes (big endian) unix nano time it was copied, then the text.
 	// FrameClipNoTime is the clipboard text without time, sent by older versions.
@@ -338,6 +341,10 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			s.linkFailed(peer, l)
 			return
 		}
+		if s.Headless && !allowedHeadless(plain[0]) {
+			log.LogVf("Headless: ignoring frame %q from %q", plain[0], peer.Name)
+			continue
+		}
 		switch plain[0] {
 		case FrameClipNoTime:
 			s.receivedClip(peer, l, string(plain[1:]), time.Now())
@@ -354,6 +361,19 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			}
 		}
 	}
+}
+
+// allowedHeadless is true for the only frame types a headless server handles: the sync ones, and the file data
+// ones its downloads (and the peers' downloads from it, incl. their saved confirmation) use. Anything else
+// (clipboard, file offers... and whatever gets added later) is ignored: a new frame type needed by sync has to
+// be added here (and to the table in SYNC_DETAILS.md).
+func allowedHeadless(ftype byte) bool {
+	switch ftype {
+	case FrameSyncFolders, FrameSyncIndex, FrameSyncGet, FrameFileData, FrameFileEnd, FrameFileAbort, FrameFileRefuse,
+		FrameFileSaved:
+		return true
+	}
+	return false
 }
 
 func (s *Server) receivedClip(peer Peer, l *link, clip string, when time.Time) {
