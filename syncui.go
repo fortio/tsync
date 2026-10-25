@@ -108,6 +108,17 @@ func (sp *SyncPanel) Draw(y int, lines []syncLine) int {
 	return h
 }
 
+// ExpandHome replaces a leading ~/ by the home directory (for flags given as name=~/dir, which shells don't
+// expand).
+func ExpandHome(p string) string {
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return p
+}
+
 // ParseSyncFolder parses a -sync flag value: name=path (path must be a directory, a leading ~/ is the
 // home directory).
 func ParseSyncFolder(s string) (tsnet.SyncFolder, error) {
@@ -118,12 +129,7 @@ func ParseSyncFolder(s string) (tsnet.SyncFolder, error) {
 	if err := tsnet.ValidateSyncName(name); err != nil {
 		return tsnet.SyncFolder{}, err
 	}
-	if rest, ok := strings.CutPrefix(path, "~/"); ok {
-		if home, err := os.UserHomeDir(); err == nil {
-			path = filepath.Join(home, rest)
-		}
-	}
-	abs, err := filepath.Abs(path)
+	abs, err := filepath.Abs(ExpandHome(path))
 	if err != nil {
 		return tsnet.SyncFolder{}, err
 	}

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"fortio.org/cli"
 	"fortio.org/log"
@@ -25,8 +26,15 @@ func main() {
 	os.Exit(Main())
 }
 
-func LoadIdentity() (*tcrypto.Identity, *tcrypto.Storage, error) {
-	storage, err := tcrypto.InitStorage()
+// LoadIdentity loads (or creates) our identity, in dir ("" for ~/.tsync).
+func LoadIdentity(dir string) (*tcrypto.Identity, *tcrypto.Storage, error) {
+	var storage *tcrypto.Storage
+	var err error
+	if dir == "" {
+		storage, err = tcrypto.InitStorage()
+	} else {
+		storage, err = tcrypto.InitStorageDir(dir)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -199,11 +207,25 @@ func RateString(rate int64) string {
 	return progressbar.HumanBytes(rate) + "/s"
 }
 
-// SyncFlags defines the sync flags: folders, replaced versions to keep and conflicts handling (true to list).
-func SyncFlags() (*[]tsnet.SyncFolder, *int, *bool) {
+// syncFlags are the sync flags values (see SyncFlags).
+type syncFlags struct {
+	folders *[]tsnet.SyncFolder
+	keep    *int
+	list    *bool
+	rescan  *time.Duration
+}
+
+// Apply sets the sync flags values in the config.
+func (sf syncFlags) Apply(cfg *tsnet.Config) {
+	cfg.Sync, cfg.SyncKeep, cfg.SyncConflictList, cfg.SyncRescan = *sf.folders, *sf.keep, *sf.list, *sf.rescan
+}
+
+// SyncFlags defines the sync flags: folders, replaced versions to keep, conflicts handling and rescan interval.
+func SyncFlags() syncFlags {
 	folders := SyncFlag("sync")
 	keep := flag.Int("sync-keep", 3, "How many replaced versions of each file sync keeps in the folder's "+
 		syncdir.OldDir+" (0 for none)")
+	rescan := flag.Duration("sync-rescan", tsnet.DefaultSyncRescan, "How often the sync folders are scanned for changes")
 	list := false
 	flag.Func("sync-conflicts", "Sync conflicts (changed on both sides, or changed on one and deleted on the "+
 		"other) `handling`: copy (the newest version keeps the name, the other one is kept as a visible "+
@@ -216,7 +238,7 @@ func SyncFlags() (*[]tsnet.SyncFolder, *int, *bool) {
 			return fmt.Errorf("expected copy or list, got %q", s)
 		}
 	})
-	return folders, keep, &list
+	return syncFlags{folders, keep, &list, rescan}
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
@@ -480,7 +502,9 @@ func Main() int {
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	fMaxRate := RateFlag("max-rate")
-	fSync, fSyncKeep, fSyncConflictList := SyncFlags()
+	fSync := SyncFlags()
+	fTsyncDir := flag.String("tsync-dir", "", "Directory with our identity, trusted peers and sync state (conflicts "+
+		"list...), default ~/.tsync (eg to run several tsync with different identities on one machine)")
 	cli.ArgsHelp = "[file...]"
 	cli.MaxArgs = -1
 	cli.Main()
@@ -501,7 +525,7 @@ func Main() int {
 		ap.MouseClickOff()
 		ap.Restore()
 	}()
-	id, storage, err := LoadIdentity()
+	id, storage, err := LoadIdentity(ExpandHome(*fTsyncDir))
 	if err != nil {
 		return log.FErrf("Failed to load or create identity: %v", err)
 	}
@@ -521,10 +545,8 @@ func Main() int {
 		Peers:                 SplitList(*fPeers),
 		FileDir:               DownloadDir(*fDir),
 		MaxRate:               *fMaxRate,
-		Sync:                  *fSync,
-		SyncKeep:              *fSyncKeep,
-		SyncConflictList:      *fSyncConflictList,
 	}
+	fSync.Apply(&cfg)
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
