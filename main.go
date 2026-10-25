@@ -221,8 +221,9 @@ func SyncFlags() (*[]tsnet.SyncFolder, *int, *int64) {
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
 func SyncFlag(name string) *[]tsnet.SyncFolder {
 	var folders []tsnet.SyncFolder
-	flag.Func(name, "Sync the directory `name=path` with the linked peers that have a sync folder with the same name"+
-		" (repeatable). Files changed on both sides are left alone (conflicts), deletions aren't propagated",
+	flag.Func(name, "Sync the directory `name=path` with the linked peers that use the same name (the path can"+
+		" differ on each machine). Repeatable. Files changed on both sides are left alone (conflicts), deletions"+
+		" aren't propagated",
 		func(s string) error {
 			f, err := ParseSyncFolder(s)
 			if err != nil {
