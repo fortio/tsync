@@ -290,6 +290,8 @@ func TestSyncWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	got("directory rename", filepath.Join(dirB, "renamed", "b.txt"), "b")
+	writeTree(t, dirA, map[string]string{"renamed/c.txt": "c"}) // the renamed directory is watched (again).
+	got("new file in the renamed directory", filepath.Join(dirB, "renamed", "c.txt"), "c")
 	for _, srv := range []*tsnet.Server{serverA, serverB} {
 		syncStatus(ctx, t, srv, "docs", "still watched and in sync", func(st tsnet.SyncStatus) bool {
 			return st.Watching && inSync(st)

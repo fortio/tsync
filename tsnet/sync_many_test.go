@@ -15,6 +15,7 @@ import (
 
 // TestSyncMany times the initial sync of SYNC_MANY small files (eg SYNC_MANY=20000 go test -run TestSyncMany -v
 // ./tsnet), not run otherwise: to check it stays linear (100k files took 22s on a M5 Max, ~4.5k files/s).
+// SYNC_WATCH=1 for the same with -sync-watch.
 func TestSyncMany(t *testing.T) {
 	n, _ := strconv.Atoi(os.Getenv("SYNC_MANY"))
 	if n == 0 {
@@ -30,7 +31,7 @@ func TestSyncMany(t *testing.T) {
 		_ = os.WriteFile(p, []byte(strconv.Itoa(i)), 0o644)
 		_ = os.Chtimes(p, old, old)
 	}
-	common := tsnet.Config{SyncKeep: 1}
+	common := tsnet.Config{SyncKeep: 1, SyncWatch: os.Getenv("SYNC_WATCH") != ""}
 	cfgA, cfgB := common, common
 	cfgA.Name, cfgA.Sync, cfgA.Storage = "HostA", []tsnet.SyncFolder{{Name: "docs", Path: dirA}}, &tcrypto.Storage{Dir: t.TempDir()}
 	cfgB.Name, cfgB.Sync, cfgB.Storage = "HostB", []tsnet.SyncFolder{{Name: "docs", Path: dirB}}, &tcrypto.Storage{Dir: t.TempDir()}

@@ -270,7 +270,7 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 			sw.event(fsnotify.Event{Name: f.Path})
 			quiet.Reset(sw.quietIn())
 		case <-quiet.C:
-			if sw != nil {
+			if sw != nil && !sw.since.IsZero() { // else already scanned (see rescan).
 				prev, sw = s.syncWatchScan(f, prev, sw)
 			}
 		case <-wake.C:
@@ -284,7 +284,7 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		s.startPulls(f)
 		s.stateMu.Lock()
 		idle := len(f.inflight) == 0 && !f.replan
-		rescan := idle && f.synced && sw == nil // when watching, what we wrote is notified (and scanned).
+		rescan := idle && f.synced
 		if idle {
 			f.synced = false
 		}
@@ -297,7 +297,12 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 			retry = minPositive(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
 		}
 		s.stateMu.Unlock()
-		if rescan { // so the peers learn what we got.
+		switch { // so the peers learn what we got.
+		case rescan && sw != nil:
+			// What's notified so far, without waiting: we're done writing. What's notified later is scanned then
+			// (what we wrote is in f.recent till then).
+			prev, sw = s.syncWatchScan(f, prev, sw)
+		case rescan:
 			prev = s.syncScan(f, prev)
 		}
 		if save {
@@ -376,6 +381,9 @@ func (s *Server) syncWatchScan(f *syncFolder, prev syncdir.Index, sw *syncWatch)
 		return s.syncFullScan(f, prev, sw)
 	}
 	dirs, force := slices.Sorted(maps.Keys(sw.dirty)), sw.force
+	if dirs == nil {
+		dirs = []string{} // not a full scan.
+	}
 	sw.reset()
 	idx, added := s.syncScanDirs(f, prev, dirs, force)
 	if err := sw.update(idx, added); err != nil {

@@ -38,7 +38,8 @@ synced from a peer (so the other peers learn about them quickly). Unless watched
   notifications don't see changes made by other machines), the directory goes back to scanning every
   `-sync-rescan` (with a warning). Ditto if it can't watch all the directories (eg the inotify watches limit
   on Linux, `fs.inotify.max_user_watches`) or the notifications stop.
-- What sync writes is notified like any other change, so there is no extra scan after a batch of changes.
+- What sync writes is notified like any other change: after a batch of changes synced from a peer, only the
+  directories notified are scanned again (right away, not waiting for the 2s).
 
 - Paths are keys: slash separated, relative to the synced directory, Unicode NFC normalized (macOS can give
   decomposed names for accented letters, Linux and Windows usually composed ones; normalized, they are the same
