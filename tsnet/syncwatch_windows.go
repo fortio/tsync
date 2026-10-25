@@ -13,6 +13,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// SyncWatchDefault is the default of -sync-watch: true when watching is cheap.
+const SyncWatchDefault = true
+
 // The errors of a watches or open files limit (see isLimit).
 var (
 	errNoSpace      error = windows.ERROR_NOT_ENOUGH_QUOTA

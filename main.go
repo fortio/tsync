@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -230,9 +229,9 @@ func SyncFlags() syncFlags {
 		syncdir.OldDir+" (0 for none)")
 	rescan := flag.Duration("sync-rescan", tsnet.DefaultSyncRescan, "How often the sync folders are scanned for changes"+
 		" when not watched (see -sync-watch)")
-	watch := flag.Bool("sync-watch", runtime.GOOS == "linux" || runtime.GOOS == "windows", "Watch the sync folders "+
+	watch := flag.Bool("sync-watch", tsnet.SyncWatchDefault, "Watch the sync folders "+
 		"(file system notifications): only the directories that changed are scanned again, and all of it every 15m"+
-		" (default on Linux and Windows; on macOS it needs a file descriptor per file)")
+		" (default on Linux, Windows and macOS; a macOS build without cgo needs a file descriptor per file)")
 	list := false
 	flag.Func("sync-conflicts", "Sync conflicts (changed on both sides, or changed on one and deleted on the "+
 		"other) `handling`: copy (the newest version keeps the name, the other one is kept as a visible "+
