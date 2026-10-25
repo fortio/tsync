@@ -143,7 +143,7 @@ there. The peer only serves files.
 
 ## Several machines
 
-Every pair of machines that use the same label syncs directly, each pair with its own base (A–B, B–C, A–C). A
+Every pair of machines that use the same label syncs directly, each pair with its own base (A with B, B with C, A with C). A
 change reaches each machine through whichever pair sees it first; when the other pairs compare, both sides
 already have the same content: in sync, nothing transferred. Concurrent changes show up as the same conflict
 on the pairs involved, resolved the same way (same copy name everywhere). A path is only synced from one peer at
@@ -162,9 +162,9 @@ Within the encrypted link of each linked peer (see the README's security section
 - `Q`: get a file (path + expected sha256, with an id that can't collide with file sharing's), answered with the
   usual file data frames, or an abort with the reason (changed since, still being written...).
 
-## Limits and plans
+## Limits
 
-- Changes are noticed by rescanning (every `-sync-rescan`); file system notifications are planned.
+- Changes are noticed by rescanning, every `-sync-rescan`.
 - Indexes are kept in memory and sent whole when they change (fine for many thousands of files, at most a
   million entries per peer index).
 - Directory modification times aren't synced; empty directories are.
