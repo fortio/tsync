@@ -25,7 +25,8 @@ import (
 
 const (
 	FrameSyncFolders = 'F' // our sync folder names, newline separated (when the link is up).
-	// FrameSyncIndex is a chunk of our index of a folder: name length (1) + name + flags (1) + entries:
+	// FrameSyncIndex is a chunk of our index of a folder: name length (1) + name + flags (1) + (first chunk
+	// only: our ignore rules: 1 if from a .tsyncignore (1) + its length (2) + its content) + entries:
 	// kind 'f' or 'd' (1) + mode (4) + size (8) + mtime (8) + sha256 (32, files only) + path length (2) + path.
 	FrameSyncIndex = 'I'
 
@@ -95,12 +96,14 @@ func (f *syncFolder) kickLocked() {
 
 // syncPeer is the state of a folder with a linked peer that has it too.
 type syncPeer struct {
-	l       *link
-	remote  map[string]syncdir.Entry // the peer's last complete index.
-	pending map[string]syncdir.Entry // chunks being received.
-	ready   bool                     // remote is set.
-	base    syncdir.Base
-	summary syncdir.Summary
+	l         *link
+	remote    map[string]syncdir.Entry // the peer's last complete index.
+	remoteIg  *syncdir.Ignore          // and its ignore rules.
+	pending   map[string]syncdir.Entry // chunks being received.
+	pendingIg *syncdir.Ignore
+	ready     bool // remote is set.
+	base      syncdir.Base
+	summary   syncdir.Summary
 	// Getting what the peer has newer.
 	todo     []syncdir.Item       // paths to get (or set the mode of), from the last plan.
 	pulls    map[uint32]*Transfer // downloads in progress.
@@ -219,11 +222,20 @@ func (s *Server) syncScan(f *syncFolder, prev syncdir.Index) syncdir.Index {
 	if len(f.recent) > 0 && prev.Entries != nil {
 		prev.Entries = maps.Clone(prev.Entries)
 		for k, r := range f.recent {
-			prev.Entries[k] = r.e
+			if r.deleted {
+				delete(prev.Entries, k)
+			} else {
+				prev.Entries[k] = r.e
+			}
 		}
 	}
 	s.stateMu.Unlock()
 	ig, err := syncdir.LoadIgnore(f.Path)
+	if err == nil {
+		if text, _ := ig.Text(); len(text) > 0xffff { // sent with the index.
+			err = fmt.Errorf("%s too large", syncdir.IgnoreFile)
+		}
+	}
 	var idx syncdir.Index
 	if err == nil {
 		idx, err = syncdir.Scan(f.Path, prev, ig)
@@ -317,9 +329,9 @@ func (s *Server) sendIndex(f *syncFolder, peer Peer, l *link, conn net.Conn) {
 	f.sendMu.Lock()
 	defer f.sendMu.Unlock()
 	s.stateMu.Lock()
-	entries := f.local.Entries // not modified once scanned (a new scan makes a new map).
+	entries, ig := f.local.Entries, f.ig // not modified once scanned (a new scan makes a new map).
 	s.stateMu.Unlock()
-	chunks := indexChunks(f.Name, entries, maxSyncChunk)
+	chunks := indexChunks(f.Name, entries, ig, maxSyncChunk)
 	for _, c := range chunks {
 		if err := l.send(conn, FrameSyncIndex, c); err != nil {
 			log.Errf("Failed to send sync folder %q index to %s: %v", f.Name, peer.Name, err)
@@ -329,13 +341,23 @@ func (s *Server) sendIndex(f *syncFolder, peer Peer, l *link, conn net.Conn) {
 	log.LogVf("Sent sync folder %q index (%d entries, %d frames) to %s", f.Name, len(entries), len(chunks), peer.Name)
 }
 
-// indexChunks returns the FrameSyncIndex payloads for the entries (sorted), each with at most maxChunk bytes
-// of entries (at least one entry per chunk, and one chunk for an empty index).
-func indexChunks(name string, entries map[string]syncdir.Entry, maxChunk int) [][]byte {
+// indexChunks returns the FrameSyncIndex payloads for the entries (sorted) and ignore rules (nil for the
+// default ones), each with at most maxChunk bytes of entries (at least one entry per chunk, and one chunk for
+// an empty index).
+func indexChunks(name string, entries map[string]syncdir.Entry, ig *syncdir.Ignore, maxChunk int) [][]byte {
 	header := append([]byte{byte(len(name))}, name...) //nolint:gosec // validated, at most MaxSyncNameLen.
 	flagsAt := len(header)
 	var chunks [][]byte
 	cur := append(slices.Clone(header), syncIndexFirst)
+	rules, custom := "", false
+	if ig != nil {
+		rules, custom = ig.Text()
+	}
+	cur = append(cur, 0)
+	if custom {
+		cur[len(cur)-1] = 1
+	}
+	cur = append(binary.BigEndian.AppendUint16(cur, uint16(len(rules))), rules...) //nolint:gosec // checked when loaded.
 	n := 0
 	for _, key := range slices.Sorted(maps.Keys(entries)) {
 		e := entries[key]
@@ -376,6 +398,22 @@ func encodeEntry(b []byte, e syncdir.Entry) []byte {
 	}
 	b = binary.BigEndian.AppendUint16(b, uint16(len(e.Path))) //nolint:gosec // checked by the caller.
 	return append(b, e.Path...)
+}
+
+// decodeRules decodes the ignore rules at the start of the first chunk of an index, returns them and the rest.
+func decodeRules(b []byte) (*syncdir.Ignore, []byte, error) {
+	if len(b) < 3 || len(b) < 3+int(binary.BigEndian.Uint16(b[1:3])) {
+		return nil, nil, errors.New("truncated rules")
+	}
+	n := int(binary.BigEndian.Uint16(b[1:3]))
+	if b[0] == 0 {
+		return syncdir.DefaultIgnore(), b[3+n:], nil
+	}
+	ig, err := syncdir.ParseIgnore(string(b[3 : 3+n]))
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid ignore rules: %w", err)
+	}
+	return ig, b[3+n:], nil
 }
 
 // decodeEntries decodes (and validates) the entries of a FrameSyncIndex.
@@ -458,8 +496,15 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	if len(b) < 1 || len(b) < 2+int(b[0]) {
 		return errors.New("truncated")
 	}
-	name, flags := string(b[1:1+b[0]]), b[1+b[0]]
-	entries, err := decodeEntries(b[2+b[0]:])
+	name, flags, b := string(b[1:1+b[0]]), b[1+b[0]], b[2+b[0]:]
+	var ig *syncdir.Ignore // the peer's rules (first chunk).
+	if flags&syncIndexFirst != 0 {
+		var err error
+		if ig, b, err = decodeRules(b); err != nil {
+			return err
+		}
+	}
+	entries, err := decodeEntries(b)
 	if err != nil {
 		return err
 	}
@@ -477,7 +522,7 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 		f.peers[peer] = sp
 	}
 	if flags&syncIndexFirst != 0 {
-		sp.pending = make(map[string]syncdir.Entry)
+		sp.pending, sp.pendingIg = make(map[string]syncdir.Entry), ig
 	}
 	if sp.pending == nil {
 		return errors.New("chunk without a first one")
@@ -492,7 +537,7 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	if flags&syncIndexLast == 0 {
 		return nil
 	}
-	sp.remote, sp.pending, sp.ready = sp.pending, nil, true
+	sp.remote, sp.remoteIg, sp.pending, sp.ready = sp.pending, sp.pendingIg, nil, true
 	log.LogVf("Received sync folder %q index from %s (%d entries)", name, peer.Name, len(sp.remote))
 	s.replanLocked(f, peer, sp)
 	s.change(0)
@@ -524,10 +569,14 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 	if len(f.recent) > 0 {
 		local = maps.Clone(local)
 		for k, r := range f.recent {
-			local[k] = r.e
+			if r.deleted {
+				delete(local, k)
+			} else {
+				local[k] = r.e
+			}
 		}
 	}
-	items := syncdir.Plan(local, sp.remote, sp.base, f.ig)
+	items := syncdir.Plan(local, sp.remote, sp.base, f.ig, sp.remoteIg)
 	if syncdir.UpdateBase(sp.base, items) {
 		sp.dirty = true
 	}
@@ -536,9 +585,9 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 	sp.issues = sp.issues[:0]
 	for _, it := range items {
 		switch it.Action {
-		case syncdir.Pull, syncdir.MetadataOnly:
+		case syncdir.Pull, syncdir.MetadataOnly, syncdir.DeletedThere:
 			sp.todo = append(sp.todo, it)
-		case syncdir.Conflict, syncdir.DeletedHere, syncdir.DeletedThere:
+		case syncdir.Conflict, syncdir.DeletionHeld:
 			sp.issues = append(sp.issues, it)
 		default:
 		}

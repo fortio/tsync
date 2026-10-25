@@ -1,7 +1,7 @@
 // Package syncdir is the (network independent) logic of tsync's directory sync between 2 peers: scanning
 // a directory into an index, the ignore rules, the base (what both sides had at the last sync) and deciding
-// for each path what to do. Each side only ever writes its own disk (it pulls what the peer has newer), and
-// nothing modified on both sides since the last sync is touched (conflict, left for the user to resolve).
+// for each path what to do. Each side only ever writes its own disk (it pulls what the peer has newer, removes
+// what the peer deleted), and nothing modified on both sides since the last sync is overwritten (conflict).
 package syncdir
 
 import (
@@ -22,8 +22,9 @@ const (
 	MetadataOnly               // same content, the peer changed the mode (we didn't): set its mode.
 	PeerPulls                  // new or changed here (and not there): nothing to do here, the peer pulls it.
 	Conflict                   // changed on both sides (or file vs directory): touch neither.
-	DeletedHere                // deleted here, unchanged there: not propagated (to be shown).
-	DeletedThere               // deleted there, unchanged here: not propagated (to be shown).
+	DeletedHere                // deleted here, unchanged there: nothing to do here, the peer removes it.
+	DeletedThere               // deleted there, unchanged here: remove it (moved to OldDir).
+	DeletionHeld               // DeletedThere but among too many at once (eg peer's disk not mounted): not applied.
 )
 
 func (a Action) String() string {
@@ -42,6 +43,8 @@ func (a Action) String() string {
 		return "DeletedHere"
 	case DeletedThere:
 		return "DeletedThere"
+	case DeletionHeld:
+		return "DeletionHeld"
 	default:
 		return "Action(" + strconv.Itoa(int(a)) + ")"
 	}
@@ -142,12 +145,17 @@ type Item struct {
 }
 
 // Plan decides for all the paths of both sides (sorted). Remote paths we ignore (ig, nil for the default rules)
-// are left out. Paths that only differ by case are conflicts (they can't coexist on a case insensitive
-// file system, eg macOS and Windows) unless both sides have all of them (so both are case sensitive).
+// are left out, and ours the peer ignores (remoteIg, its rules, nil for the default ones) aren't deletions
+// there nor for it to get: they're in sync. Paths that only differ by case are conflicts (they can't coexist on
+// a case insensitive file system, eg macOS and Windows) unless both sides have all of them (so both are case
+// sensitive). When the peer deleted too many paths at once (see massDeletion) they are held, not removed.
 // The remote entries' paths must have been validated (see [Key]).
-func Plan(local, remote map[string]Entry, base Base, ig *Ignore) []Item {
+func Plan(local, remote map[string]Entry, base Base, ig, remoteIg *Ignore) []Item {
 	if ig == nil {
 		ig = DefaultIgnore()
+	}
+	if remoteIg == nil {
+		remoteIg = DefaultIgnore()
 	}
 	paths := make([]string, 0, len(local)+len(remote))
 	for p := range local {
@@ -179,12 +187,38 @@ func Plan(local, remote map[string]Entry, base Base, ig *Ignore) []Item {
 			b = &e
 		}
 		it.Action = Decide(it.Local, it.Remote, b)
+		if it.Remote == nil && it.Local != nil && remoteIg.Match(p, it.Local.Dir) {
+			it.Action = InSync // the peer doesn't sync it (not a deletion there).
+		}
 		if caseConflict(byFold[strings.ToLower(p)], local, remote) {
 			it.Action = Conflict
 		}
 		items = append(items, it)
 	}
+	holdMassDeletion(items, len(base))
 	return items
+}
+
+// massDeletion is how many paths deleted at once on the peer, if also more than half of the ones both had,
+// are held (likely its directory isn't mounted or was emptied by mistake, rather than deliberate deletions).
+const massDeletion = 20
+
+// holdMassDeletion holds the deletions there if there are too many (see massDeletion).
+func holdMassDeletion(items []Item, synced int) {
+	n := 0
+	for _, it := range items {
+		if it.Action == DeletedThere {
+			n++
+		}
+	}
+	if n <= massDeletion || 2*n <= synced {
+		return
+	}
+	for i := range items {
+		if items[i].Action == DeletedThere {
+			items[i].Action = DeletionHeld
+		}
+	}
 }
 
 // caseConflict returns true if there are several paths differing only by case and not all on both sides.
@@ -203,7 +237,7 @@ func caseConflict(group []string, local, remote map[string]Entry) bool {
 }
 
 // numActions is the number of actions.
-const numActions = int(DeletedThere) + 1
+const numActions = int(DeletionHeld) + 1
 
 // maxSummaryConflicts is how many conflicting paths a [Summary] keeps.
 const maxSummaryConflicts = 5
@@ -266,8 +300,9 @@ func (s Summary) Describe(peerName string) string {
 	add(s.Counts[MetadataOnly], "mode changes to get")
 	add(s.Counts[PeerPulls], "for "+peerName)
 	add(s.Counts[Conflict], plural(s.Counts[Conflict], "conflict"))
-	add(s.Counts[DeletedHere], "deleted here")
-	add(s.Counts[DeletedThere], "deleted on "+peerName)
+	add(s.Counts[DeletedThere], "to remove")
+	add(s.Counts[DeletedHere], plural(s.Counts[DeletedHere], "removal")+" for "+peerName)
+	add(s.Counts[DeletionHeld], plural(s.Counts[DeletionHeld], "deletion")+" on "+peerName+" held (too many at once)")
 	if len(parts) == 0 {
 		n := s.Counts[InSync]
 		return fmt.Sprintf("in sync (%d %s)", n, plural(n, "item"))

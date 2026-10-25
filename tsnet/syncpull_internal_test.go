@@ -78,7 +78,7 @@ func TestKeepOld(t *testing.T) {
 	writeAt(t, filepath.Join(dir, target), "v1", time.Time{})
 	// Replaced like sync does: the old version kept (hard link when possible), then the new one renamed over it.
 	for _, c := range []string{"v2", "v3", "v4"} {
-		if err := keepOld(r, target, "sub/f.txt", 2); err != nil {
+		if err := keepOld(r, target, "sub/f.txt", 2, false); err != nil {
 			t.Fatal(err)
 		}
 		tmp := filepath.Join(dir, "sub", ".new")
@@ -156,15 +156,15 @@ func TestIssueLines(t *testing.T) {
 	f := &syncFolder{peers: map[Peer]*syncPeer{
 		{Name: "zed"}: {issues: []syncdir.Item{{Path: "a", Action: syncdir.Conflict, Local: file, Remote: dir}}},
 		{Name: "bob"}: {issues: []syncdir.Item{
-			{Path: "b\tc", Action: syncdir.DeletedHere, Remote: file},
-			{Path: "a", Action: syncdir.DeletedThere, Local: file},
+			{Path: "b\tc", Action: syncdir.Conflict, Remote: file},
+			{Path: "a", Action: syncdir.DeletionHeld, Local: file},
 		}},
 	}}
 	got := issueLinesLocked(f)
 	want := []string{
-		"deleted on bob\ta\there: 2 Kb, 2026-01-02 03:04:05\tbob: absent",
+		"deletion held\ta\there: 2 Kb, 2026-01-02 03:04:05\tbob: absent",
 		"conflict\ta\there: 2 Kb, 2026-01-02 03:04:05\tzed: directory",
-		"deleted here\t\"b\\tc\"\there: absent\tbob: 2 Kb, 2026-01-02 03:04:05",
+		"conflict\t\"b\\tc\"\there: absent\tbob: 2 Kb, 2026-01-02 03:04:05",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("got\n%q\nwant\n%q", got, want)

@@ -66,10 +66,11 @@ func (sf syncFailure) retryAt() time.Time {
 	return sf.at.Add(syncRetry << min(sf.n-1, 6))
 }
 
-// recentEntry is a path we just synced, until a scan sees it.
+// recentEntry is a path we just synced (or removed), until a scan sees it.
 type recentEntry struct {
-	e  syncdir.Entry
-	at time.Time
+	e       syncdir.Entry
+	at      time.Time
+	deleted bool
 }
 
 // startPulls starts getting what the linked peers have newer, up to syncParallel at a time per peer.
@@ -111,7 +112,7 @@ func (s *Server) startPulls(f *syncFolder) {
 				p.target = it.Local.DiskPath()
 			}
 			f.inflight[it.Path] = true
-			if it.Action == syncdir.MetadataOnly || it.Remote.Dir {
+			if it.Action != syncdir.Pull || it.Remote.Dir {
 				local = append(local, p)
 				continue
 			}
@@ -126,8 +127,22 @@ func (s *Server) startPulls(f *syncFolder) {
 		}
 	}
 	s.stateMu.Unlock()
+	// Removals last and deepest first (a directory after its content).
+	slices.SortStableFunc(local, func(a, b *syncPull) int {
+		ra, rb := a.item.Action == syncdir.DeletedThere, b.item.Action == syncdir.DeletedThere
+		switch {
+		case ra != rb && ra:
+			return 1
+		case ra != rb:
+			return -1
+		case ra:
+			return strings.Compare(b.item.Path, a.item.Path)
+		default:
+			return 0
+		}
+	})
 	for _, p := range local {
-		err := p.localOp()
+		err := p.localOp(s.SyncKeep)
 		s.stateMu.Lock()
 		s.syncDoneLocked(p, err)
 		s.stateMu.Unlock()
@@ -171,23 +186,34 @@ func (s *Server) preparePullLocked(p *syncPull, now time.Time) (uint32, error) {
 	return id, nil
 }
 
-// localOp creates a directory or changes a mode (no transfer needed).
-func (p *syncPull) localOp() error {
+// localOp creates a directory, changes a mode or removes what the peer deleted (no transfer needed).
+// Removed files are moved to OldDir (keeping at least that version, whatever keep is).
+func (p *syncPull) localOp(keep int) error {
 	r, err := os.OpenRoot(p.f.Path)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
 	target := filepath.FromSlash(p.target)
-	mode := syncdir.KeptMode(p.item.Remote.Mode)
-	if p.item.Action == syncdir.MetadataOnly {
+	switch p.item.Action {
+	case syncdir.DeletedThere:
 		if err = checkUnchanged(r, target, p.item.Local); err != nil {
 			return err
 		}
-	} else if err = r.MkdirAll(target, 0o755); err != nil {
-		return pathErr(err)
+		if p.item.Local.Dir {
+			return pathErr(r.Remove(target)) // fails if not empty (eg with files we don't sync).
+		}
+		return keepOld(r, target, p.item.Path, max(keep, 1), true)
+	case syncdir.MetadataOnly:
+		if err = checkUnchanged(r, target, p.item.Local); err != nil {
+			return err
+		}
+	default:
+		if err = r.MkdirAll(target, 0o755); err != nil {
+			return pathErr(err)
+		}
 	}
-	return pathErr(r.Chmod(target, mode))
+	return pathErr(r.Chmod(target, syncdir.KeptMode(p.item.Remote.Mode)))
 }
 
 // removeTemp removes the downloaded file (failed or aborted).
@@ -293,24 +319,25 @@ func (p *syncPull) replace(keep int) error {
 	_ = r.Chmod(p.tmp, syncdir.KeptMode(rem.Mode))
 	_ = r.Chtimes(p.tmp, rem.MTime, rem.MTime)
 	if p.item.Local != nil && keep > 0 {
-		if err = keepOld(r, target, p.item.Path, keep); err != nil {
+		if err = keepOld(r, target, p.item.Path, keep, false); err != nil {
 			return fmt.Errorf("can't keep the replaced version: %w", err)
 		}
 	}
 	return pathErr(r.Rename(p.tmp, target))
 }
 
-// keepOld keeps the file at target as a replaced version (OldDir/<key>~<time>), at most keep versions per file
-// (the oldest ones are removed).
-func keepOld(r *os.Root, target, key string, keep int) error {
+// keepOld keeps the file at target as a replaced (or removed, when move) version (OldDir/<key>~<time>), at
+// most keep versions per file (the oldest ones are removed). Not moved, it is kept as a hard link when possible
+// (so the replacement that follows is atomic).
+func keepOld(r *os.Root, target, key string, keep int, move bool) error {
 	dir := path.Join(syncdir.OldDir, path.Dir(key))
 	if err := r.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
 		return pathErr(err)
 	}
 	base := path.Base(key)
 	version := filepath.FromSlash(path.Join(dir, base+"~"+time.Now().UTC().Format(oldTimeLayout)))
-	if err := r.Link(target, version); err != nil { // eg not supported by the file system.
-		if err = r.Rename(target, version); err != nil {
+	if move || r.Link(target, version) != nil { // eg links not supported by the file system.
+		if err := r.Rename(target, version); err != nil {
 			return pathErr(err)
 		}
 	}
@@ -344,13 +371,24 @@ func (s *Server) syncDoneLocked(p *syncPull, err error) {
 	f, it := p.f, p.item
 	delete(f.inflight, it.Path)
 	now := time.Now()
-	if err != nil {
+	switch {
+	case err != nil:
 		prev, ok := f.failed[it.Path]
 		if !ok || prev.err != err.Error() { // not again on each retry.
 			log.Warnf("Sync %q: can't get %q from %s (will retry): %v", f.Name, it.Path, p.peer.Name, err)
 		}
 		f.failed[it.Path] = syncFailure{now, err.Error(), prev.n + 1}
-	} else {
+	case it.Action == syncdir.DeletedThere:
+		delete(f.failed, it.Path)
+		f.recent[it.Path] = recentEntry{at: now, deleted: true}
+		delete(p.sp.base, it.Path)
+		p.sp.dirty = true
+		where := "moved to " + syncdir.OldDir
+		if it.Local.Dir {
+			where = "removed"
+		}
+		log.Infof("Sync %q: %q deleted on %s, %s", f.Name, it.Path, p.peer.Name, where)
+	default:
 		delete(f.failed, it.Path)
 		e := *it.Remote
 		if it.Local != nil {
@@ -358,7 +396,7 @@ func (s *Server) syncDoneLocked(p *syncPull, err error) {
 			e.Dir, e.Size, e.MTime, e.Hash = it.Remote.Dir, it.Remote.Size, it.Remote.MTime, it.Remote.Hash
 		}
 		e.Mode = syncdir.KeptMode(it.Remote.Mode)
-		f.recent[it.Path] = recentEntry{e, now}
+		f.recent[it.Path] = recentEntry{e: e, at: now}
 		p.sp.base.Record(e)
 		p.sp.dirty = true
 		switch {

@@ -26,6 +26,12 @@ const (
 type Ignore struct {
 	custom bool // from an IgnoreFile, else the default: hidden files and directories.
 	rules  []rule
+	text   string // the IgnoreFile content.
+}
+
+// Text returns the content of the IgnoreFile the rules are from, and false for the default rules (no file).
+func (ig *Ignore) Text() (string, bool) {
+	return ig.text, ig.custom
 }
 
 // rule is a .tsyncignore line, a subset of the .gitignore syntax: `*`, `?` and `[...]` within a name, `**`
@@ -49,7 +55,7 @@ func DefaultIgnore() *Ignore {
 
 // ParseIgnore parses the content of an IgnoreFile.
 func ParseIgnore(content string) (*Ignore, error) {
-	ig := &Ignore{custom: true}
+	ig := &Ignore{custom: true, text: content}
 	for i, line := range strings.Split(content, "\n") {
 		line = norm.NFC.String(strings.TrimSpace(line))
 		if line == "" || line[0] == '#' {

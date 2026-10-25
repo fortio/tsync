@@ -1,6 +1,7 @@
 package syncdir_test
 
 import (
+	"fmt"
 	"io/fs"
 	"slices"
 	"testing"
@@ -108,7 +109,7 @@ func TestPlan(t *testing.T) {
 	})
 	b := syncdir.Base{}
 	b.Record(local["sub/x"])
-	got := syncdir.Plan(local, remote, b, nil)
+	got := syncdir.Plan(local, remote, b, nil, nil)
 	want := []struct {
 		path   string
 		action syncdir.Action
@@ -149,7 +150,7 @@ func TestSummary(t *testing.T) {
 	if sum.Pending() != 5 || sum.PullBytes != 1500 || len(sum.Conflicts) != 1 || sum.Conflicts[0] != "both" {
 		t.Errorf("unexpected summary %+v", sum)
 	}
-	if got := sum.Describe("bob"); got != "2 to get (1.5 Kb) · 1 for bob · 1 conflict · 1 deleted on bob" {
+	if got := sum.Describe("bob"); got != "2 to get (1.5 Kb) · 1 for bob · 1 conflict · 1 to remove" {
 		t.Errorf("unexpected description %q", got)
 	}
 	if !sum.Equal(syncdir.Summarize(items)) || sum.Equal(syncdir.Summarize(items[:1])) {
@@ -158,5 +159,66 @@ func TestSummary(t *testing.T) {
 	inSync := syncdir.Summarize(items[:1])
 	if inSync.Pending() != 0 || inSync.Describe("bob") != "in sync (1 item)" {
 		t.Errorf("unexpected in sync summary %+v %q", inSync, inSync.Describe("bob"))
+	}
+}
+
+func TestPlanRemoteIgnore(t *testing.T) {
+	local := map[string]syncdir.Entry{
+		"build/out": {Path: "build/out", Size: 1, Hash: syncdir.Hash{'o'}},
+		".env":      {Path: ".env", Size: 1, Hash: syncdir.Hash{'e'}},
+		"gone":      {Path: "gone", Size: 1, Hash: syncdir.Hash{'g'}},
+	}
+	b := syncdir.Base{}
+	for _, e := range local {
+		b.Record(e)
+	}
+	remoteIg, err := syncdir.ParseIgnore("build/\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ours, err := syncdir.ParseIgnore("") // we sync everything, hidden files too.
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The peer ignores build/ (and with its default rules, .env): not deletions there.
+	got := syncdir.Plan(local, nil, b, ours, remoteIg)
+	want := map[string]syncdir.Action{".env": syncdir.DeletedThere, "build/out": syncdir.InSync, "gone": syncdir.DeletedThere}
+	for _, it := range got {
+		if it.Action != want[it.Path] {
+			t.Errorf("%s: got %v, want %v", it.Path, it.Action, want[it.Path])
+		}
+	}
+	got = syncdir.Plan(local, nil, b, ours, nil) // default rules there: hidden files aren't synced.
+	if got[0].Path != ".env" || got[0].Action != syncdir.InSync {
+		t.Errorf("unexpected %+v", got[0])
+	}
+}
+
+func TestPlanMassDeletion(t *testing.T) {
+	local := make(map[string]syncdir.Entry)
+	remote := make(map[string]syncdir.Entry)
+	b := syncdir.Base{}
+	for i := range 30 {
+		p := fmt.Sprintf("f%02d", i)
+		e := syncdir.Entry{Path: p, Size: 1, Hash: syncdir.Hash{byte(i)}}
+		local[p] = e
+		b.Record(e)
+		if i >= 25 { // the peer only has 5 left: 25 deletions (over 20, and over half of 30).
+			remote[p] = e
+		}
+	}
+	sum := syncdir.Summarize(syncdir.Plan(local, remote, b, nil, nil))
+	if sum.Counts[syncdir.DeletionHeld] != 25 || sum.Counts[syncdir.DeletedThere] != 0 {
+		t.Errorf("mass deletion should be held: %+v", sum.Counts)
+	}
+	if d := sum.Describe("bob"); d != "25 deletions on bob held (too many at once)" {
+		t.Errorf("unexpected description %q", d)
+	}
+	for i := range 10 { // 15 deletions: applied.
+		p := fmt.Sprintf("f%02d", i+10)
+		remote[p] = local[p]
+	}
+	if sum = syncdir.Summarize(syncdir.Plan(local, remote, b, nil, nil)); sum.Counts[syncdir.DeletedThere] != 15 {
+		t.Errorf("deletions should be applied: %+v", sum.Counts)
 	}
 }

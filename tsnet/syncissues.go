@@ -18,9 +18,10 @@ import (
 	"fortio.org/tsync/syncdir"
 )
 
-// Conflicts (changed on both sides) and deletions (on one side only) aren't resolved automatically: they are
-// listed, with both sides' versions, in a text file per sync folder (outside of it, so it isn't synced), for
-// the user to go through. The file is rewritten when the list changes, removed when there's nothing left.
+// What isn't resolved automatically, conflicts (with -sync-conflicts list, or file vs directory) and held
+// deletions (too many at once), is listed with both sides' versions in a text file per sync folder (outside of
+// it, so it isn't synced), for the user to go through. The file is rewritten when the list changes, removed
+// when there's nothing left.
 
 // ConflictsFileName is the name of the file listing a sync folder's conflicts and deletions, in the folder's
 // directory of our storage (~/.tsync/sync/<label>/).
@@ -56,12 +57,8 @@ func issueLinesLocked(f *syncFolder) []string {
 	lines := make([]string, 0, len(issues))
 	for _, is := range issues {
 		kind := "conflict"
-		switch is.it.Action {
-		case syncdir.DeletedHere:
-			kind = "deleted here"
-		case syncdir.DeletedThere:
-			kind = "deleted on " + is.peer
-		default:
+		if is.it.Action == syncdir.DeletionHeld {
+			kind = "deletion held"
 		}
 		lines = append(lines, fmt.Sprintf("%s\t%s\there: %s\t%s: %s", kind, quoteIfNeeded(is.it.Path),
 			entryDesc(is.it.Local), is.peer, entryDesc(is.it.Remote)))
@@ -115,8 +112,9 @@ func (s *Server) writeConflicts(f *syncFolder) {
 			len(lines), f.Name, f.Path, time.Now().Format(time.DateTime))
 		_, _ = w.WriteString("# conflict: changed on both sides since the last sync, nothing was touched. Keep one " +
 			"version: delete or move away\n#   the other one (on its side) and the remaining one is synced back.\n" +
-			"# deleted: on one side only (deletions aren't propagated). Delete it on the other side too, or copy it " +
-			"back.\n# Columns (tab separated): kind, path, our version, the peer's.\n")
+			"# deletion held: deleted on the peer at the same time as too many others (its folder not mounted?), so " +
+			"not done\n#   here: delete it here too if that was intended, or restore it there.\n" +
+			"# Columns (tab separated): kind, path, our version, the peer's.\n")
 		for _, l := range lines {
 			_, _ = w.WriteString(l + "\n")
 		}
