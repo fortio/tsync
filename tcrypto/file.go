@@ -45,6 +45,14 @@ func InitStorage() (s *Storage, err error) {
 	return s, nil
 }
 
+// InitStorageDir is [InitStorage] with another directory than ~/.tsync (created, with its parents, if needed).
+func InitStorageDir(dir string) (*Storage, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil { // public readable as only PrivateIdentityFile is sensitive.
+		return nil, err
+	}
+	return &Storage{Dir: dir}, nil
+}
+
 func (s *Storage) SaveIdentity(id *Identity) error {
 	filePath := path.Join(s.Dir, PrivateIdentityFile)
 	b := []byte(id.PrivateKeyToString() + "\n")

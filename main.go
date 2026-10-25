@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"fortio.org/cli"
 	"fortio.org/log"
@@ -16,6 +17,7 @@ import (
 	"fortio.org/smap"
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
+	"fortio.org/tsync/syncdir"
 	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
@@ -24,8 +26,15 @@ func main() {
 	os.Exit(Main())
 }
 
-func LoadIdentity() (*tcrypto.Identity, *tcrypto.Storage, error) {
-	storage, err := tcrypto.InitStorage()
+// LoadIdentity loads (or creates) our identity, in dir ("" for ~/.tsync).
+func LoadIdentity(dir string) (*tcrypto.Identity, *tcrypto.Storage, error) {
+	var storage *tcrypto.Storage
+	var err error
+	if dir == "" {
+		storage, err = tcrypto.InitStorage()
+	} else {
+		storage, err = tcrypto.InitStorageDir(dir)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -88,6 +97,11 @@ func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData, linked bool) []
 	}
 }
 
+// HeaderLine is the peers table header.
+func HeaderLine() []string {
+	return []string{DarkGray("Id"), "🔗 " + DarkGray("Name"), DarkGray("Ip"), DarkGray("Port"), DarkGray("Hash")}
+}
+
 func OurLine(srv *tsnet.Server, ourIP, ourPort, humanID string) []string {
 	return []string{
 		"🏠",
@@ -146,12 +160,22 @@ func SplitList(s string) []string {
 // ParseRate parses a rate in bytes per second like "10MB/s", "500k" or "1024" (case insensitive,
 // K, M, G are powers of 1024 like elsewhere in tsync, the /s is optional). Empty is 0 (unlimited).
 func ParseRate(s string) (int64, error) {
+	v, err := ParseSize(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), "/s"))
+	if err != nil {
+		return 0, fmt.Errorf("can't parse %q as a rate (eg 10MB/s)", s)
+	}
+	return v, nil
+}
+
+// ParseSize parses a size in bytes like "1GB", "500k" or "1024" (case insensitive, K, M, G are powers of
+// 1024). Empty is 0.
+func ParseSize(s string) (int64, error) {
 	orig := s
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
 		return 0, nil
 	}
-	s = strings.TrimSuffix(strings.TrimSuffix(s, "/s"), "b")
+	s = strings.TrimSuffix(s, "b")
 	mult := int64(1)
 	if n := len(s); n > 0 {
 		if i := strings.IndexByte("kmg", s[n-1]); i >= 0 {
@@ -161,7 +185,7 @@ func ParseRate(s string) (int64, error) {
 	}
 	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("can't parse %q as a rate (eg 10MB/s)", orig)
+		return 0, fmt.Errorf("can't parse %q as a size (eg 1GB)", orig)
 	}
 	return max(1, int64(v*float64(mult))), nil
 }
@@ -169,6 +193,10 @@ func ParseRate(s string) (int64, error) {
 func logStartup(srv *tsnet.Server, cfg *tsnet.Config) {
 	log.Infof("Started tsync %s with name %q, received files are saved in %s, max send rate: %s",
 		cli.LongVersion, srv.Name, cfg.FileDir, RateString(cfg.MaxRate))
+	for _, f := range cfg.Sync {
+		log.Infof("Sync folder %q: %s (keeping %d replaced versions per file in %s)",
+			f.Name, f.Path, cfg.SyncKeep, syncdir.OldDir)
+	}
 }
 
 // RateString is the rate in human form (eg 50 Kb/s) or "unlimited" if there is no limit.
@@ -177,6 +205,62 @@ func RateString(rate int64) string {
 		return "unlimited"
 	}
 	return progressbar.HumanBytes(rate) + "/s"
+}
+
+// syncFlags are the sync flags values (see SyncFlags).
+type syncFlags struct {
+	folders *[]tsnet.SyncFolder
+	keep    *int
+	list    *bool
+	rescan  *time.Duration
+}
+
+// Apply sets the sync flags values in the config.
+func (sf syncFlags) Apply(cfg *tsnet.Config) {
+	cfg.Sync, cfg.SyncKeep, cfg.SyncConflictList, cfg.SyncRescan = *sf.folders, *sf.keep, *sf.list, *sf.rescan
+}
+
+// SyncFlags defines the sync flags: folders, replaced versions to keep, conflicts handling and rescan interval.
+func SyncFlags() syncFlags {
+	folders := SyncFlag("sync")
+	keep := flag.Int("sync-keep", 3, "How many replaced versions of each file sync keeps in the folder's "+
+		syncdir.OldDir+" (0 for none)")
+	rescan := flag.Duration("sync-rescan", tsnet.DefaultSyncRescan, "How often the sync folders are scanned for changes")
+	list := false
+	flag.Func("sync-conflicts", "Sync conflicts (changed on both sides, or changed on one and deleted on the "+
+		"other) `handling`: copy (the newest version keeps the name, the other one is kept as a visible "+
+		syncdir.ConflictCopyMarker+"... copy) or list (both left alone, listed)", func(s string) error {
+		switch s {
+		case "copy", "list":
+			list = s == "list"
+			return nil
+		default:
+			return fmt.Errorf("expected copy or list, got %q", s)
+		}
+	})
+	return syncFlags{folders, keep, &list, rescan}
+}
+
+// SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
+func SyncFlag(name string) *[]tsnet.SyncFolder {
+	var folders []tsnet.SyncFolder
+	flag.Func(name, "Sync the content of the directory `label=path` with the linked peers that use the same label"+
+		" (the directory can be anywhere and named anything on each machine). Repeatable. Files changed on both"+
+		" sides are left alone (conflicts), deletions aren't propagated",
+		func(s string) error {
+			f, err := ParseSyncFolder(s)
+			if err != nil {
+				return err
+			}
+			for _, o := range folders {
+				if o.Name == f.Name {
+					return fmt.Errorf("duplicate sync folder name %q", f.Name)
+				}
+			}
+			folders = append(folders, f)
+			return nil
+		})
+	return &folders
 }
 
 // RateFlag defines a rate flag (see ParseRate) and returns a pointer to its value in bytes per second.
@@ -224,6 +308,7 @@ type TopArea struct {
 	clips      *ClipPanel
 	files      *FilePanel
 	fixedLines [][]string // our line and header.
+	syncs      *SyncPanel
 	help       string
 	pending    map[tsnet.Peer]bool // peers with a pending connection request (for the bell).
 }
@@ -292,13 +377,21 @@ func (t *TopArea) Draw(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) int {
 	if len(fileLines) > 0 {
 		filesHeight = len(fileLines) + 2
 	}
-	boxes := t.clips.Layout(peers, avail-filesHeight)
+	syncLines := t.syncs.Lines()
+	if keep := max(0, avail-filesHeight-2); len(syncLines) > keep {
+		syncLines = syncLines[:keep]
+	}
+	syncHeight := 0
+	if len(syncLines) > 0 {
+		syncHeight = len(syncLines) + 2
+	}
+	boxes := t.clips.Layout(peers, avail-filesHeight-syncHeight)
 	boxesHeight := 0
 	for _, b := range boxes {
 		boxesHeight += b.height()
 	}
-	// table + clip boxes + files box + separator line.
-	top := t.logArea.SetTop(tableHeight + boxesHeight + filesHeight + 1)
+	// table + clip boxes + files box + sync box + separator line.
+	top := t.logArea.SetTop(tableHeight + boxesHeight + filesHeight + syncHeight + 1)
 	for y := range top {
 		ap.MoveCursor(0, y)
 		ap.ClearEndOfLine()
@@ -306,6 +399,7 @@ func (t *TopArea) Draw(peers []smap.KV[tsnet.Peer, tsnet.PeerData]) int {
 	tableWidth := ap.WriteTable(0, alignment, 1, lines, ansipixels.BorderOuterColumns)
 	t.clips.Draw(tableHeight, boxes)
 	t.files.Draw(tableHeight+boxesHeight, fileLines)
+	t.syncs.Draw(tableHeight+boxesHeight+filesHeight, syncLines)
 	if top > 0 {
 		ap.MoveCursor(0, top-1)
 		t.drawSeparator(peers)
@@ -408,6 +502,9 @@ func Main() int {
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	fMaxRate := RateFlag("max-rate")
+	fSync := SyncFlags()
+	fTsyncDir := flag.String("tsync-dir", "", "Directory with our identity, trusted peers and sync state (conflicts "+
+		"list...), default ~/.tsync (eg to run several tsync with different identities on one machine)")
 	cli.ArgsHelp = "[file...]"
 	cli.MaxArgs = -1
 	cli.Main()
@@ -428,7 +525,7 @@ func Main() int {
 		ap.MouseClickOff()
 		ap.Restore()
 	}()
-	id, storage, err := LoadIdentity()
+	id, storage, err := LoadIdentity(ExpandHome(*fTsyncDir))
 	if err != nil {
 		return log.FErrf("Failed to load or create identity: %v", err)
 	}
@@ -449,6 +546,7 @@ func Main() int {
 		FileDir:               DownloadDir(*fDir),
 		MaxRate:               *fMaxRate,
 	}
+	fSync.Apply(&cfg)
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
@@ -462,13 +560,6 @@ func Main() int {
 	ourIP := ourAddress.IP.String()
 	ourPort := strconv.Itoa(ourAddress.Port)
 	ourLine := OurLine(srv, ourIP, ourPort, id.HumanID())
-	headerLine := []string{
-		DarkGray("Id"),
-		"🔗 " + DarkGray("Name"),
-		DarkGray("Ip"),
-		DarkGray("Port"),
-		DarkGray("Hash"),
-	}
 	ap.OnResize = func() error {
 		prev = ^uint64(0) // force repaint
 		return nil
@@ -499,7 +590,8 @@ func Main() int {
 	paste := &PasteCollector{MaxSize: tsnet.MaxClipSize + 1}
 	top := &TopArea{
 		ap: ap, srv: srv, logArea: logArea, clips: clips, files: files,
-		fixedLines: [][]string{ourLine, headerLine},
+		fixedLines: [][]string{ourLine, HeaderLine()},
+		syncs:      NewSyncPanel(ap, srv),
 		help:       " paste/drop file: send · click box or c: copy · d: download · click or 1-9: connect/accept · q: quit ",
 	}
 	err = ap.FPSTicks(func() bool {

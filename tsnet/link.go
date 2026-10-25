@@ -181,6 +181,7 @@ func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string, fall
 	}
 	s.sendLastClip(peer, l, conn)
 	s.sendOffers(peer, l, conn)
+	s.sendSyncFolders(peer, l, conn)
 	s.readLoop(ctx, peer, l, conn)
 }
 
@@ -271,6 +272,7 @@ func (s *Server) handleIncoming(ctx context.Context, conn net.Conn) {
 			_ = conn.SetReadDeadline(time.Time{})
 			s.sendLastClip(peer, l, conn)
 			s.sendOffers(peer, l, conn)
+			s.sendSyncFolders(peer, l, conn)
 			s.readLoop(ctx, peer, l, conn)
 			return
 		}
@@ -347,7 +349,7 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			when := time.Unix(0, int64(binary.BigEndian.Uint64(plain[1:9]))) //nolint:gosec // any value is fine.
 			s.receivedClip(peer, l, string(plain[9:]), when)
 		default:
-			if !s.handleFileFrame(peer, l, conn, plain) {
+			if !s.handleFileFrame(peer, l, conn, plain) && !s.handleSyncFrame(peer, l, conn, plain) {
 				log.Warnf("Ignoring unknown frame type %q from %s", plain[0], peer.Name)
 			}
 		}

@@ -9,6 +9,7 @@ require (
 	fortio.org/smap v1.1.0
 	fortio.org/terminal v0.66.0
 	golang.org/x/net v0.61.0
+	golang.org/x/text v0.43.0
 )
 
 require (

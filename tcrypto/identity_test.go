@@ -2,6 +2,7 @@ package tcrypto_test
 
 import (
 	"bytes"
+	"path/filepath"
 	"testing"
 
 	"fortio.org/tsync/tcrypto"
@@ -80,4 +81,19 @@ func TestPrivToPublic(t *testing.T) {
 	}
 	AssertBytesEqual(t, "Alice private key", alice.PrivateKey, alice2.PrivateKey)
 	AssertBytesEqual(t, "Alice public key", alice.PublicKey, alice2.PublicKey)
+}
+
+func TestInitStorageDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a", "b")
+	s, err := tcrypto.InitStorageDir(dir)
+	if err != nil || s.Dir != dir {
+		t.Fatalf("unexpected %+v %v", s, err)
+	}
+	id, _ := tcrypto.NewIdentity()
+	if err = s.SaveIdentity(id); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, lerr := s.LoadIdentity(); lerr != nil || loaded.PublicKeyToString() != id.PublicKeyToString() {
+		t.Errorf("unexpected identity %v %v", loaded, lerr)
+	}
 }
