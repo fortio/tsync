@@ -27,7 +27,8 @@ Each sync directory is scanned every `-sync-rescan` (10s by default), and right 
 synced from a peer (so the other peers learn about them quickly). Unless watched:
 
 - With `-sync-watch` (default on Linux and Windows) the directories are watched for changes (file system
-  notifications: inotify on Linux, ReadDirectoryChangesW on Windows, kqueue on macOS, which needs a file
+  notifications: inotify on Linux, ReadDirectoryChangesW on Windows (one recursive watch: watching each
+  directory would prevent renaming or removing their parent directories), kqueue on macOS, which needs a file
   descriptor per file, so it's off by default there). The point is not to walk hundreds of directories every
   10s: only the directories notified are read again (their direct content; a new sub directory is scanned
   whole, a removed one removed with all it had), once there was no notification for 2s (still being

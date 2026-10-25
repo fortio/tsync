@@ -30,7 +30,7 @@ const (
 
 // syncWatch is the watching state of a folder, only used by its goroutine (runSync).
 type syncWatch struct {
-	w       *fsnotify.Watcher
+	w       *watcher
 	root    string
 	watched map[string]bool // directories watched (keys, "" for the root).
 	dirty   map[string]bool // directories to scan again.
@@ -42,7 +42,7 @@ type syncWatch struct {
 
 // startWatch watches the folder's directories (after a full scan), returns nil if it can't (polling then).
 func (s *Server) startWatch(f *syncFolder, idx syncdir.Index) *syncWatch {
-	w, err := fsnotify.NewWatcher()
+	w, err := newWatcher()
 	if err != nil {
 		log.Warnf("Sync %q: can't watch for changes (%v), scanning every %v", f.Name, err, s.syncInterval())
 		return nil
