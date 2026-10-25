@@ -101,8 +101,28 @@ func parseBaseLine(line string) (string, BaseEntry, error) {
 	return key, e, nil
 }
 
-// Save writes the base to file (atomically: a temporary file renamed once complete), creating its directory.
+// Save writes the base to file (atomically, see [WriteFileAtomic]).
 func (b Base) Save(file string) error {
+	return WriteFileAtomic(file, func(w *bufio.Writer) {
+		_, _ = w.WriteString(baseHeader + "\n")
+		for _, key := range slices.Sorted(maps.Keys(b)) {
+			e := b[key]
+			kind, hash := "f", e.Hash.String()
+			if e.Dir {
+				kind, hash = "d", "-"
+			}
+			mode := strconv.FormatUint(uint64(e.Mode.Perm()), 8)
+			if e.Mode == ModeUnknown {
+				mode = "?"
+			}
+			_, _ = fmt.Fprintf(w, "%s %s %s %s\n", kind, mode, hash, strconv.Quote(key))
+		}
+	})
+}
+
+// WriteFileAtomic writes file with what write writes: to a temporary file in the same directory, renamed to
+// file once complete (so it is never seen partially written), creating the directory if needed.
+func WriteFileAtomic(file string, write func(w *bufio.Writer)) error {
 	dir := filepath.Dir(file)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -113,19 +133,7 @@ func (b Base) Save(file string) error {
 	}
 	defer os.Remove(tmp.Name()) // no-op once renamed.
 	w := bufio.NewWriter(tmp)
-	_, _ = w.WriteString(baseHeader + "\n")
-	for _, key := range slices.Sorted(maps.Keys(b)) {
-		e := b[key]
-		kind, hash := "f", e.Hash.String()
-		if e.Dir {
-			kind, hash = "d", "-"
-		}
-		mode := strconv.FormatUint(uint64(e.Mode.Perm()), 8)
-		if e.Mode == ModeUnknown {
-			mode = "?"
-		}
-		_, _ = fmt.Fprintf(w, "%s %s %s %s\n", kind, mode, hash, strconv.Quote(key))
-	}
+	write(w)
 	err = w.Flush()
 	if err == nil {
 		err = tmp.Sync()

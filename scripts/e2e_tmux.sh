@@ -64,8 +64,10 @@ wait_for B "wants to connect: check the hash, then click or press 1 to accept"
 $T send-keys -t B 1
 wait_for A "🔗 e2eB"
 wait_for B "🔗 e2eA"
-wait_for A "📁 e2e ↔ e2eB · 1 conflict" 30
-wait_for B "📁 e2e ↔ e2eA · 1 conflict" 30
+wait_for A "📁 e2e ↔ e2eB · 1 conflict (list in ~/.tsync/sync/e2e/conflicts.txt)" 30
+wait_for B "📁 e2e ↔ e2eA · 1 conflict (list in ~/.tsync/sync/e2e/conflicts.txt)" 30
+grep -q "^conflict	both.txt	here: 2 b, .*	e2eB: 2 b, " "$OUT/hA/.tsync/sync/e2e/conflicts.txt" || fail "conflict not listed"
+
 [ "$(cat "$OUT/syncA/onlyB.txt")" = theirs ] && [ "$(cat "$OUT/syncB/onlyA.txt")" = mine ] || fail "sync didn't get the files"
 [ "$(cat "$OUT/syncA/both.txt")" = A ] && [ "$(cat "$OUT/syncB/both.txt")" = B ] || fail "sync conflict shouldn't be touched"
 echo "ok: sync got the new files both ways and left the conflict alone"

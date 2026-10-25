@@ -3,6 +3,7 @@ package tsnet
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -145,5 +146,27 @@ func TestSyncRetryBackoff(t *testing.T) {
 		if got := (syncFailure{at: at, n: tc.n}).retryAt().Sub(at); got != tc.want {
 			t.Errorf("%d failures: retry after %v, want %v", tc.n, got, tc.want)
 		}
+	}
+}
+
+func TestIssueLines(t *testing.T) {
+	when := time.Date(2026, 1, 2, 3, 4, 5, 0, time.Local)
+	file := &syncdir.Entry{Size: 2048, MTime: when}
+	dir := &syncdir.Entry{Dir: true}
+	f := &syncFolder{peers: map[Peer]*syncPeer{
+		{Name: "zed"}: {issues: []syncdir.Item{{Path: "a", Action: syncdir.Conflict, Local: file, Remote: dir}}},
+		{Name: "bob"}: {issues: []syncdir.Item{
+			{Path: "b\tc", Action: syncdir.DeletedHere, Remote: file},
+			{Path: "a", Action: syncdir.DeletedThere, Local: file},
+		}},
+	}}
+	got := issueLinesLocked(f)
+	want := []string{
+		"deleted on bob\ta\there: 2 Kb, 2026-01-02 03:04:05\tbob: absent",
+		"conflict\ta\there: 2 Kb, 2026-01-02 03:04:05\tzed: directory",
+		"deleted here\t\"b\\tc\"\there: absent\tbob: 2 Kb, 2026-01-02 03:04:05",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got\n%q\nwant\n%q", got, want)
 	}
 }

@@ -50,6 +50,11 @@ func TestSyncLine(t *testing.T) {
 		st.Getting, st.CurFile, st.CurDone, st.CurSize = 1, "sub/f", 256, 1024
 		return st
 	}
+	listed := func(sum syncdir.Summary) tsnet.SyncStatus {
+		st := ready(sum)
+		st.ConflictsFile = "/x/conflicts.txt"
+		return st
+	}
 	for _, tc := range []struct {
 		st    tsnet.SyncStatus
 		text  string
@@ -63,6 +68,7 @@ func TestSyncLine(t *testing.T) {
 		{ready(conflict), "📁 d ↔ bob · 1 conflict", tcolor.BrightYellow},
 		{ready(pull), "📁 d ↔ bob · 2 to get (2 Kb)", tcolor.BrightCyan},
 		{getting(pull), "📁 d ↔ bob · ⬇ sub/f 25% · 2 to get (2 Kb)", tcolor.BrightCyan},
+		{listed(conflict), "📁 d ↔ bob · 1 conflict (list in /x/conflicts.txt)", tcolor.BrightYellow},
 	} {
 		l := SyncLine(tc.st)
 		if l.text != tc.text || l.color != tc.color {

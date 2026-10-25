@@ -53,10 +53,18 @@ func SyncLine(st tsnet.SyncStatus) syncLine {
 	case st.Summary.Pending() == 0:
 		return syncLine{what + " · " + st.Summary.Describe(peer), tcolor.BrightGreen}
 	case len(st.Summary.Conflicts) > 0:
-		return syncLine{what + " · " + st.Summary.Describe(peer), tcolor.BrightYellow}
+		return syncLine{what + " · " + st.Summary.Describe(peer) + listedIn(st), tcolor.BrightYellow}
 	default:
-		return syncLine{what + " · " + st.Summary.Describe(peer), tcolor.BrightCyan}
+		return syncLine{what + " · " + st.Summary.Describe(peer) + listedIn(st), tcolor.BrightCyan}
 	}
+}
+
+// listedIn is where the conflicts and deletions are listed (if any).
+func listedIn(st tsnet.SyncStatus) string {
+	if st.ConflictsFile == "" {
+		return ""
+	}
+	return " (list in " + ShortPath(st.ConflictsFile) + ")"
 }
 
 // Lines returns the lines to show (none without sync folders).

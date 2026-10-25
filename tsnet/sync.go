@@ -77,6 +77,8 @@ type syncFolder struct {
 	recent   map[string]recentEntry // paths we synced, until a scan sees them.
 	rescan   bool                   // scan again soon (we got files, the peers should know).
 	toSave   []savedBase            // bases of peers no longer linked, to save.
+	// issueLines are the conflicts and deletions as last written (see writeConflicts).
+	issueLines []string
 }
 
 type savedBase struct {
@@ -104,6 +106,7 @@ type syncPeer struct {
 	pulls    map[uint32]*Transfer // downloads in progress.
 	baseFile string               // where base is saved ("" without storage).
 	dirty    bool                 // base changed since saved.
+	issues   []syncdir.Item       // conflicts and deletions, from the last plan.
 }
 
 // SyncStatus is the state of a sync folder with a peer (zero Peer if no linked peer has it).
@@ -120,6 +123,8 @@ type SyncStatus struct {
 	Getting          int
 	CurFile          string
 	CurDone, CurSize int64
+	// ConflictsFile lists the conflicts and deletions, when there are some (and we have storage).
+	ConflictsFile string
 }
 
 // SyncStatus returns the state of our sync folders with each linked peer that has them (sorted).
@@ -139,7 +144,10 @@ func (s *Server) SyncStatus() []SyncStatus {
 		for _, peer := range slices.SortedFunc(maps.Keys(f.peers), func(a, b Peer) int { return strings.Compare(a.Name, b.Name) }) {
 			sp := f.peers[peer]
 			st.Peer, st.Ready, st.Summary, st.Getting = peer, sp.ready, sp.summary, len(sp.pulls)
-			st.CurFile, st.CurDone, st.CurSize = "", 0, 0
+			st.CurFile, st.CurDone, st.CurSize, st.ConflictsFile = "", 0, 0, ""
+			if len(sp.issues) > 0 {
+				st.ConflictsFile = s.conflictsFile(f)
+			}
 			if len(sp.pulls) > 0 {
 				t := sp.pulls[slices.Min(slices.Collect(maps.Keys(sp.pulls)))]
 				st.CurFile, st.CurDone, st.CurSize = t.Source, t.Done, t.Size
@@ -191,6 +199,7 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		}
 		s.startPulls(f)
 		s.saveBases(f)
+		s.writeConflicts(f)
 		s.stateMu.Lock()
 		retry := interval
 		for _, fail := range f.failed { // eg a file still being written there: don't wait for the next scan.
@@ -523,12 +532,18 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 		sp.dirty = true
 	}
 	sp.todo = sp.todo[:0]
+	hadIssues := len(sp.issues) > 0
+	sp.issues = sp.issues[:0]
 	for _, it := range items {
-		if it.Action == syncdir.Pull || it.Action == syncdir.MetadataOnly {
+		switch it.Action {
+		case syncdir.Pull, syncdir.MetadataOnly:
 			sp.todo = append(sp.todo, it)
+		case syncdir.Conflict, syncdir.DeletedHere, syncdir.DeletedThere:
+			sp.issues = append(sp.issues, it)
+		default:
 		}
 	}
-	if len(sp.todo) > 0 || sp.dirty {
+	if len(sp.todo) > 0 || sp.dirty || hadIssues || len(sp.issues) > 0 { // things to get, base to save, list to update.
 		f.kickLocked()
 	}
 	sum := syncdir.Summarize(items)
@@ -551,9 +566,9 @@ func (s *Server) syncLinkClosedLocked(l *link) {
 			}
 			if sp.dirty && sp.baseFile != "" {
 				f.toSave = append(f.toSave, savedBase{sp.baseFile, maps.Clone(sp.base)})
-				f.kickLocked()
 			}
 			delete(f.peers, peer)
+			f.kickLocked() // to save the base, update the conflicts list.
 		}
 	}
 }

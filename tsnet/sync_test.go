@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,14 @@ func TestSync(t *testing.T) {
 	if stA.Summary.Conflicts[0] != "both.txt" {
 		t.Errorf("unexpected conflicts %v", stA.Summary.Conflicts)
 	}
+	conflictsB := filepath.Join(storeB.Dir, "sync", "docs", tsnet.ConflictsFileName)
+	if stA.ConflictsFile != filepath.Join(storeA.Dir, "sync", "docs", tsnet.ConflictsFileName) {
+		t.Errorf("unexpected conflicts file %q", stA.ConflictsFile)
+	}
+	waitFor(ctx, t, "conflict listed", func() bool {
+		return strings.Contains(content(t, conflictsB), "\nconflict\tboth.txt\there: 6 b, ") &&
+			strings.Contains(content(t, conflictsB), "\tHostA: 6 b, ")
+	})
 	for p, want := range map[string]string{
 		filepath.Join(dirA, "onlyB.txt"): "bb", filepath.Join(dirB, "onlyA.txt"): "a",
 		filepath.Join(dirB, "sub", "deep", "x.txt"): "deep", filepath.Join(dirA, "both.txt"): "from A",
@@ -123,6 +132,10 @@ func TestSync(t *testing.T) {
 	syncStatus(ctx, t, serverB, "docs", "conflict resolved", func(st tsnet.SyncStatus) bool {
 		return content(t, filepath.Join(dirB, "both.txt")) == "from A" && onlyConflicts(0, 0)(st)
 	})
+	waitFor(ctx, t, "conflicts list removed", func() bool {
+		_, err := os.Stat(conflictsB)
+		return os.IsNotExist(err)
+	})
 	// A deletion isn't propagated, only shown.
 	if err := os.Remove(filepath.Join(dirA, "same.txt")); err != nil {
 		t.Fatal(err)
@@ -133,8 +146,16 @@ func TestSync(t *testing.T) {
 	syncStatus(ctx, t, serverA, "docs", "deleted here", func(st tsnet.SyncStatus) bool {
 		return st.Summary.Counts[syncdir.DeletedHere] == 1 && onlyConflicts(0, 1)(st)
 	})
+	waitFor(ctx, t, "deletions listed", func() bool {
+		return strings.Contains(content(t, conflictsB), "\ndeleted on HostA\tsame.txt\there: 4 b, ") &&
+			strings.Contains(content(t, stA.ConflictsFile), "\ndeleted here\tsame.txt\there: absent\tHostB: 4 b, ")
+	})
+	time.Sleep(500 * time.Millisecond) // a few rescans (and replans) later:
 	if content(t, filepath.Join(dirB, "same.txt")) != "same" {
 		t.Errorf("deletion shouldn't be propagated")
+	}
+	if _, err := os.Stat(filepath.Join(dirA, "same.txt")); err == nil {
+		t.Errorf("a deleted file shouldn't come back")
 	}
 	// A folder only we have: no peer, and B never hears about its content.
 	soloSt := syncStatus(ctx, t, serverA, "solo", "scanned", func(st tsnet.SyncStatus) bool { return st.Scanned })
