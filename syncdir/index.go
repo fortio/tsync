@@ -238,6 +238,10 @@ func (idx Index) entry(key string) *Entry {
 // or if it can't be read.
 func scanEntry(r *os.Root, p string, d fs.DirEntry, prev *Entry) (Entry, bool) {
 	fi, err := d.Info() // not following symlinks.
+	// On Windows the listing's time of a new directory can be stale.
+	if err == nil && fi.IsDir() {
+		fi, err = r.Lstat(filepath.FromSlash(p))
+	}
 	if err != nil || (!fi.IsDir() && !fi.Mode().IsRegular()) {
 		return Entry{}, false
 	}
