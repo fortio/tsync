@@ -172,7 +172,7 @@ Using the same label on both sides is the consent: labels are announced to the l
 README) peers, the indexes and contents only to the peers that use that label too.
 
 A headless instance (`-headless`, no UI) does the same, but only links with peers it already trusts, and
-only handles the sync frames (`F`, `I`, `Q`) and the file data ones they use (`D`, `E`, `X`, `R`), and ignores all the others (clipboard, file and directory offers...): sync is all it does.
+only handles the sync frames (`F`, `I`, `Q`) and the file data ones they use (`D`, `E`, `X`, `R`, `A`), and ignores all the others (clipboard, file and directory offers...): sync is all it does.
 
 ## On the wire
 

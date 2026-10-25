@@ -2,10 +2,15 @@ package tsnet_test
 
 import (
 	"context"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"fortio.org/log"
 	"fortio.org/tsync/tcrypto"
 	"fortio.org/tsync/tsnet"
 )
@@ -41,10 +46,43 @@ func headlessPair(ctx context.Context, t *testing.T, trusted bool, dirA, dirB st
 	return mk("HostA", idA, storeA, dirA, false), mk("HostB", idB, storeB, dirB, true)
 }
 
+// syncBuffer is a log output safe for concurrent use.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.b.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.b.String()
+}
+
+// captureLogs collects the logs (also still sent to stderr) as plain text, until the end of the test.
+func captureLogs(t *testing.T) *syncBuffer {
+	t.Helper()
+	sb := &syncBuffer{}
+	saved := log.Config
+	log.Config.JSON, log.Config.NoTimestamp, log.Config.ConsoleColor = false, true, false
+	log.SetOutput(io.MultiWriter(os.Stderr, sb))
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.Config = saved
+	})
+	return sb
+}
+
 func TestHeadlessTrusted(t *testing.T) {
 	NoMCastOnMacInCI(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	logs := captureLogs(t)
 	dirA, dirB := t.TempDir(), t.TempDir()
 	writeTree(t, dirA, map[string]string{"a.txt": "from A"})
 	writeTree(t, dirB, map[string]string{"b.txt": "from B"})
@@ -75,8 +113,12 @@ func TestHeadlessTrusted(t *testing.T) {
 			t.Errorf("headless kept a clipboard: %q", data.Clip)
 		}
 	}
-	if n := len(srvB.Transfers()); n != 0 {
-		t.Errorf("headless recorded %d transfers", n)
+	// What A pulled from headless B completes: A's saved confirmation is handled (that's what logs "sent").
+	waitFor(ctx, t, "B logged sending b.txt", func() bool { return strings.Contains(logs.String(), `sent "b.txt"`) })
+	for _, tr := range srvB.Transfers() {
+		if tr.State == tsnet.TransferOffered {
+			t.Errorf("headless recorded an offer: %+v", tr)
+		}
 	}
 }
 

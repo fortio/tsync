@@ -361,11 +361,12 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 }
 
 // allowedHeadless is true for the only frame types a headless server handles: the sync ones, and the file data
-// ones its downloads (and the peers' downloads from it) use. Anything else (clipboard, file offers... and whatever
-// gets added later) is ignored.
+// ones its downloads (and the peers' downloads from it, incl. their saved confirmation) use. Anything else
+// (clipboard, file offers... and whatever gets added later) is ignored.
 func allowedHeadless(ftype byte) bool {
 	switch ftype {
-	case FrameSyncFolders, FrameSyncIndex, FrameSyncGet, FrameFileData, FrameFileEnd, FrameFileAbort, FrameFileRefuse:
+	case FrameSyncFolders, FrameSyncIndex, FrameSyncGet, FrameFileData, FrameFileEnd, FrameFileAbort, FrameFileRefuse,
+		FrameFileSaved:
 		return true
 	}
 	return false
