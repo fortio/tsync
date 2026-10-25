@@ -27,7 +27,7 @@ import (
 // syncIDBit set so it can't collide with the peer's file offer ids); the peer streams it with the file data
 // frames if that's still its current version. Before the downloaded file replaces ours, ours is checked to
 // still be the one the decision was made on (else nothing is replaced: it changed meanwhile), and is kept in
-// TrashDir (hard link when possible, so the replacement is atomic).
+// OldDir (hard link when possible, so the replacement is atomic).
 
 const (
 	// FrameSyncGet requests a file of a sync folder: id (4) + name length (1) + name + sha256 (32) + path.
@@ -40,8 +40,8 @@ const (
 	syncRetry = 3 * time.Second
 	// syncStable is how long a file must be unchanged before we serve it (it may still be being written).
 	syncStable = 2 * time.Second
-	// trashTimeLayout is the suffix (after ~) of the versions in the trash.
-	trashTimeLayout = "20060102-150405.000"
+	// oldTimeLayout is the suffix (after ~) of the replaced versions in OldDir.
+	oldTimeLayout = "20060102-150405.000"
 )
 
 // syncPull is getting (or creating, for directories, or changing the mode of) a path from a peer.
@@ -278,7 +278,7 @@ func (s *Server) pullResult(l *link, conn net.Conn, t *Transfer, err error) {
 }
 
 // replace replaces (or creates) the target with the downloaded file, if ours didn't change meanwhile;
-// keeps the replaced version in the trash (keep versions per file, none if 0).
+// keeps the replaced version in OldDir (keep versions per file, none if 0).
 func (p *syncPull) replace(keep int) error {
 	r, err := os.OpenRoot(p.f.Path)
 	if err != nil {
@@ -293,27 +293,28 @@ func (p *syncPull) replace(keep int) error {
 	_ = r.Chmod(p.tmp, syncdir.KeptMode(rem.Mode))
 	_ = r.Chtimes(p.tmp, rem.MTime, rem.MTime)
 	if p.item.Local != nil && keep > 0 {
-		if err = toTrash(r, target, p.item.Path, keep); err != nil {
+		if err = keepOld(r, target, p.item.Path, keep); err != nil {
 			return fmt.Errorf("can't keep the replaced version: %w", err)
 		}
 	}
 	return pathErr(r.Rename(p.tmp, target))
 }
 
-// toTrash keeps the file at target in the trash (TrashDir/<key>~<time>), at most keep versions per file.
-func toTrash(r *os.Root, target, key string, keep int) error {
-	dir := path.Join(syncdir.TrashDir, path.Dir(key))
+// keepOld keeps the file at target as a replaced version (OldDir/<key>~<time>), at most keep versions per file
+// (the oldest ones are removed).
+func keepOld(r *os.Root, target, key string, keep int) error {
+	dir := path.Join(syncdir.OldDir, path.Dir(key))
 	if err := r.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
 		return pathErr(err)
 	}
 	base := path.Base(key)
-	version := filepath.FromSlash(path.Join(dir, base+"~"+time.Now().UTC().Format(trashTimeLayout)))
+	version := filepath.FromSlash(path.Join(dir, base+"~"+time.Now().UTC().Format(oldTimeLayout)))
 	if err := r.Link(target, version); err != nil { // eg not supported by the file system.
 		if err = r.Rename(target, version); err != nil {
 			return pathErr(err)
 		}
 	}
-	versions := trashVersions(r, dir, base)
+	versions := oldVersions(r, dir, base)
 	for len(versions) > keep {
 		_ = r.Remove(filepath.FromSlash(path.Join(dir, versions[0])))
 		versions = versions[1:]
@@ -321,8 +322,8 @@ func toTrash(r *os.Root, target, key string, keep int) error {
 	return nil
 }
 
-// trashVersions returns the names of the versions of a file in the trash directory dir, oldest first.
-func trashVersions(r *os.Root, dir, base string) []string {
+// oldVersions returns the names of the replaced versions of a file in dir (in OldDir), oldest first.
+func oldVersions(r *os.Root, dir, base string) []string {
 	entries, err := fs.ReadDir(r.FS(), dir)
 	if err != nil {
 		return nil
@@ -330,60 +331,12 @@ func trashVersions(r *os.Root, dir, base string) []string {
 	var res []string
 	for _, e := range entries {
 		name := e.Name()
-		if !e.IsDir() && len(name) == len(base)+1+len(trashTimeLayout) && strings.HasPrefix(name, base+"~") {
+		if !e.IsDir() && len(name) == len(base)+1+len(oldTimeLayout) && strings.HasPrefix(name, base+"~") {
 			res = append(res, name)
 		}
 	}
 	slices.Sort(res)
 	return res
-}
-
-// pruneTrash removes the oldest versions in the trash of root, while it is over maxSize bytes, except the
-// latest version of each file.
-func pruneTrash(root string, maxSize int64) {
-	r, err := os.OpenRoot(root)
-	if err != nil {
-		return
-	}
-	defer r.Close()
-	type version struct {
-		p    string // slash separated, relative to the root.
-		when string
-		size int64
-	}
-	var all []version
-	latest := make(map[string]string) // file (without the suffix) -> its latest version.
-	var total int64
-	_ = fs.WalkDir(r.FS(), syncdir.TrashDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || len(d.Name()) <= len(trashTimeLayout)+1 {
-			return nil //nolint:nilerr // best effort.
-		}
-		fi, ierr := d.Info()
-		if ierr != nil {
-			return nil //nolint:nilerr // best effort.
-		}
-		file, when := p[:len(p)-len(trashTimeLayout)-1], p[len(p)-len(trashTimeLayout):]
-		all = append(all, version{p, when, fi.Size()})
-		total += fi.Size()
-		latest[file] = max(latest[file], p)
-		return nil
-	})
-	if total <= maxSize {
-		return
-	}
-	slices.SortFunc(all, func(a, b version) int { return strings.Compare(a.when, b.when) })
-	for _, v := range all {
-		if total <= maxSize {
-			break
-		}
-		if latest[v.p[:len(v.p)-len(trashTimeLayout)-1]] == v.p {
-			continue
-		}
-		if r.Remove(filepath.FromSlash(v.p)) == nil {
-			total -= v.size
-		}
-	}
-	log.LogVf("Sync trash of %s pruned to %d bytes", root, total)
 }
 
 // syncDoneLocked records the result of getting a path from a peer.
@@ -408,7 +361,6 @@ func (s *Server) syncDoneLocked(p *syncPull, err error) {
 		f.recent[it.Path] = recentEntry{e, now}
 		p.sp.base.Record(e)
 		p.sp.dirty = true
-		f.trashDirty = f.trashDirty || it.Local != nil
 		switch {
 		case it.Action == syncdir.MetadataOnly:
 			log.Infof("Sync %q: mode of %q set to %v as on %s", f.Name, it.Path, e.Mode, p.peer.Name)

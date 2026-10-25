@@ -70,36 +70,35 @@ func TestCheckUnchanged(t *testing.T) {
 	}
 }
 
-func TestTrash(t *testing.T) {
+func TestKeepOld(t *testing.T) {
 	dir := t.TempDir()
 	r := openRoot(t, dir)
 	target := filepath.Join("sub", "f.txt")
-	for _, c := range []string{"v1", "v2", "v3"} {
-		writeAt(t, filepath.Join(dir, target), c, time.Time{})
-		if err := toTrash(r, target, "sub/f.txt", 2); err != nil {
+	writeAt(t, filepath.Join(dir, target), "v1", time.Time{})
+	// Replaced like sync does: the old version kept (hard link when possible), then the new one renamed over it.
+	for _, c := range []string{"v2", "v3", "v4"} {
+		if err := keepOld(r, target, "sub/f.txt", 2); err != nil {
+			t.Fatal(err)
+		}
+		tmp := filepath.Join(dir, "sub", ".new")
+		writeAt(t, tmp, c, time.Time{})
+		if err := os.Rename(tmp, filepath.Join(dir, target)); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(2 * time.Millisecond) // distinct version names.
 	}
-	trashDir := filepath.Join(syncdir.TrashDir, "sub")
-	versions := trashVersions(r, filepath.ToSlash(trashDir), "f.txt")
+	if b, _ := os.ReadFile(filepath.Join(dir, target)); string(b) != "v4" {
+		t.Errorf("current version should be v4, got %q", b)
+	}
+	oldDir := filepath.Join(syncdir.OldDir, "sub")
+	versions := oldVersions(r, filepath.ToSlash(oldDir), "f.txt")
 	if len(versions) != 2 {
 		t.Fatalf("expected 2 versions, got %v", versions)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, trashDir, versions[1])); string(b) != "v3" {
-		t.Errorf("latest version should be v3, got %q", b)
-	}
-	// Over the size limit: the oldest versions go, but not the latest of each file.
-	writeAt(t, filepath.Join(dir, "g"), strings.Repeat("g", 100), time.Time{})
-	if err := toTrash(r, "g", "g", 5); err != nil {
-		t.Fatal(err)
-	}
-	pruneTrash(dir, 10)
-	if v := trashVersions(r, filepath.ToSlash(trashDir), "f.txt"); len(v) != 1 || v[0] != versions[1] {
-		t.Errorf("expected only the latest f.txt version, got %v", v)
-	}
-	if v := trashVersions(r, syncdir.TrashDir, "g"); len(v) != 1 {
-		t.Errorf("the only version of g should stay, got %v", v)
+	for i, want := range []string{"v2", "v3"} { // v1, the oldest, was removed.
+		if b, _ := os.ReadFile(filepath.Join(dir, oldDir, versions[i])); string(b) != want {
+			t.Errorf("version %d: got %q, want %q", i, b, want)
+		}
 	}
 }
 

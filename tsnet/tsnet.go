@@ -73,11 +73,8 @@ type Config struct {
 	Sync []SyncFolder
 	// SyncRescan is how often the sync folders are scanned (DefaultSyncRescan if 0).
 	SyncRescan time.Duration
-	// SyncKeep is how many replaced versions of each file are kept in the sync folders' trash (0 for none).
+	// SyncKeep is how many replaced versions of each file are kept in the sync folders' OldDir (0 for none).
 	SyncKeep int
-	// SyncTrashMax is the size the trash of a sync folder is pruned to (0 for no limit), the latest version of
-	// each file is always kept.
-	SyncTrashMax int64
 }
 
 type ConnectionStatus int

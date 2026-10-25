@@ -186,8 +186,8 @@ func logStartup(srv *tsnet.Server, cfg *tsnet.Config) {
 	log.Infof("Started tsync %s with name %q, received files are saved in %s, max send rate: %s",
 		cli.LongVersion, srv.Name, cfg.FileDir, RateString(cfg.MaxRate))
 	for _, f := range cfg.Sync {
-		log.Infof("Sync folder %q: %s (keeping %d replaced versions per file, trash pruned to %s)",
-			f.Name, f.Path, cfg.SyncKeep, progressbar.HumanBytes(cfg.SyncTrashMax))
+		log.Infof("Sync folder %q: %s (keeping %d replaced versions per file in %s)",
+			f.Name, f.Path, cfg.SyncKeep, syncdir.OldDir)
 	}
 }
 
@@ -199,23 +199,12 @@ func RateString(rate int64) string {
 	return progressbar.HumanBytes(rate) + "/s"
 }
 
-// SizeFlag defines a size flag (see ParseSize) and returns a pointer to its value in bytes.
-func SizeFlag(name string, value int64, usage string) *int64 {
-	flag.Func(name, usage, func(s string) (err error) {
-		value, err = ParseSize(s)
-		return err
-	})
-	return &value
-}
-
-// SyncFlags defines the sync flags: folders, replaced versions to keep and trash size.
-func SyncFlags() (*[]tsnet.SyncFolder, *int, *int64) {
+// SyncFlags defines the sync flags: folders and replaced versions to keep.
+func SyncFlags() (*[]tsnet.SyncFolder, *int) {
 	folders := SyncFlag("sync")
 	keep := flag.Int("sync-keep", 3, "How many replaced versions of each file sync keeps in the folder's "+
-		syncdir.TrashDir+" (0 for none)")
-	trashMax := SizeFlag("sync-trash-max", 1<<30, "Size the trash of a sync folder is pruned to, the latest "+
-		"version of each file is always kept (0 for no limit)")
-	return folders, keep, trashMax
+		syncdir.OldDir+" (0 for none)")
+	return folders, keep
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
@@ -479,7 +468,7 @@ func Main() int {
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	fMaxRate := RateFlag("max-rate")
-	fSync, fSyncKeep, fSyncTrashMax := SyncFlags()
+	fSync, fSyncKeep := SyncFlags()
 	cli.ArgsHelp = "[file...]"
 	cli.MaxArgs = -1
 	cli.Main()
@@ -522,7 +511,6 @@ func Main() int {
 		MaxRate:               *fMaxRate,
 		Sync:                  *fSync,
 		SyncKeep:              *fSyncKeep,
-		SyncTrashMax:          *fSyncTrashMax,
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {

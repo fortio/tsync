@@ -71,13 +71,12 @@ type syncFolder struct {
 	err    string          // last scan error.
 	peers  map[Peer]*syncPeer
 	// Getting what peers have newer.
-	kick       chan struct{}          // wakes up the folder's goroutine (start more pulls, rescan, save).
-	inflight   map[string]bool        // paths being synced (from any peer).
-	failed     map[string]syncFailure // paths that failed (retried after syncRetry).
-	recent     map[string]recentEntry // paths we synced, until a scan sees them.
-	rescan     bool                   // scan again soon (we got files, the peers should know).
-	trashDirty bool                   // versions were added to the trash (to prune).
-	toSave     []savedBase            // bases of peers no longer linked, to save.
+	kick     chan struct{}          // wakes up the folder's goroutine (start more pulls, rescan, save).
+	inflight map[string]bool        // paths being synced (from any peer).
+	failed   map[string]syncFailure // paths that failed (retried after syncRetry).
+	recent   map[string]recentEntry // paths we synced, until a scan sees them.
+	rescan   bool                   // scan again soon (we got files, the peers should know).
+	toSave   []savedBase            // bases of peers no longer linked, to save.
 }
 
 type savedBase struct {
@@ -184,14 +183,11 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		case <-f.kick:
 		}
 		s.stateMu.Lock()
-		rescan, prune := f.rescan, f.trashDirty && len(f.inflight) == 0
-		f.rescan, f.trashDirty = false, f.trashDirty && !prune
+		rescan := f.rescan
+		f.rescan = false
 		s.stateMu.Unlock()
 		if rescan {
 			prev = s.syncScan(f, prev)
-		}
-		if prune && s.SyncTrashMax > 0 {
-			pruneTrash(f.Path, s.SyncTrashMax)
 		}
 		s.startPulls(f)
 		s.saveBases(f)

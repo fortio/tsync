@@ -33,7 +33,7 @@ func TestDefaultIgnore(t *testing.T) {
 		{"a/.env", false, true},
 		{".tsyncignore", false, false}, // so peers get it even before they have one.
 		{"a/.tsyncignore", false, true},
-		{".tsync-trash", true, true},
+		{".tsync-old", true, true},
 		{"x.tsync-partial", false, true},
 	})
 }
@@ -71,7 +71,7 @@ e` + "́" + `*
 		{"docs/a.md", false, true},
 		{"docs/sub/a.md", false, false},
 		{"été", false, true}, // NFC normalized pattern.
-		{".tsync-trash/x", false, true},
+		{".tsync-old/x", false, true},
 		{"a.tsync-partial", false, true},
 	})
 	self, err := syncdir.ParseIgnore(".tsyncignore\n")

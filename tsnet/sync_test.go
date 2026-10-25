@@ -107,14 +107,14 @@ func TestSync(t *testing.T) {
 			return err == nil && len(b) == 8 // all but the conflict.
 		})
 	}
-	// Changed on A: B gets it, keeping its previous version in the trash.
+	// Changed on A: B gets it, keeping its previous version in OldDir.
 	writeTree(t, dirA, map[string]string{"onlyA.txt": "a v2"}) // older time than when it was synced: still a change.
 	syncStatus(ctx, t, serverB, "docs", "got the change", func(st tsnet.SyncStatus) bool {
 		return content(t, filepath.Join(dirB, "onlyA.txt")) == "a v2" && onlyConflicts(1, 0)(st)
 	})
-	trashed, _ := filepath.Glob(filepath.Join(dirB, syncdir.TrashDir, "onlyA.txt~*"))
-	if len(trashed) != 1 || content(t, trashed[0]) != "a" {
-		t.Errorf("previous version not in the trash: %v", trashed)
+	old, _ := filepath.Glob(filepath.Join(dirB, syncdir.OldDir, "onlyA.txt~*"))
+	if len(old) != 1 || content(t, old[0]) != "a" {
+		t.Errorf("previous version not kept: %v", old)
 	}
 	// The conflict is resolved by hand by deleting one side: the other version wins.
 	if err := os.Remove(filepath.Join(dirB, "both.txt")); err != nil {

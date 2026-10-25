@@ -16,8 +16,8 @@ const (
 	// directories (name starting with a dot) are ignored; with one, only what it lists is (it is synced
 	// itself unless it lists itself, eg with `*`: add `!.tsyncignore` to keep syncing it).
 	IgnoreFile = ".tsyncignore"
-	// TrashDir is where replaced versions are kept (at the root of a synced directory), never synced.
-	TrashDir = ".tsync-trash"
+	// OldDir is where replaced versions are kept (at the root of a synced directory), never synced.
+	OldDir = ".tsync-old"
 	// partialSuffix ends the name of the temporary files of downloads in progress, never synced.
 	partialSuffix = ".tsync-partial"
 )
@@ -106,7 +106,7 @@ func LoadIgnore(root string) (*Ignore, error) {
 // Match returns true if the path (a key, see [Key]) of a file (or directory if dir) is ignored, including
 // because one of its parent directories is.
 func (ig *Ignore) Match(key string, dir bool) bool {
-	if key == TrashDir || strings.HasPrefix(key, TrashDir+"/") || strings.HasSuffix(key, partialSuffix) {
+	if key == OldDir || strings.HasPrefix(key, OldDir+"/") || strings.HasSuffix(key, partialSuffix) {
 		return true
 	}
 	if !ig.custom {
