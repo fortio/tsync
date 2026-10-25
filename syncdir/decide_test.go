@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"slices"
 	"testing"
+	"time"
 
 	"fortio.org/tsync/syncdir"
 )
@@ -109,7 +110,7 @@ func TestPlan(t *testing.T) {
 	})
 	b := syncdir.Base{}
 	b.Record(local["sub/x"])
-	got := syncdir.Plan(local, remote, b, nil, nil)
+	got := syncdir.Plan(local, remote, b, syncdir.PlanOptions{})
 	want := []struct {
 		path   string
 		action syncdir.Action
@@ -181,14 +182,14 @@ func TestPlanRemoteIgnore(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The peer ignores build/ (and with its default rules, .env): not deletions there.
-	got := syncdir.Plan(local, nil, b, ours, remoteIg)
+	got := syncdir.Plan(local, nil, b, syncdir.PlanOptions{Ignore: ours, RemoteIgnore: remoteIg})
 	want := map[string]syncdir.Action{".env": syncdir.DeletedThere, "build/out": syncdir.InSync, "gone": syncdir.DeletedThere}
 	for _, it := range got {
 		if it.Action != want[it.Path] {
 			t.Errorf("%s: got %v, want %v", it.Path, it.Action, want[it.Path])
 		}
 	}
-	got = syncdir.Plan(local, nil, b, ours, nil) // default rules there: hidden files aren't synced.
+	got = syncdir.Plan(local, nil, b, syncdir.PlanOptions{Ignore: ours}) // default rules there: hidden files aren't synced.
 	if got[0].Path != ".env" || got[0].Action != syncdir.InSync {
 		t.Errorf("unexpected %+v", got[0])
 	}
@@ -207,7 +208,7 @@ func TestPlanMassDeletion(t *testing.T) {
 			remote[p] = e
 		}
 	}
-	sum := syncdir.Summarize(syncdir.Plan(local, remote, b, nil, nil))
+	sum := syncdir.Summarize(syncdir.Plan(local, remote, b, syncdir.PlanOptions{}))
 	if sum.Counts[syncdir.DeletionHeld] != 25 || sum.Counts[syncdir.DeletedThere] != 0 {
 		t.Errorf("mass deletion should be held: %+v", sum.Counts)
 	}
@@ -218,7 +219,123 @@ func TestPlanMassDeletion(t *testing.T) {
 		p := fmt.Sprintf("f%02d", i+10)
 		remote[p] = local[p]
 	}
-	if sum = syncdir.Summarize(syncdir.Plan(local, remote, b, nil, nil)); sum.Counts[syncdir.DeletedThere] != 15 {
+	if sum = syncdir.Summarize(syncdir.Plan(local, remote, b, syncdir.PlanOptions{})); sum.Counts[syncdir.DeletedThere] != 15 {
 		t.Errorf("deletions should be applied: %+v", sum.Counts)
+	}
+}
+
+// planBoth plans one path from both sides (A has local, B has remote) and returns A's and B's items.
+func planBoth(t *testing.T, p string, local, remote, b *syncdir.Entry, copies bool) (syncdir.Item, syncdir.Item) {
+	t.Helper()
+	side := func(ours, theirs *syncdir.Entry, name string) syncdir.Item {
+		l, r, base := map[string]syncdir.Entry{}, map[string]syncdir.Entry{}, syncdir.Base{}
+		if ours != nil {
+			l[p] = *ours
+		}
+		if theirs != nil {
+			r[p] = *theirs
+		}
+		if b != nil {
+			base[p] = *baseOf(b)
+		}
+		items := syncdir.Plan(l, r, base, syncdir.PlanOptions{ConflictCopies: copies, Name: name})
+		if len(items) != 1 {
+			t.Fatalf("expected 1 item, got %+v", items)
+		}
+		return items[0]
+	}
+	return side(local, remote, "hostA"), side(remote, local, "hostB")
+}
+
+func baseOf(e *syncdir.Entry) *syncdir.BaseEntry {
+	return &syncdir.BaseEntry{Dir: e.Dir, Mode: e.Mode, Hash: e.Hash}
+}
+
+func TestPlanConflictCopies(t *testing.T) {
+	t1, t2 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), time.Date(2026, 1, 2, 3, 4, 6, 0, time.UTC)
+	at := func(c byte, when time.Time) *syncdir.Entry {
+		return &syncdir.Entry{Mode: 0o644, Size: 1, MTime: when, Hash: syncdir.Hash{c}}
+	}
+	orig := at('o', t1.Add(-time.Hour))
+	copyA := "notes.sync-conflict-hostA-20260102-030405.txt"
+	copyB := "notes.sync-conflict-hostB-20260102-030405.txt"
+	for _, tc := range []struct {
+		name                string
+		local, remote, base *syncdir.Entry
+		wantA, wantB        syncdir.Action
+		copyA, copyB        string
+	}{
+		{"both changed, A older", at('a', t1), at('b', t2), orig, syncdir.ConflictCopy, syncdir.PeerConflictCopy, copyA, ""},
+		{"both changed, A newer", at('a', t2), at('b', t1), orig, syncdir.PeerConflictCopy, syncdir.ConflictCopy, "", copyB},
+		{"same time: by hash", at('b', t1), at('a', t1), orig, syncdir.PeerConflictCopy, syncdir.ConflictCopy, "", copyB},
+		{"new on both", at('a', t1), at('b', t2), nil, syncdir.ConflictCopy, syncdir.PeerConflictCopy, copyA, ""},
+		{"modified here, deleted there", at('a', t1), nil, orig, syncdir.ConflictCopy, syncdir.PeerConflictCopy, copyA, ""},
+		{"file vs directory", at('a', t1), dir(0o755), nil, syncdir.Conflict, syncdir.Conflict, "", ""},
+		{"deleted there, unchanged here", orig, nil, orig, syncdir.DeletedThere, syncdir.DeletedHere, "", ""},
+	} {
+		a, b := planBoth(t, "notes.txt", tc.local, tc.remote, tc.base, true)
+		if a.Action != tc.wantA || b.Action != tc.wantB || a.Copy != tc.copyA || b.Copy != tc.copyB {
+			t.Errorf("%s: got A %v %q, B %v %q; want A %v %q, B %v %q", tc.name, a.Action, a.Copy, b.Action, b.Copy,
+				tc.wantA, tc.copyA, tc.wantB, tc.copyB)
+		}
+	}
+	// Without conflict copies: left alone, modified wins over deleted.
+	a, b := planBoth(t, "notes.txt", at('a', t1), at('b', t2), orig, false)
+	if a.Action != syncdir.Conflict || b.Action != syncdir.Conflict {
+		t.Errorf("expected conflicts, got %v %v", a.Action, b.Action)
+	}
+	a, b = planBoth(t, "notes.txt", at('a', t1), nil, orig, false)
+	if a.Action != syncdir.PeerPulls || b.Action != syncdir.Pull {
+		t.Errorf("modified should win, got %v %v", a.Action, b.Action)
+	}
+}
+
+func TestConflictCopyName(t *testing.T) {
+	when := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("x", 3600))
+	for in, want := range map[string]string{
+		"dir/notes.txt": "dir/notes.sync-conflict-my_host_-20260102-020405.txt",
+		".bashrc":       ".bashrc.sync-conflict-my_host_-20260102-020405",
+		"Makefile":      "Makefile.sync-conflict-my_host_-20260102-020405",
+		"a.tar.gz":      "a.tar.sync-conflict-my_host_-20260102-020405.gz",
+	} {
+		if got := syncdir.ConflictCopyName(in, "my host!", when); got != want {
+			t.Errorf("%s: got %q, want %q", in, got, want)
+		}
+		if !syncdir.IsConflictCopy(want) || syncdir.IsConflictCopy(in) {
+			t.Errorf("IsConflictCopy mismatch for %q", in)
+		}
+	}
+}
+
+func TestPlanMoves(t *testing.T) {
+	local, remote, b := map[string]syncdir.Entry{}, map[string]syncdir.Entry{}, syncdir.Base{}
+	add := func(m map[string]syncdir.Entry, p string, e syncdir.Entry) {
+		e.Path = p
+		m[p] = e
+	}
+	add(local, "old", syncdir.Entry{Dir: true, Mode: 0o755})
+	for i := range 25 { // more than massDeletion: moves aren't deletions.
+		e := syncdir.Entry{Mode: 0o644, Size: int64(i), Hash: syncdir.Hash{byte(i)}}
+		add(local, fmt.Sprintf("old/f%02d", i), e)
+		add(remote, fmt.Sprintf("new/f%02d", i), e)
+	}
+	add(local, "gone", syncdir.Entry{Mode: 0o644, Size: 1, Hash: syncdir.Hash{'g'}})
+	for _, e := range local {
+		b.Record(e)
+	}
+	add(remote, "new", syncdir.Entry{Dir: true, Mode: 0o755})
+	sum := syncdir.Summarize(syncdir.Plan(local, remote, b, syncdir.PlanOptions{}))
+	c := sum.Counts
+	if c[syncdir.Move] != 25 || c[syncdir.MovedAway] != 25 || c[syncdir.DeletedThere] != 2 || c[syncdir.Pull] != 1 ||
+		c[syncdir.DeletionHeld] != 0 {
+		t.Errorf("unexpected counts %+v", c)
+	}
+	for _, it := range syncdir.Plan(local, remote, b, syncdir.PlanOptions{}) {
+		if it.Action == syncdir.Move && (it.From == nil || it.From.Path != "old/"+it.Path[len("new/"):]) {
+			t.Errorf("unexpected move %+v from %+v", it, it.From)
+		}
+	}
+	if d := sum.Describe("bob"); d != "1 to get (0 b) · 25 to move · 2 to remove" {
+		t.Errorf("unexpected description %q", d)
 	}
 }

@@ -24,7 +24,9 @@ import (
 // [syncdir.Plan]), shows it, and gets what the peer has newer (see syncpull.go).
 
 const (
-	FrameSyncFolders = 'F' // our sync folder names, newline separated (when the link is up).
+	// FrameSyncFolders is our current time (unix nano, 8, to check the clocks are close, as conflicts are
+	// resolved by modification time) + our sync folder names, newline separated (when the link is up).
+	FrameSyncFolders = 'F'
 	// FrameSyncIndex is a chunk of our index of a folder: name length (1) + name + flags (1) + (first chunk
 	// only: our ignore rules: 1 if from a .tsyncignore (1) + its length (2) + its content) + entries:
 	// kind 'f' or 'd' (1) + mode (4) + size (8) + mtime (8) + sha256 (32, files only) + path length (2) + path.
@@ -40,6 +42,8 @@ const (
 	DefaultSyncRescan = 10 * time.Second
 	// MaxSyncNameLen is the maximum length of a sync folder name.
 	MaxSyncNameLen = 64
+	// MaxClockSkew is how much the clocks of 2 peers syncing folders can differ before we warn.
+	MaxClockSkew = time.Second
 )
 
 // SyncFolder is a directory to sync with the linked peers that have one with the same name.
@@ -67,6 +71,7 @@ func syncNameRune(r rune) bool {
 type syncFolder struct {
 	SyncFolder
 	sendMu sync.Mutex      // one index sent at a time, so its chunks don't interleave with another's.
+	ioMu   sync.Mutex      // scans don't see a replacement, move... half done (see syncPull).
 	local  syncdir.Index   // last scan (Time is zero until the first one).
 	ig     *syncdir.Ignore // rules of the last scan.
 	err    string          // last scan error.
@@ -80,6 +85,7 @@ type syncFolder struct {
 	toSave   []savedBase            // bases of peers no longer linked, to save.
 	// issueLines are the conflicts and deletions as last written (see writeConflicts).
 	issueLines []string
+	copies     []string // conflict copies in the folder (from the last scan, sorted).
 }
 
 type savedBase struct {
@@ -128,6 +134,10 @@ type SyncStatus struct {
 	CurDone, CurSize int64
 	// ConflictsFile lists the conflicts and deletions, when there are some (and we have storage).
 	ConflictsFile string
+	// ConflictCopies is how many conflict copies there are in the folder (to review and delete).
+	ConflictCopies int
+	// ClockSkew is how much the peer's clock is behind ours (ahead if negative), roughly.
+	ClockSkew time.Duration
 }
 
 // SyncStatus returns the state of our sync folders with each linked peer that has them (sorted).
@@ -139,6 +149,7 @@ func (s *Server) SyncStatus() []SyncStatus {
 		f := s.syncFolders[name]
 		st := SyncStatus{
 			Folder: f.Name, Path: f.Path, Files: len(f.local.Entries), Scanned: !f.local.Time.IsZero(), Err: f.err,
+			ConflictCopies: len(f.copies),
 		}
 		if len(f.peers) == 0 {
 			res = append(res, st)
@@ -147,8 +158,8 @@ func (s *Server) SyncStatus() []SyncStatus {
 		for _, peer := range slices.SortedFunc(maps.Keys(f.peers), func(a, b Peer) int { return strings.Compare(a.Name, b.Name) }) {
 			sp := f.peers[peer]
 			st.Peer, st.Ready, st.Summary, st.Getting = peer, sp.ready, sp.summary, len(sp.pulls)
-			st.CurFile, st.CurDone, st.CurSize, st.ConflictsFile = "", 0, 0, ""
-			if len(sp.issues) > 0 {
+			st.CurFile, st.CurDone, st.CurSize, st.ConflictsFile, st.ClockSkew = "", 0, 0, "", sp.l.clockSkew
+			if len(sp.issues) > 0 || len(f.copies) > 0 {
 				st.ConflictsFile = s.conflictsFile(f)
 			}
 			if len(sp.pulls) > 0 {
@@ -238,7 +249,9 @@ func (s *Server) syncScan(f *syncFolder, prev syncdir.Index) syncdir.Index {
 	}
 	var idx syncdir.Index
 	if err == nil {
+		f.ioMu.Lock()
 		idx, err = syncdir.Scan(f.Path, prev, ig)
+		f.ioMu.Unlock()
 	}
 	if err == nil {
 		prev = idx
@@ -288,6 +301,11 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 		log.Infof("Sync folder %q (%s): %d files and directories (%d skipped)", f.Name, f.Path, len(idx.Entries), idx.Skipped)
 	}
 	f.local, f.ig = idx, ig
+	copies := conflictCopies(idx)
+	if !slices.Equal(copies, f.copies) {
+		f.copies = copies
+		f.kickLocked() // to update the conflicts list.
+	}
 	for peer, sp := range f.peers {
 		s.replanLocked(f, peer, sp)
 	}
@@ -319,7 +337,8 @@ func (s *Server) sendSyncFolders(peer Peer, l *link, conn net.Conn) {
 	for _, f := range s.Sync {
 		names = append(names, f.Name)
 	}
-	if err := l.send(conn, FrameSyncFolders, []byte(strings.Join(names, "\n"))); err != nil {
+	payload := binary.BigEndian.AppendUint64(nil, uint64(time.Now().UnixNano()))
+	if err := l.send(conn, FrameSyncFolders, append(payload, strings.Join(names, "\n")...)); err != nil {
 		log.Errf("Failed to send sync folders to %s: %v", peer.Name, err)
 	}
 }
@@ -457,7 +476,12 @@ func decodeEntries(b []byte) ([]syncdir.Entry, error) {
 func (s *Server) handleSyncFrame(peer Peer, l *link, conn net.Conn, plain []byte) bool {
 	switch plain[0] {
 	case FrameSyncFolders:
-		s.syncFoldersReceived(peer, l, conn, string(plain[1:]))
+		if len(plain) < 9 {
+			log.Warnf("Invalid sync folders frame from %s", peer.Name)
+			return true
+		}
+		theirs := time.Unix(0, int64(binary.BigEndian.Uint64(plain[1:9]))) //nolint:gosec // any value is fine.
+		s.syncFoldersReceived(peer, l, conn, time.Since(theirs), string(plain[9:]))
 	case FrameSyncIndex:
 		if err := s.syncIndexReceived(peer, l, plain[1:]); err != nil {
 			log.Errf("Invalid sync index from %s: %v", peer.Name, err)
@@ -471,10 +495,14 @@ func (s *Server) handleSyncFrame(peer Peer, l *link, conn net.Conn, plain []byte
 }
 
 // syncFoldersReceived records the peer's sync folders and sends it our index of the ones we have too.
-func (s *Server) syncFoldersReceived(peer Peer, l *link, conn net.Conn, names string) {
+func (s *Server) syncFoldersReceived(peer Peer, l *link, conn net.Conn, skew time.Duration, names string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	l.syncFolders = make(map[string]bool)
+	l.syncFolders, l.clockSkew = make(map[string]bool), skew
+	if skew > MaxClockSkew || skew < -MaxClockSkew {
+		log.Warnf("The clock of %s differs from ours by %v: sync conflicts are resolved by modification time, "+
+			"the older version may be the wrong one", peer.Name, skew.Round(time.Millisecond))
+	}
 	var common []string
 	for name := range strings.SplitSeq(names, "\n") {
 		if ValidateSyncName(name) != nil {
@@ -576,7 +604,9 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 			}
 		}
 	}
-	items := syncdir.Plan(local, sp.remote, sp.base, f.ig, sp.remoteIg)
+	items := syncdir.Plan(local, sp.remote, sp.base, syncdir.PlanOptions{
+		Ignore: f.ig, RemoteIgnore: sp.remoteIg, ConflictCopies: !s.SyncConflictList, Name: s.Name,
+	})
 	if syncdir.UpdateBase(sp.base, items) {
 		sp.dirty = true
 	}
@@ -585,7 +615,7 @@ func (s *Server) replanLocked(f *syncFolder, peer Peer, sp *syncPeer) {
 	sp.issues = sp.issues[:0]
 	for _, it := range items {
 		switch it.Action {
-		case syncdir.Pull, syncdir.MetadataOnly, syncdir.DeletedThere:
+		case syncdir.Pull, syncdir.MetadataOnly, syncdir.DeletedThere, syncdir.ConflictCopy, syncdir.Move:
 			sp.todo = append(sp.todo, it)
 		case syncdir.Conflict, syncdir.DeletionHeld:
 			sp.issues = append(sp.issues, it)

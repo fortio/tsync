@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"fortio.org/terminal/ansipixels"
 	"fortio.org/terminal/ansipixels/tcolor"
+	"fortio.org/tsync/syncdir"
 	"fortio.org/tsync/tsnet"
 )
 
@@ -47,15 +49,27 @@ func SyncLine(st tsnet.SyncStatus) syncLine {
 		}
 		what += fmt.Sprintf(" · ⬇ %s %.0f%%", st.CurFile, percent)
 	}
-	switch {
-	case !st.Ready:
+	if !st.Ready {
 		return syncLine{what + ": waiting for its list", tcolor.Cyan}
+	}
+	text := what + " · " + st.Summary.Describe(peer)
+	warn := len(st.Summary.Conflicts) > 0 || st.Summary.Counts[syncdir.DeletionHeld] > 0
+	if n := st.ConflictCopies; n > 0 {
+		text += fmt.Sprintf(" · %d conflict %s to review", n, map[bool]string{true: "copy", false: "copies"}[n == 1])
+		warn = true
+	}
+	text += listedIn(st)
+	if st.ClockSkew > tsnet.MaxClockSkew || st.ClockSkew < -tsnet.MaxClockSkew {
+		text += " · ⚠ clocks differ by " + st.ClockSkew.Abs().Round(100*time.Millisecond).String()
+		warn = true
+	}
+	switch {
+	case warn:
+		return syncLine{text, tcolor.BrightYellow}
 	case st.Summary.Pending() == 0:
-		return syncLine{what + " · " + st.Summary.Describe(peer), tcolor.BrightGreen}
-	case len(st.Summary.Conflicts) > 0:
-		return syncLine{what + " · " + st.Summary.Describe(peer) + listedIn(st), tcolor.BrightYellow}
+		return syncLine{text, tcolor.BrightGreen}
 	default:
-		return syncLine{what + " · " + st.Summary.Describe(peer) + listedIn(st), tcolor.BrightCyan}
+		return syncLine{text, tcolor.BrightCyan}
 	}
 }
 

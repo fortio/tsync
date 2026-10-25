@@ -170,3 +170,31 @@ func TestIssueLines(t *testing.T) {
 		t.Errorf("got\n%q\nwant\n%q", got, want)
 	}
 }
+
+// Modified here but deleted there: ours is renamed to a conflict copy (freeing the name).
+func TestLocalOpConflictCopy(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	writeAt(t, filepath.Join(dir, "f.txt"), "mine", old)
+	writeAt(t, filepath.Join(dir, "f.sync-conflict-me-20200101-000000.txt"), "other", old) // name taken.
+	idx, err := syncdir.Scan(dir, syncdir.Index{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := idx.Entries["f.txt"]
+	p := &syncPull{f: &syncFolder{SyncFolder: SyncFolder{Path: dir}}, target: "f.txt", item: syncdir.Item{
+		Path: "f.txt", Action: syncdir.ConflictCopy, Local: &e, Copy: syncdir.ConflictCopyName("f.txt", "me", old),
+	}}
+	if err = p.localOp(0); err != nil {
+		t.Fatal(err)
+	}
+	if p.copy != "f.sync-conflict-me-20200101-000000-1.txt" {
+		t.Errorf("unexpected copy %q", p.copy)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, p.copy)); string(b) != "mine" {
+		t.Errorf("copy has %q", b)
+	}
+	if _, err = os.Stat(filepath.Join(dir, "f.txt")); !os.IsNotExist(err) {
+		t.Errorf("the name should be freed: %v", err)
+	}
+}

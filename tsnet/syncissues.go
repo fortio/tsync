@@ -54,7 +54,11 @@ func issueLinesLocked(f *syncFolder) []string {
 		}
 		return strings.Compare(a.peer, b.peer)
 	})
-	lines := make([]string, 0, len(issues))
+	lines := make([]string, 0, len(issues)+len(f.copies))
+	for _, p := range f.copies {
+		e := f.local.Entries[p]
+		lines = append(lines, fmt.Sprintf("conflict copy\t%s\there: %s", quoteIfNeeded(p), entryDesc(&e)))
+	}
 	for _, is := range issues {
 		kind := "conflict"
 		if is.it.Action == syncdir.DeletionHeld {
@@ -64,6 +68,18 @@ func issueLinesLocked(f *syncFolder) []string {
 			entryDesc(is.it.Local), is.peer, entryDesc(is.it.Remote)))
 	}
 	return lines
+}
+
+// conflictCopies returns the conflict copies of the index (sorted).
+func conflictCopies(idx syncdir.Index) []string {
+	var res []string
+	for p, e := range idx.Entries {
+		if !e.Dir && syncdir.IsConflictCopy(p) {
+			res = append(res, p)
+		}
+	}
+	slices.Sort(res)
+	return res
 }
 
 // entryDesc describes a version: size and modification time, "directory" or "absent".
@@ -108,9 +124,12 @@ func (s *Server) writeConflicts(f *syncFolder) {
 		return
 	}
 	err := syncdir.WriteFileAtomic(file, func(w *bufio.Writer) {
-		_, _ = fmt.Fprintf(w, "# tsync: %d conflicts or deletions to resolve in sync folder %q (%s), as of %s.\n",
+		_, _ = fmt.Fprintf(w, "# tsync: %d things to review in sync folder %q (%s), as of %s.\n",
 			len(lines), f.Name, f.Path, time.Now().Format(time.DateTime))
-		_, _ = w.WriteString("# conflict: changed on both sides since the last sync, nothing was touched. Keep one " +
+		_, _ = w.WriteString("# conflict copy: the older version of a file changed on both sides (or the modified " +
+			"version of a file deleted\n#   on the other side), kept under that name on all machines: delete it " +
+			"(on any machine) once reviewed.\n" +
+			"# conflict: changed on both sides since the last sync, nothing was touched. Keep one " +
 			"version: delete or move away\n#   the other one (on its side) and the remaining one is synced back.\n" +
 			"# deletion held: deleted on the peer at the same time as too many others (its folder not mounted?), so " +
 			"not done\n#   here: delete it here too if that was intended, or restore it there.\n" +
@@ -123,5 +142,5 @@ func (s *Server) writeConflicts(f *syncFolder) {
 		log.Errf("Can't write %s: %v", file, err)
 		return
 	}
-	log.Infof("Sync %q: %d conflicts or deletions to resolve, listed in %s", f.Name, len(lines), file)
+	log.Warnf("Sync %q: %d conflict copies, conflicts or held deletions to review, listed in %s", f.Name, len(lines), file)
 }

@@ -199,12 +199,24 @@ func RateString(rate int64) string {
 	return progressbar.HumanBytes(rate) + "/s"
 }
 
-// SyncFlags defines the sync flags: folders and replaced versions to keep.
-func SyncFlags() (*[]tsnet.SyncFolder, *int) {
+// SyncFlags defines the sync flags: folders, replaced versions to keep and conflicts handling (true to list).
+func SyncFlags() (*[]tsnet.SyncFolder, *int, *bool) {
 	folders := SyncFlag("sync")
 	keep := flag.Int("sync-keep", 3, "How many replaced versions of each file sync keeps in the folder's "+
 		syncdir.OldDir+" (0 for none)")
-	return folders, keep
+	list := false
+	flag.Func("sync-conflicts", "Sync conflicts (changed on both sides, or changed on one and deleted on the "+
+		"other) `handling`: copy (the newest version keeps the name, the other one is kept as a visible "+
+		syncdir.ConflictCopyMarker+"... copy) or list (both left alone, listed)", func(s string) error {
+		switch s {
+		case "copy", "list":
+			list = s == "list"
+			return nil
+		default:
+			return fmt.Errorf("expected copy or list, got %q", s)
+		}
+	})
+	return folders, keep, &list
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
@@ -468,7 +480,7 @@ func Main() int {
 	fPeers := flag.String("peers", "",
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	fMaxRate := RateFlag("max-rate")
-	fSync, fSyncKeep := SyncFlags()
+	fSync, fSyncKeep, fSyncConflictList := SyncFlags()
 	cli.ArgsHelp = "[file...]"
 	cli.MaxArgs = -1
 	cli.Main()
@@ -511,6 +523,7 @@ func Main() int {
 		MaxRate:               *fMaxRate,
 		Sync:                  *fSync,
 		SyncKeep:              *fSyncKeep,
+		SyncConflictList:      *fSyncConflictList,
 	}
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {

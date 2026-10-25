@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fortio.org/terminal/ansipixels/tcolor"
 	"fortio.org/tsync/syncdir"
@@ -55,6 +56,17 @@ func TestSyncLine(t *testing.T) {
 		st.ConflictsFile = "/x/conflicts.txt"
 		return st
 	}
+	const listedX = " (list in /x/conflicts.txt)"
+	copies := func(sum syncdir.Summary) tsnet.SyncStatus {
+		st := listed(sum)
+		st.ConflictCopies = 2
+		return st
+	}
+	skewed := func(sum syncdir.Summary) tsnet.SyncStatus {
+		st := ready(sum)
+		st.ClockSkew = -2500 * time.Millisecond
+		return st
+	}
 	for _, tc := range []struct {
 		st    tsnet.SyncStatus
 		text  string
@@ -69,6 +81,8 @@ func TestSyncLine(t *testing.T) {
 		{ready(pull), "📁 d ↔ bob · 2 to get (2 Kb)", tcolor.BrightCyan},
 		{getting(pull), "📁 d ↔ bob · ⬇ sub/f 25% · 2 to get (2 Kb)", tcolor.BrightCyan},
 		{listed(conflict), "📁 d ↔ bob · 1 conflict (list in /x/conflicts.txt)", tcolor.BrightYellow},
+		{copies(inSync), "📁 d ↔ bob · in sync (3 items) · 2 conflict copies to review" + listedX, tcolor.BrightYellow},
+		{skewed(inSync), "📁 d ↔ bob · in sync (3 items) · ⚠ clocks differ by 2.5s", tcolor.BrightYellow},
 	} {
 		l := SyncLine(tc.st)
 		if l.text != tc.text || l.color != tc.color {

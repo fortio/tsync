@@ -1,6 +1,7 @@
 package tsnet
 
 import (
+	"encoding/binary"
 	"strconv"
 	"strings"
 	"testing"
@@ -92,5 +93,21 @@ func TestValidateSyncName(t *testing.T) {
 		if ValidateSyncName(bad) == nil {
 			t.Errorf("%q should be invalid", bad)
 		}
+	}
+}
+
+func TestSyncFoldersClock(t *testing.T) {
+	s := (&Config{Name: "test"}).NewServer()
+	s.syncFolders["docs"] = &syncFolder{SyncFolder: SyncFolder{Name: "docs"}}
+	l := &link{}
+	payload := binary.BigEndian.AppendUint64([]byte{FrameSyncFolders}, uint64(time.Now().Add(-3*time.Second).UnixNano()))
+	if !s.handleSyncFrame(Peer{Name: "peer"}, l, nil, append(payload, "docs\nother\nbad name"...)) {
+		t.Fatal("not handled")
+	}
+	if l.clockSkew < 3*time.Second || l.clockSkew > 4*time.Second {
+		t.Errorf("unexpected skew %v", l.clockSkew)
+	}
+	if !l.syncFolders["docs"] || !l.syncFolders["other"] || len(l.syncFolders) != 2 {
+		t.Errorf("unexpected folders %v", l.syncFolders)
 	}
 }

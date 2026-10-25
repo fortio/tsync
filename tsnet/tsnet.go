@@ -75,6 +75,8 @@ type Config struct {
 	SyncRescan time.Duration
 	// SyncKeep is how many replaced versions of each file are kept in the sync folders' OldDir (0 for none).
 	SyncKeep int
+	// SyncConflictList leaves the sync conflicts alone (listed) instead of resolving them with conflict copies.
+	SyncConflictList bool
 }
 
 type ConnectionStatus int

@@ -43,7 +43,7 @@ wait_for() {
 }
 
 echo "file given on the command line" > "$OUT/src/arg file.txt"
-# Sync folders: same, only on one side (synced), different on both (conflict, left alone).
+# Sync folders: same, only on one side (synced), different on both (conflict, resolved with a conflict copy).
 mkdir -p "$OUT/syncA" "$OUT/syncB"
 echo same > "$OUT/syncA/same.txt"
 echo same > "$OUT/syncB/same.txt"
@@ -64,13 +64,16 @@ wait_for B "wants to connect: check the hash, then click or press 1 to accept"
 $T send-keys -t B 1
 wait_for A "🔗 e2eB"
 wait_for B "🔗 e2eA"
-wait_for A "📁 e2e ↔ e2eB · 1 conflict (list in ~/.tsync/sync/e2e/conflicts.txt)" 30
-wait_for B "📁 e2e ↔ e2eA · 1 conflict (list in ~/.tsync/sync/e2e/conflicts.txt)" 30
-grep -q "^conflict	both.txt	here: 2 b, .*	e2eB: 2 b, " "$OUT/hA/.tsync/sync/e2e/conflicts.txt" || fail "conflict not listed"
-
+wait_for A "📁 e2e ↔ e2eB · in sync (5 items) · 1 conflict copy to review (list in ~/.tsync/sync/e2e/conflicts.txt)" 30
+wait_for B "📁 e2e ↔ e2eA · in sync (5 items) · 1 conflict copy to review (list in ~/.tsync/sync/e2e/conflicts.txt)" 30
 [ "$(cat "$OUT/syncA/onlyB.txt")" = theirs ] && [ "$(cat "$OUT/syncB/onlyA.txt")" = mine ] || fail "sync didn't get the files"
-[ "$(cat "$OUT/syncA/both.txt")" = A ] && [ "$(cat "$OUT/syncB/both.txt")" = B ] || fail "sync conflict shouldn't be touched"
-echo "ok: sync got the new files both ways and left the conflict alone"
+# The conflict: one version kept as both.txt on both sides, the other as the same conflict copy on both.
+kept=$(cat "$OUT/syncA/both.txt")
+copy=$(cd "$OUT/syncA" && ls both.sync-conflict-*.txt)
+[ "$(cat "$OUT/syncB/both.txt")" = "$kept" ] && [ "$(cat "$OUT/syncB/$copy")" = "$(cat "$OUT/syncA/$copy")" ] &&
+	[ "$(cat "$OUT/syncA/$copy")" != "$kept" ] || fail "sync conflict not resolved with a conflict copy"
+grep -q "^conflict copy	$copy	here: 2 b, " "$OUT/hA/.tsync/sync/e2e/conflicts.txt" || fail "conflict copy not listed"
+echo "ok: sync got the new files both ways and resolved the conflict with a conflict copy"
 # File given as argument to A: offered once B is linked.
 wait_for B "e2eA offers $OUT/src/arg file.txt (31 b): click or press d"
 
@@ -102,7 +105,7 @@ $T new-session -d -s B -x 200 -y 40 "env HOME=$OUT/hB $BIN $ARGS -name e2eB -syn
 wait_for B "Auto connecting to trusted peer e2eA" 15
 wait_for B "🔗 e2eA"
 wait_for A "🔗 e2eB"
-wait_for B "📁 e2e ↔ e2eA · 1 conflict" 30 # base kept across restarts: still in sync.
+wait_for B "📁 e2e ↔ e2eA · in sync (5 items) · 1 conflict copy to review" 30 # base kept across restarts.
 wait_for B "second    line red osc52:end"
 
 # Drop a file in A (as GNOME/VTE does: single quoted path + space, in a bracketed paste):
