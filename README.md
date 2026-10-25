@@ -67,6 +67,7 @@ The useful ones:
 - `-name` to use another name than the hostname, eg to run 2 instances on one machine.
 - `-max-rate` limits the file sending rate (per peer connection, whatever the number of files being sent), eg `-max-rate 10MB/s` (K, M, G are powers of 1024, case insensitive). Default is unlimited.
 - `-sync name=path` (repeatable) syncs the content of that directory with the linked peers that use the same `name`: it's just a label pairing the directories, which can be anywhere and called anything on each machine (eg `-sync docs=~/Documents` on one and `-sync docs=D:\work\papers` on another): each side gets what the other has new or changed. Deletions are propagated too: the other side moves its copy to `.tsync-old/` (a file modified on one side since the last sync wins over its deletion on the other, and a peer deleting most files at once, eg its disk not mounted, is held rather than followed). A file changed on both sides since the last sync (a conflict, eg edited on a laptop while offline), or changed on one side and deleted on the other, is resolved without losing anything: the newest version keeps the name and the other one is kept next to it as `name.sync-conflict-<host>-<time>.ext`, synced to all machines; review and delete it (on any machine). They're listed, with anything else to look at, in `~/.tsync/sync/<name>/conflicts.txt` (`-sync-conflicts list` leaves conflicts alone and only lists them instead). As the newest version wins, tsync warns if the machines' clocks differ by more than a second. Moved or renamed files are moved on the other side too (no new transfer), hidden files are ignored unless there is a `.tsyncignore`, which then lists what to ignore with the usual `.gitignore` syntax (`*`, `**`, trailing `/`, `!` to re-include; no nested files, escapes or `[!...]`). The versions replaced by sync are kept in `.tsync-old/` in the folder (`-sync-keep`, the last 3 per file by default, 0 for none); nothing removes them otherwise, clean it up yourself when you don't need them. It's meant for directories of up to some tens of thousands of files (more works, but sync a big tree as a few `-sync` folders rather than one). How it works: [SYNC_DETAILS.md](SYNC_DETAILS.md).
+- `-headless` runs without a UI, for a server or a service (see [Headless](#headless)).
 - `-sync-watch` (default on) watches the sync folders for changes: only the directories with changes are scanned again (and all of it every 15 minutes, in case). When it can't (eg too many directories for the Linux inotify limit) or the notifications missed changes (eg a network folder), it goes back to scanning every `-sync-rescan`. On macOS it uses FSEvents when built with cgo (the release and brew binaries are); without cgo it's off by default, as it then needs a file descriptor per file.
 - `-sync-rescan` (default 10s) is how often the sync folders are scanned for changes when not watched.
 - `-tsync-dir` (default `~/.tsync`) is where the identity, trusted peers and sync state (bases, conflicts list) are, eg to run several tsync with different identities on one machine.
@@ -75,6 +76,27 @@ The useful ones:
 - `-auto-connect=false` to not reconnect automatically to accepted peers.
 - `-clip-lines` for how many lines each clipboard box shows (3 by default).
 - `-port` and `-mcast` for a different discovery port or multicast group, eg to keep separate groups of machines.
+
+### Headless
+
+`tsync -headless -sync docs=/data/docs` only does directory sync, with no UI (no terminal needed), logging like the other fortio tools: readable on a terminal, JSON on stderr otherwise. It never touches the clipboard (it could hold a password) and ignores the clipboard and file offers sent to it. Only peers you already accepted (listed in `checked.pub`) can link: pair once with the normal UI (run tsync with the same `-tsync-dir`, or copy `~/.tsync`), then run it headless. Requests from other peers are ignored, with a warning in the log. It stops cleanly on Ctrl-C or SIGTERM.
+
+tsync doesn't daemonize itself, use `nohup` or your init system. For systemd, eg `/etc/systemd/system/tsync.service`:
+
+```
+[Unit]
+Description=tsync directory sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+ExecStart=/usr/local/bin/tsync -headless -sync docs=/home/ubuntu/docs
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ### Trying it on a single machine
 
@@ -111,5 +133,6 @@ but the multicast discovery doesn't seem to work, at least on Docker for Mac.
 ```
 make test   # unit and (local network multicast) integration tests
 make lint   # golangci-lint with the fortio shared config
-make e2e    # end to end TUI test with 2 instances in tmux: connect, paste, copy, restart, drop and download a file (needs tmux)
+make e2e    # end to end TUI test with 2 instances in tmux: connect, paste, copy, restart, drop and download a file, then
+            # 3 instances syncing a directory, one restarted headless (needs tmux)
 ```

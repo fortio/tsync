@@ -171,6 +171,9 @@ a time.
 Using the same label on both sides is the consent: labels are announced to the linked (already trusted, see the
 README) peers, the indexes and contents only to the peers that use that label too.
 
+A headless instance (`-headless`, no UI) does the same, but only links with peers it already trusts, and
+ignores the clipboard (`T`, `C`) and file or directory offers (`O`, `M`, `N`) that peers send: sync is all it does.
+
 ## On the wire
 
 Within the encrypted link of each linked peer (see the README's security section):

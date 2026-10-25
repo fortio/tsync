@@ -371,6 +371,9 @@ func (s *Server) handleConnect(from *net.UDPAddr, fromName, toName string, tcpPo
 		if err = s.acceptLocked(peer, peerData); err != nil {
 			log.Errf("Failed to accept connection from %s: %v", peer.Name, err)
 		}
+	case s.Headless:
+		log.Warnf("Headless: ignoring connection request from untrusted %q (%q), pair with it first from the UI",
+			peer.Name, peer.IP)
 	default:
 		if peerData.Status != ReceivedConn { // only once, not for each retry.
 			log.Warnf("Connection request from new peer %s (%s): check its hash is %s and select it to accept",

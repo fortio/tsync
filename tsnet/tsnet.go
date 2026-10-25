@@ -83,6 +83,10 @@ type Config struct {
 	SyncConflictList bool
 	// WindowsNames skips (and lists) the peers' sync paths Windows can't store, always the case on Windows.
 	WindowsNames bool
+	// Headless is for running without a UI: only trusted peers can link (requests from others are ignored,
+	// nothing waits for an accept), and the clipboard and file/directory offers received are ignored.
+	// Directory sync is all it does.
+	Headless bool
 }
 
 type ConnectionStatus int
