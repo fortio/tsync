@@ -20,7 +20,7 @@ jobs:
         uses: fortio/workflows/.github/workflows/codeql-analysis.yml@main
     releaser-tsync:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        uses: fortio/workflows/.github/workflows/releaser.yml@darwin-cgo # back to @main once fortio/workflows#255 is merged.
+        uses: fortio/workflows/.github/workflows/releaser.yml@main
         with:
             darwin_cgo: true
             description: "Fortio secure synchronization between machines"
