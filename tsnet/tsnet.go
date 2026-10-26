@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,12 +31,18 @@ const (
 	// 576 byte IP packet - 60 byte IP header - 8 byte UDP header = 508 bytes.
 	BufSize = 576 - 60 - 8
 	// DefaultTarget: which udp address we try by default to find our interface and ip.
-	DefaultTarget                  = "8.8.8.8:53"
-	DefaultBroadcastInterval       = 1500 * time.Millisecond
-	TimeFormat                     = "15:04:05.000" // time only + millis.
-	DefaultPeerTimeout             = 10 * time.Second
-	epochStopMarker          int32 = -999
-	DefaultDiscoveryPort           = 29556 // "ts" in ascii.
+	DefaultTarget            = "8.8.8.8:53"
+	DefaultBroadcastInterval = 1500 * time.Millisecond
+	TimeFormat               = "15:04:05.000" // time only + millis.
+	DefaultPeerTimeout       = 10 * time.Second
+	// SlowDiscoveryInterval is how often we multicast once we are linked to all the peers we know.
+	SlowDiscoveryInterval = 20 * time.Second
+	// FastDiscoveryStartup is how long after startup we always use the fast interval.
+	FastDiscoveryStartup = 30 * time.Second
+	// MaxStaticPeerBackoff is the maximum delay between discovery messages to a -peers entry we aren't linked to.
+	MaxStaticPeerBackoff       = 30 * time.Second
+	epochStopMarker      int32 = -999
+	DefaultDiscoveryPort       = 29556 // "ts" in ascii.
 )
 
 // Compatible returns false for peers running an older tsync version we can't connect with.
@@ -139,6 +144,10 @@ type Server struct {
 	windowsNames bool
 	// resolved Config.Peers
 	staticPeers []*net.UDPAddr
+	// discovery pacing: see discoveryRound. Only used by the sender goroutine.
+	startedAt   time.Time
+	lastMcast   time.Time
+	staticState map[string]*staticBackoff
 	// random id of this run, in our discovery messages (handshake context, restart detection).
 	runID string
 	// testDialAddr if set changes the address we dial (tests).
@@ -340,6 +349,8 @@ func (s *Server) runAdv(ctx context.Context) {
 		s.Name, s.ourSendAddr, interval, jitter)
 	defer ticker.Stop()
 	epoch := s.epoch.Load()
+	s.startedAt = time.Now()
+	s.discoveryRound(epoch, s.startedAt) // announce ourselves right away.
 	for {
 		select {
 		case <-ctx.Done():
@@ -356,11 +367,7 @@ func (s *Server) runAdv(ctx context.Context) {
 				return
 			}
 			epoch = newEpoch
-			err := s.MCastMessageSend(epoch)
-			if err != nil {
-				log.Errf("Error sending UDP packet: %v", err)
-			}
-			s.directDiscovery(epoch)
+			s.discoveryRound(epoch, time.Now())
 			// Run some cleanup/expire entries
 			s.PeersCleanup()
 			s.handshakeTick()
@@ -375,6 +382,10 @@ func (s *Server) PeersCleanup() {
 	var toDeleteSources []Source
 	now := time.Now()
 	for peer, data := range s.Peers.All() {
+		// A peer with an established link stays (the link has its own keepalive and dead detection).
+		if l := s.links[peer]; l != nil && l.conn != nil {
+			continue
+		}
 		if now.Sub(data.LastSeen) > s.PeerTimeout {
 			toDelete = append(toDelete, peer)
 			src := Source{IP: peer.IP, Port: data.Port}
@@ -647,14 +658,61 @@ func (s *Server) sendDiscoveryTo(addr *net.UDPAddr) {
 // discoveryPrefix is the start of DiscoveryMessageFormat.
 const discoveryPrefix = "tsync1 "
 
-// directDiscovery also sends our discovery message directly (unicast) to the configured
-// static peers and to the peers we know: when multicast only works one way (eg a NAT'ed
-// VM sees the host but not the other way around) or not at all, they still discover us.
-func (s *Server) directDiscovery(epoch int32) {
-	payload := s.discoveryPayload(epoch)
-	targets := slices.Clone(s.staticPeers)
+// staticBackoff is the retry state of a -peers entry we aren't linked to.
+type staticBackoff struct {
+	next  time.Time
+	delay time.Duration
+}
+
+// discoveryRound sends this tick's discovery messages. While we aren't linked to all the peers we know (or know
+// none, or just started) it's fast: multicast every tick, and direct (unicast) to the peers not linked yet, and to
+// the -peers entries not linked with an increasing delay. Once everyone is linked, the links' keepalive keeps the
+// peers listed and we only multicast a slow heartbeat: a new or restarted peer announces itself fast and the
+// others then speed up to link with it. Direct messages are for when multicast only works one way (eg a NAT'ed
+// VM sees the host but not the other way around) or not at all.
+func (s *Server) discoveryRound(epoch int32, now time.Time) {
+	s.stateMu.Lock()
+	linkedIPs := map[string]bool{}
+	var unlinked []*net.UDPAddr
 	for peer, data := range s.Peers.All() {
-		targets = append(targets, &net.UDPAddr{IP: net.ParseIP(peer.IP), Port: data.Port})
+		if l := s.links[peer]; l != nil && l.conn != nil {
+			linkedIPs[peer.IP] = true
+			continue
+		}
+		unlinked = append(unlinked, &net.UDPAddr{IP: net.ParseIP(peer.IP), Port: data.Port})
+	}
+	s.stateMu.Unlock()
+	payload := s.discoveryPayload(epoch)
+	fast := len(unlinked) > 0 || len(linkedIPs) == 0 || now.Sub(s.startedAt) < FastDiscoveryStartup
+	if fast || now.Sub(s.lastMcast) >= SlowDiscoveryInterval {
+		s.lastMcast = now
+		if err := s.MCastMessageSend(epoch); err != nil {
+			log.Errf("Error sending UDP packet: %v", err)
+		}
+	} else {
+		log.LogVf("All peers linked, skipping multicast (last %v ago)", now.Sub(s.lastMcast))
+	}
+	targets := unlinked
+	for _, a := range s.staticPeers {
+		key := a.String()
+		if linkedIPs[a.IP.String()] {
+			delete(s.staticState, key) // retry fast if the link drops.
+			continue
+		}
+		st := s.staticState[key]
+		if st == nil {
+			st = &staticBackoff{delay: s.BaseBroadcastInterval}
+			if s.staticState == nil {
+				s.staticState = map[string]*staticBackoff{}
+			}
+			s.staticState[key] = st
+		}
+		if now.Before(st.next) {
+			continue
+		}
+		st.next = now.Add(st.delay)
+		st.delay = min(2*st.delay, MaxStaticPeerBackoff)
+		targets = append(targets, a)
 	}
 	for _, a := range targets {
 		if _, err := s.dualUDPSock.WriteToUDP(payload, a); err != nil {

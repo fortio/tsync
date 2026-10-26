@@ -418,3 +418,73 @@ func TestNoEscapesInLogs(t *testing.T) {
 		t.Errorf("escape sequences in the logs: %q", out)
 	}
 }
+
+func TestPeersCleanupKeepsLinkedPeers(t *testing.T) {
+	s := (&Config{PeerTimeout: time.Second}).NewServer()
+	peer := Peer{Name: "linked", IP: "10.0.0.1", PublicKey: "k"}
+	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now().Add(-time.Minute)})
+	s.links[peer] = &link{conn: &net.TCPConn{}}
+	s.PeersCleanup()
+	if s.Peers.Len() != 1 {
+		t.Fatalf("linked peer must not expire from missing discovery")
+	}
+	s.resetLinkLocked(peer) // link lost: grace period before expiry.
+	s.PeersCleanup()
+	if s.Peers.Len() != 1 {
+		t.Errorf("peer with a just lost link expired right away")
+	}
+}
+
+func TestDiscoveryRoundStaticPeerBackoff(t *testing.T) {
+	listen := func() *net.UDPConn {
+		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	static, mcast := listen(), listen()
+	s := (&Config{Name: "us", BaseBroadcastInterval: 100 * time.Millisecond}).NewServer()
+	s.dualUDPSock = listen()
+	s.destAddr = mcast.LocalAddr().(*net.UDPAddr)
+	s.staticPeers = []*net.UDPAddr{static.LocalAddr().(*net.UDPAddr)}
+	count := func(c *net.UDPConn) (n int) {
+		buf := make([]byte, 512)
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+			if _, _, err := c.ReadFromUDP(buf); err != nil {
+				return n
+			}
+			n++
+		}
+	}
+	now := time.Now()
+	s.startedAt = now.Add(-time.Hour)
+	s.discoveryRound(1, now)
+	s.discoveryRound(2, now.Add(10*time.Millisecond)) // too soon for the static peer
+	if n := count(static); n != 1 {
+		t.Errorf("expected 1 direct message, got %d", n)
+	}
+	s.discoveryRound(3, now.Add(150*time.Millisecond)) // delay is now 200ms
+	s.discoveryRound(4, now.Add(250*time.Millisecond))
+	if n := count(static); n != 1 {
+		t.Errorf("expected 1 more direct message after backoff, got %d", n)
+	}
+	// linked to the static peer, and to everything we know: no more direct messages and a slow multicast.
+	peer := Peer{Name: "them", IP: "127.0.0.1", PublicKey: "k"}
+	s.Peers.Set(peer, PeerData{Port: 1})
+	s.links[peer] = &link{conn: &net.TCPConn{}}
+	count(mcast)
+	s.discoveryRound(5, now.Add(time.Second))
+	if n := count(static); n != 0 {
+		t.Errorf("no direct message expected to a linked peer, got %d", n)
+	}
+	if n := count(mcast); n != 0 {
+		t.Errorf("no multicast expected right after the last one when all linked, got %d", n)
+	}
+	s.discoveryRound(6, now.Add(SlowDiscoveryInterval+time.Second))
+	if n := count(mcast); n != 1 {
+		t.Errorf("slow multicast heartbeat expected, got %d", n)
+	}
+}
