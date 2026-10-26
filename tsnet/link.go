@@ -32,11 +32,17 @@ const (
 	FrameClip  = 'T' // clipboard: 8 bytes (big endian) unix nano time it was copied, then the text.
 	// FrameClipNoTime is the clipboard text without time, sent by older versions.
 	FrameClipNoTime = 'C'
+	// FrameKeepAlive (no payload) is sent on idle links: it keeps the peer listed (and detects dead links) when
+	// discovery slows down once everyone is linked.
+	FrameKeepAlive = 'K'
 
 	linkDialTimeout  = 3 * time.Second
 	linkHelloTimeout = 5 * time.Second // also how long we wait for our side of the handshake to complete.
 	linkWriteTimeout = 5 * time.Second
 	helloRetryDelay  = 100 * time.Millisecond
+	// linkKeepAliveEvery is how often we send FrameKeepAlive; a link with nothing received for linkDeadAfter is dead.
+	linkKeepAliveEvery = 10 * time.Second
+	linkDeadAfter      = 30 * time.Second
 )
 
 func writeFrame(w io.Writer, sess *tcrypto.Session, frameType byte, payload []byte) error {
@@ -236,6 +242,7 @@ func (s *Server) linkFailed(peer Peer, l *link) {
 func (s *Server) resetLinkLocked(peer Peer) {
 	s.dropLinkLocked(peer)
 	if peerData, ok := s.Peers.Get(peer); ok {
+		peerData.LastSeen = time.Now() // linked peers aren't expired by discovery: give it time to be rediscovered.
 		s.setStatusLocked(peer, peerData, NotLinked)
 	}
 }
@@ -324,7 +331,18 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	defer s.linkClosed(l)
+	// Peers before protocol 1 don't send keepalives (and log a warning for ours).
+	keepAlive := s.peerKeepAlive(peer)
+	if keepAlive {
+		done := make(chan struct{})
+		defer close(done)
+		s.wg.Add(1)
+		go s.keepAlive(l, conn, done)
+	}
 	for {
+		if keepAlive {
+			_ = conn.SetReadDeadline(time.Now().Add(linkDeadAfter))
+		}
 		frame, err := readFrame(conn)
 		var plain []byte
 		if err == nil {
@@ -340,6 +358,9 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			_ = conn.Close()
 			s.linkFailed(peer, l)
 			return
+		}
+		if plain[0] == FrameKeepAlive {
+			continue // the read itself is the proof of life (deadline reset above).
 		}
 		if s.Headless && !allowedHeadless(plain[0]) {
 			log.LogVf("Headless: ignoring frame %q from %q", plain[0], peer.Name)
@@ -358,6 +379,30 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 		default:
 			if !s.handleFileFrame(peer, l, conn, plain) && !s.handleSyncFrame(peer, l, conn, plain) {
 				log.Warnf("Ignoring unknown frame type %q from %s", plain[0], peer.Name)
+			}
+		}
+	}
+}
+
+func (s *Server) peerKeepAlive(peer Peer) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	data, ok := s.Peers.Get(peer)
+	return ok && data.keepAlive()
+}
+
+// keepAlive sends FrameKeepAlive on the link every linkKeepAliveEvery until done is closed.
+func (s *Server) keepAlive(l *link, conn net.Conn, done <-chan struct{}) {
+	defer s.wg.Done()
+	ticker := time.NewTicker(linkKeepAliveEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			if err := l.send(conn, FrameKeepAlive, nil); err != nil {
+				return // closed by send, the read loop cleans up.
 			}
 		}
 	}

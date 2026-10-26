@@ -519,3 +519,42 @@ func TestStaticPeerNoMulticast(t *testing.T) {
 		t.Errorf("expected error for invalid peer address")
 	}
 }
+
+// -mcast none: peers find each other through -peers only (no multicast needed so no NoMCastOnMacInCI).
+func TestNoMulticastPeers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	portA, portB := testPort+10, testPort+11
+	mk := func(name string, port, other int) *tsnet.Server {
+		id, err := tcrypto.NewIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := tsnet.Config{
+			Name: name, Port: port, Mcast: "None", Target: tsnet.DefaultTarget, Identity: id,
+			BaseBroadcastInterval: 100 * time.Millisecond, Peers: []string{fmt.Sprintf("127.0.0.1:%d", other)},
+		}
+		srv := cfg.NewServer()
+		if err = srv.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(srv.Stop)
+		return srv
+	}
+	srvA, srvB := mk("HostA", portA, portB), mk("HostB", portB, portA)
+	for _, c := range []struct {
+		srv  *tsnet.Server
+		want string
+	}{{srvA, "HostB"}, {srvB, "HostA"}} {
+		for found := false; !found; {
+			select {
+			case <-ctx.Done():
+				t.Fatalf("%s not discovered", c.want)
+			case <-time.After(50 * time.Millisecond):
+			}
+			for peer := range c.srv.Peers.All() {
+				found = found || peer.Name == c.want
+			}
+		}
+	}
+}
