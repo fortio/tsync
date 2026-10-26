@@ -259,15 +259,8 @@ func (s *Server) Start(ctx context.Context) error {
 	if err = p.SetMulticastLoopback(true); err != nil {
 		log.Warnf("Failed to enable multicast loopback: %v", err)
 	}
-	s.dualUDPSock, err = net.ListenUDP("udp4", localIP) // was net.DialUDP("udp4", localIP, s.destAddr)
-	if err != nil {
+	if err = s.openUnicast(ctx, goodIf, localIP); err != nil {
 		s.broadcastListen.Close()
-		return err
-	}
-	s.ourSendAddr = s.dualUDPSock.LocalAddr().(*net.UDPAddr)
-	if err = s.startTCP(localIP); err != nil {
-		s.broadcastListen.Close()
-		s.dualUDPSock.Close()
 		return err
 	}
 	log.Infof("Sockets created - unicast: %s, multicast listen: %s, tcp: %s",
@@ -284,6 +277,36 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.runMulticastReceive(ctx)
 	go s.runUnicastReceive(ctx)
 	go s.runTCPAccept(ctx)
+	return nil
+}
+
+// openUnicast creates the unicast UDP socket (also used to send multicast) and the TCP listener.
+// With static peers (eg over a VPN like tailscale) each peer may be reached through a different interface:
+// listen on all addresses so the OS picks the right source address per peer; multicast stays on goodIf.
+func (s *Server) openUnicast(ctx context.Context, goodIf *net.Interface, localIP *net.UDPAddr) (err error) {
+	bindIP := localIP
+	if len(s.staticPeers) > 0 {
+		bindIP = nil
+		s.logPeerInterfaces(ctx)
+	}
+	s.dualUDPSock, err = net.ListenUDP("udp4", bindIP) // was net.DialUDP("udp4", localIP, s.destAddr)
+	if err != nil {
+		return err
+	}
+	if bindIP == nil && goodIf != nil {
+		if err = ipv4.NewPacketConn(s.dualUDPSock).SetMulticastInterface(goodIf); err != nil {
+			log.Warnf("Failed to set multicast interface %q: %v", goodIf.Name, err)
+		}
+	}
+	s.ourSendAddr = s.dualUDPSock.LocalAddr().(*net.UDPAddr)
+	if localIP != nil && bindIP == nil {
+		// keep the default route address as our identity (and to ignore our own multicast).
+		s.ourSendAddr = &net.UDPAddr{IP: localIP.IP, Port: s.ourSendAddr.Port}
+	}
+	if err = s.startTCP(bindIP); err != nil {
+		s.dualUDPSock.Close()
+		return err
+	}
 	return nil
 }
 
@@ -534,6 +557,18 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	s.sendDiscoveryTo(addr)
 	if early = s.takeEarlyLocked(src); early == nil {
 		s.autoConnectLocked(peer, data, time.Now())
+	}
+}
+
+// logPeerInterfaces logs which interface and local address is used to reach each static peer.
+func (s *Server) logPeerInterfaces(ctx context.Context) {
+	for _, a := range s.staticPeers {
+		ifc, local, err := GetInternetInterface(ctx, a.String())
+		if err != nil {
+			log.Warnf("No interface found to reach peer %v: %v", a, err)
+			continue
+		}
+		log.Infof("Peer %v is reached through interface %q (local IP %v)", a, ifc.Name, local.IP)
 	}
 }
 

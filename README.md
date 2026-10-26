@@ -72,7 +72,7 @@ The useful ones:
 - `-sync-rescan` (default 10s) is how often the sync folders are scanned for changes when not watched.
 - `-tsync-dir` (default `~/.tsync`) is where the identity, trusted peers and sync state (bases, conflicts list) are, eg to run several tsync with different identities on one machine.
 - `-dir` for where received files are saved. Default is `~/Downloads` if it exists, else the current directory.
-- `-peers host[:port],...` to also send discovery directly to these addresses when multicast doesn't work at all (some VPNs, cloud VMs...). The port defaults to 29556.
+- `-peers host[:port],...` to also send discovery directly to these addresses when multicast doesn't work at all (some VPNs, cloud VMs...). The port defaults to 29556. Each peer is reached through the interface the OS routes it to (eg tailscale's), no need for `-target` to match: with `-peers` tsync listens on all addresses, multicast still uses the `-target` interface.
 - `-auto-connect=false` to not reconnect automatically to accepted peers.
 - `-clip-lines` for how many lines each clipboard box shows (3 by default).
 - `-port` and `-mcast` for a different discovery port or multicast group, eg to keep separate groups of machines.
