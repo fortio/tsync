@@ -422,7 +422,7 @@ func TestNoEscapesInLogs(t *testing.T) {
 func TestPeersCleanupKeepsLinkedPeers(t *testing.T) {
 	s := (&Config{PeerTimeout: time.Second}).NewServer()
 	peer := Peer{Name: "linked", IP: "10.0.0.1", PublicKey: "k"}
-	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now().Add(-time.Minute)})
+	s.Peers.Set(peer, PeerData{Port: 1234, Proto: 1, LastSeen: time.Now().Add(-time.Minute)})
 	s.links[peer] = &link{conn: &net.TCPConn{}}
 	s.PeersCleanup()
 	if s.Peers.Len() != 1 {
@@ -473,8 +473,14 @@ func TestDiscoveryRoundStaticPeerBackoff(t *testing.T) {
 	}
 	// linked to the static peer, and to everything we know: no more direct messages and a slow multicast.
 	peer := Peer{Name: "them", IP: "127.0.0.1", PublicKey: "k"}
-	s.Peers.Set(peer, PeerData{Port: 1})
+	// older versions (protocol 0) need the discovery messages to keep us listed: same as unlinked.
+	s.Peers.Set(peer, PeerData{Port: static.LocalAddr().(*net.UDPAddr).Port})
 	s.links[peer] = &link{conn: &net.TCPConn{}}
+	s.discoveryRound(4, now.Add(500*time.Millisecond))
+	if n := count(static); n != 1 {
+		t.Errorf("expected direct message to a linked peer of protocol 0, got %d", n)
+	}
+	s.Peers.Set(peer, PeerData{Port: 1, Proto: 1})
 	count(mcast)
 	s.discoveryRound(5, now.Add(time.Second))
 	if n := count(static); n != 0 {
@@ -486,5 +492,19 @@ func TestDiscoveryRoundStaticPeerBackoff(t *testing.T) {
 	s.discoveryRound(6, now.Add(SlowDiscoveryInterval+time.Second))
 	if n := count(mcast); n != 1 {
 		t.Errorf("slow multicast heartbeat expected, got %d", n)
+	}
+}
+
+func TestDiscoveryProtocolDecode(t *testing.T) {
+	s := (&Config{Name: "us", Version: "v1.2.3"}).NewServer()
+	s.idStr, s.runID = "key", "run"
+	d, err := s.MCastMessageDecode(s.discoveryPayload(7))
+	if err != nil || d.Name != "us" || d.Epoch != 7 || d.RunID != "run" || d.Proto != ProtocolVersion || d.Version != "v1.2.3" {
+		t.Errorf("bad decode %+v %v", d, err)
+	}
+	// 0.22: no protocol level or version.
+	d, err = s.MCastMessageDecode([]byte(fmt.Sprintf(DiscoveryMessageFormat, "old", "key", 3, "r")))
+	if err != nil || d.Name != "old" || d.RunID != "r" || d.Proto != 0 || d.Version != "" {
+		t.Errorf("bad old decode %+v %v", d, err)
 	}
 }

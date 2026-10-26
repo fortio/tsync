@@ -501,7 +501,8 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	// echo -n "ts" | od -d -> 29556
 	fPort := flag.Int("port", tsnet.DefaultDiscoveryPort, "Discovery port to use")
 	// 239.255."t"."s"
-	fMcast := flag.String("mcast", "239.255.116.115", "Multicast address to use for server discovery")
+	fMcast := flag.String("mcast", "239.255.116.115",
+		"Multicast address to use for server discovery, or \"none\" to not use multicast (see -peers)")
 	fTarget := flag.String("target", tsnet.DefaultTarget, "Test target udp ip:port to use to find the right interface and local ip")
 	fInterval := flag.Duration("interval", tsnet.DefaultBroadcastInterval,
 		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
@@ -524,7 +525,7 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	}
 	if *fSync.headless {
 		return RunHeadless(flag.Args(), tsnet.Config{
-			Name: *fName, Port: *fPort, Mcast: *fMcast, Target: *fTarget, BaseBroadcastInterval: *fInterval,
+			Name: *fName, Port: *fPort, Mcast: *fMcast, Target: *fTarget, BaseBroadcastInterval: *fInterval, Version: cli.ShortVersion,
 			Peers: SplitList(*fPeers), FileDir: DownloadDir(*fDir), MaxRate: *fMaxRate,
 		}, fSync, *fTsyncDir)
 	}
@@ -547,10 +548,11 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	}
 	var version atomic.Uint64
 	cfg := tsnet.Config{
-		Name:   *fName,
-		Port:   *fPort,
-		Mcast:  *fMcast,
-		Target: *fTarget,
+		Name:    *fName,
+		Version: cli.ShortVersion,
+		Port:    *fPort,
+		Mcast:   *fMcast,
+		Target:  *fTarget,
 		OnChange: func(v uint64) {
 			version.Store(v)
 		},

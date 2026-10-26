@@ -75,7 +75,22 @@ The useful ones:
 - `-peers host[:port],...` to also send discovery directly to these addresses when multicast doesn't work at all (some VPNs, cloud VMs...). The port defaults to 29556. Each peer is reached through the interface the OS routes it to (eg tailscale's), no need for `-target` to match: with `-peers` tsync listens on all addresses, multicast still uses the `-target` interface.
 - `-auto-connect=false` to not reconnect automatically to accepted peers.
 - `-clip-lines` for how many lines each clipboard box shows (3 by default).
-- `-port` and `-mcast` for a different discovery port or multicast group, eg to keep separate groups of machines.
+- `-port` and `-mcast` for a different discovery port or multicast group, eg to keep separate groups of machines. `-mcast none` doesn't use multicast at all (for networks or hosts where it doesn't work, eg tailscale only): list the other machines in `-peers` (or at least have them list this one).
+
+### Over Tailscale (or another VPN)
+
+VPNs like Tailscale don't carry multicast, so tsync can't find the other machines by itself: tell it where they are with `-peers`, using their Tailscale names or `100.x` addresses:
+
+```
+tsync -peers laptop,desktop.tailnet-name.ts.net
+```
+
+- It's enough for one side to list the other: the machine receiving the discovery message adds the sender and answers directly. Listing each other works too.
+- Each peer is reached through the interface the OS routes it to (the Tailscale one here), no `-target` needed. A machine can mix `-peers` over the VPN and multicast on its local network.
+- Names are resolved when tsync starts. Unlinked peers are retried with a delay growing up to 30s, so a machine that was off or restarting is found again within that.
+- On a machine with no local network to speak of (a cloud VM or server that is only on the tailnet, a container...) add `-mcast none` to not use multicast at all. tsync then listens for discovery on the `-port` (29556 by default) like the multicast socket normally does, so keep the same `-port` on all of them.
+- The firewall (and Tailscale ACLs) must let UDP `-port` and tsync's TCP link port through between the machines (Tailscale allows everything by default).
+- The first connection needs the usual accept and hash check on both sides, then the machines reconnect by themselves. For a server that should only sync directories, see Headless below.
 
 ### Headless
 
@@ -113,7 +128,7 @@ Run 2 instances with different names and identities: `tsync -name a` and `HOME=/
 ## How does it work?
 
 - Interface: tsync first finds which interface and local address to use by checking the route to `-target` (UDP 8.8.8.8:53 by default, one of Google's DNS servers; nothing is sent to it). This avoids picking the WSL virtual interface on Windows for instance.
-- Discovery: about every 1.5s, plus some random jitter, each instance sends its name, public key and a random id for this run to a multicast group (239.255.116.115:29556 by default), and also directly to the peers it knows but isn't linked to yet, and to `-peers` (with a delay doubling up to 30s while not linked). Peers not heard from for 10s are removed. Once linked to all the peers it knows, an instance only multicasts every 20s: the links send a keepalive every 10s (a link silent for 30s is dropped) and keep their peer listed. A new or restarted instance announces itself right away and at the fast rate, which makes the others speed up until they are linked with it.
+- Discovery: about every 1.5s, plus some random jitter, each instance sends its name, public key and a random id for this run to a multicast group (239.255.116.115:29556 by default), and also directly to the peers it knows but isn't linked to yet, and to `-peers` (with a delay doubling up to 30s while not linked). Peers not heard from for 10s are removed. Once linked to all the peers it knows, an instance only multicasts every 20s: the links send a keepalive every 10s (a link silent for 30s is dropped) and keep their peer listed. Discovery messages also carry a protocol level and the version: peers of older versions (before 0.23) are still handled, they just keep the old chatty behavior (no keepalive, fast discovery) and show their level in the logs. A new or restarted instance announces itself right away and at the fast rate, which makes the others speed up until they are linked with it.
 - Identity: each machine has an Ed25519 key pair in `~/.tsync/`, created on first run. The `DDD-DDDD` hash comes from the public key; checking it on both sides is what makes the first connection safe (trust on first use).
 - Handshake: connection requests and accepts carry a new X25519 key signed with the sender's identity and tied to both run ids, so old messages can't be replayed. Both sides derive the session keys with HKDF-SHA256, one AES-256-GCM key per direction.
 - Link: one side then opens a TCP connection. Every frame on it is encrypted and authenticated, with counter nonces so frames can't be replayed or reordered, and the first frame proves which peer it is.

@@ -331,12 +331,18 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	defer s.linkClosed(l)
-	done := make(chan struct{})
-	defer close(done)
-	s.wg.Add(1)
-	go s.keepAlive(l, conn, done)
+	// Peers before protocol 1 don't send keepalives (and log a warning for ours).
+	keepAlive := s.peerKeepAlive(peer)
+	if keepAlive {
+		done := make(chan struct{})
+		defer close(done)
+		s.wg.Add(1)
+		go s.keepAlive(l, conn, done)
+	}
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(linkDeadAfter))
+		if keepAlive {
+			_ = conn.SetReadDeadline(time.Now().Add(linkDeadAfter))
+		}
 		frame, err := readFrame(conn)
 		var plain []byte
 		if err == nil {
@@ -376,6 +382,13 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			}
 		}
 	}
+}
+
+func (s *Server) peerKeepAlive(peer Peer) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	data, ok := s.Peers.Get(peer)
+	return ok && data.keepAlive()
 }
 
 // keepAlive sends FrameKeepAlive on the link every linkKeepAliveEvery until done is closed.

@@ -35,6 +35,8 @@ const (
 	DefaultBroadcastInterval = 1500 * time.Millisecond
 	TimeFormat               = "15:04:05.000" // time only + millis.
 	DefaultPeerTimeout       = 10 * time.Second
+	// NoMulticast as Config.Mcast disables multicast: discovery only through Config.Peers.
+	NoMulticast = "none"
 	// SlowDiscoveryInterval is how often we multicast once we are linked to all the peers we know.
 	SlowDiscoveryInterval = 20 * time.Second
 	// FastDiscoveryStartup is how long after startup we always use the fast interval.
@@ -45,12 +47,24 @@ const (
 	DefaultDiscoveryPort       = 29556 // "ts" in ascii.
 )
 
+// ProtocolVersion is our protocol level, sent in the discovery messages. 0 is before it existed (up to v0.22), 1
+// added the link keepalive. Increase it for a change that older versions can't handle, and keep handling the lower
+// levels where we can (eg skip what they don't understand): see PeerData.Proto.
+const ProtocolVersion = 1
+
+// keepAlive returns true if the peer sends link keepalives (and so doesn't need discovery to stay listed).
+func (pd PeerData) keepAlive() bool {
+	return pd.Proto >= 1
+}
+
 // Compatible returns false for peers running an older tsync version we can't connect with.
 func (pd PeerData) Compatible() bool {
 	return pd.RunID != ""
 }
 
 type Config struct {
+	// Short version of the software, sent to the peers (cosmetic).
+	Version string
 	// Name to use, if empty hostname will be used.
 	Name  string
 	Port  int
@@ -146,6 +160,7 @@ type Server struct {
 	staticPeers []*net.UDPAddr
 	// discovery pacing: see discoveryRound. Only used by the sender goroutine.
 	startedAt   time.Time
+	noMcast     bool // Config.Mcast is NoMulticast.
 	lastMcast   time.Time
 	staticState map[string]*staticBackoff
 	// random id of this run, in our discovery messages (handshake context, restart detection).
@@ -179,6 +194,8 @@ type PeerData struct {
 	LastSeen  time.Time
 	Status    ConnectionStatus
 	RunID     string // random id of the peer's current run (from its discovery messages), empty for old versions.
+	Proto     int    // protocol level of the peer, 0 for older versions: see ProtocolVersion.
+	Version   string // short version of the peer (cosmetic, empty for older versions).
 	// Last clipboard received from that peer.
 	Clip     string
 	ClipTime time.Time
@@ -246,10 +263,16 @@ func (s *Server) Start(ctx context.Context) error {
 	if strings.IndexByte(s.Target, ':') < 0 {
 		s.Target += ":53" // default to dns port (even though we don't really use the port for target)
 	}
+	s.noMcast = strings.EqualFold(s.Mcast, NoMulticast)
+	if s.noMcast && len(s.staticPeers) == 0 {
+		log.Warnf("Multicast disabled and no -peers: only peers that list us in their -peers can find us")
+	}
 	addr := fmt.Sprintf("%s:%d", s.Mcast, s.Port)
-	s.destAddr, err = net.ResolveUDPAddr("udp4", addr)
-	if err != nil {
-		return err
+	if !s.noMcast {
+		s.destAddr, err = net.ResolveUDPAddr("udp4", addr)
+		if err != nil {
+			return err
+		}
 	}
 	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.destAddr)
 	// Try to get the right interface to listen on
@@ -259,21 +282,19 @@ func (s *Server) Start(ctx context.Context) error {
 	} else {
 		log.Infof("Using interface %q for multicast (with local IP %v)", goodIf.Name, localIP)
 	}
-	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.destAddr)
-	if err != nil {
+	if err = s.openMulticast(goodIf); err != nil {
 		return err
-	}
-	// Enable multicast loopback so we can see our own packets (needed on Windows)
-	p := ipv4.NewPacketConn(s.broadcastListen)
-	if err = p.SetMulticastLoopback(true); err != nil {
-		log.Warnf("Failed to enable multicast loopback: %v", err)
 	}
 	if err = s.openUnicast(ctx, goodIf, localIP); err != nil {
-		s.broadcastListen.Close()
+		if s.broadcastListen != nil {
+			s.broadcastListen.Close()
+		}
 		return err
 	}
-	log.Infof("Sockets created - unicast: %s, multicast listen: %s, tcp: %s",
-		s.ourSendAddr, s.broadcastListen.LocalAddr(), s.tcpListen.Addr())
+	log.Infof("Sockets created - unicast: %s, tcp: %s", s.ourSendAddr, s.tcpListen.Addr())
+	if s.broadcastListen != nil {
+		log.Infof("Multicast listen: %s", s.broadcastListen.LocalAddr())
+	}
 
 	// get a cancelable context
 	ctx, s.cancel = context.WithCancel(ctx)
@@ -281,11 +302,31 @@ func (s *Server) Start(ctx context.Context) error {
 	s.ctx = ctx
 	s.startSync(ctx)
 	s.stateMu.Unlock()
-	s.wg.Add(4) // broadcast sender, multicast receiver, unicast receiver and tcp accept
+	s.wg.Add(3) // broadcast sender, unicast receiver and tcp accept
 	go s.runAdv(ctx)
-	go s.runMulticastReceive(ctx)
+	if !s.noMcast {
+		s.wg.Add(1) // multicast receiver
+		go s.runMulticastReceive(ctx)
+	}
 	go s.runUnicastReceive(ctx)
 	go s.runTCPAccept(ctx)
+	return nil
+}
+
+// openMulticast joins the multicast group on goodIf (unless disabled).
+func (s *Server) openMulticast(goodIf *net.Interface) (err error) {
+	if s.noMcast {
+		log.Infof("Multicast disabled (-mcast %s): discovery only through -peers", NoMulticast)
+		return nil
+	}
+	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.destAddr)
+	if err != nil {
+		return err
+	}
+	// Enable multicast loopback so we can see our own packets (needed on Windows)
+	if err = ipv4.NewPacketConn(s.broadcastListen).SetMulticastLoopback(true); err != nil {
+		log.Warnf("Failed to enable multicast loopback: %v", err)
+	}
 	return nil
 }
 
@@ -298,7 +339,16 @@ func (s *Server) openUnicast(ctx context.Context, goodIf *net.Interface, localIP
 		bindIP = nil
 		s.logPeerInterfaces(ctx)
 	}
-	s.dualUDPSock, err = net.ListenUDP("udp4", bindIP) // was net.DialUDP("udp4", localIP, s.destAddr)
+	laddr := bindIP
+	if s.noMcast {
+		// Without the multicast socket (which also gets the unicast messages sent to the discovery port, eg by the
+		// -peers of others), the unicast socket has to be on the discovery port.
+		laddr = &net.UDPAddr{Port: s.Port}
+		if bindIP != nil {
+			laddr.IP = bindIP.IP
+		}
+	}
+	s.dualUDPSock, err = net.ListenUDP("udp4", laddr) // was net.DialUDP("udp4", localIP, s.destAddr)
 	if err != nil {
 		return err
 	}
@@ -329,7 +379,9 @@ func (s *Server) Stop() {
 	}
 	s.cancel()
 	s.cancel = nil
-	s.broadcastListen.Close() // needed or write will block forever
+	if s.broadcastListen != nil {
+		s.broadcastListen.Close() // needed or write will block forever
+	}
 	s.dualUDPSock.Close()
 	s.tcpListen.Close() // TCP links get closed by the context cancel.
 	s.wg.Wait()
@@ -383,7 +435,7 @@ func (s *Server) PeersCleanup() {
 	now := time.Now()
 	for peer, data := range s.Peers.All() {
 		// A peer with an established link stays (the link has its own keepalive and dead detection).
-		if l := s.links[peer]; l != nil && l.conn != nil {
+		if l := s.links[peer]; l != nil && l.conn != nil && data.keepAlive() {
 			continue
 		}
 		if now.Sub(data.LastSeen) > s.PeerTimeout {
@@ -497,7 +549,7 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		return
 	}
 	theirEpoch := d.Epoch
-	data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now(), RunID: d.RunID}
+	data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now(), RunID: d.RunID, Proto: d.Proto, Version: d.Version}
 	peer := Peer{Name: d.Name, IP: addr.IP.String(), PublicKey: d.PublicKey}
 	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
 	if peer == us {
@@ -632,10 +684,12 @@ func GetInternetInterface(ctx context.Context, target string) (*net.Interface, *
 
 const (
 	DiscoveryMessageFormat = "tsync1 %q %s e %d r %s" // name, public key, epoch, run id
-	ConnectMessageFormat   = "connect1 %q %q %d %s"   // from_name, target_name, tcp link port, signed ephemeral key
-	AcceptMessageFormat    = "accept1 %q %q %d %s"    // from_name, target_name, tcp link port, signed ephemeral key
-	DialMeMessageFormat    = "dialme1 %q %q"          // from_name, target_name: our dial failed, please dial us.
-	RejectMessageFormat    = "reject1 %q %q %q"       // from_name, target_name, reason
+	// DiscoveryExtraFormat is appended to DiscoveryMessageFormat since protocol 1 (older versions ignore it).
+	DiscoveryExtraFormat = " p %d v %q"           // protocol level, short version (cosmetic).
+	ConnectMessageFormat = "connect1 %q %q %d %s" // from_name, target_name, tcp link port, signed ephemeral key
+	AcceptMessageFormat  = "accept1 %q %q %d %s"  // from_name, target_name, tcp link port, signed ephemeral key
+	DialMeMessageFormat  = "dialme1 %q %q"        // from_name, target_name: our dial failed, please dial us.
+	RejectMessageFormat  = "reject1 %q %q %q"     // from_name, target_name, reason
 )
 
 func newRunID() string {
@@ -645,7 +699,8 @@ func newRunID() string {
 }
 
 func (s *Server) discoveryPayload(epoch int32) []byte {
-	return []byte(fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID))
+	return []byte(fmt.Sprintf(DiscoveryMessageFormat+DiscoveryExtraFormat,
+		s.Name, s.idStr, epoch, s.runID, ProtocolVersion, s.Version))
 }
 
 // sendDiscoveryTo sends our discovery message directly to addr.
@@ -675,7 +730,8 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	linkedIPs := map[string]bool{}
 	var unlinked []*net.UDPAddr
 	for peer, data := range s.Peers.All() {
-		if l := s.links[peer]; l != nil && l.conn != nil {
+		// peers of older versions need the discovery messages to keep us listed: same as not linked.
+		if l := s.links[peer]; l != nil && l.conn != nil && data.keepAlive() {
 			linkedIPs[peer.IP] = true
 			continue
 		}
@@ -684,12 +740,14 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	s.stateMu.Unlock()
 	payload := s.discoveryPayload(epoch)
 	fast := len(unlinked) > 0 || len(linkedIPs) == 0 || now.Sub(s.startedAt) < FastDiscoveryStartup
-	if fast || now.Sub(s.lastMcast) >= SlowDiscoveryInterval {
+	switch {
+	case s.noMcast:
+	case fast || now.Sub(s.lastMcast) >= SlowDiscoveryInterval:
 		s.lastMcast = now
 		if err := s.MCastMessageSend(epoch); err != nil {
 			log.Errf("Error sending UDP packet: %v", err)
 		}
-	} else {
+	default:
 		log.LogVf("All peers linked, skipping multicast (last %v ago)", now.Sub(s.lastMcast))
 	}
 	targets := unlinked
@@ -714,7 +772,12 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 		st.delay = min(2*st.delay, MaxStaticPeerBackoff)
 		targets = append(targets, a)
 	}
+	sent := map[string]bool{}
 	for _, a := range targets {
+		if sent[a.String()] {
+			continue // known peer that is also a -peers entry.
+		}
+		sent[a.String()] = true
 		if _, err := s.dualUDPSock.WriteToUDP(payload, a); err != nil {
 			log.LogVf("Error sending direct discovery to %v: %v", a, err)
 		}
@@ -722,8 +785,10 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 }
 
 func (s *Server) MCastMessageSend(epoch int32) error {
-	payload := fmt.Sprintf(DiscoveryMessageFormat, s.Name, s.idStr, epoch, s.runID)
-	_, err := s.dualUDPSock.WriteToUDP([]byte(payload), s.destAddr)
+	if s.destAddr == nil {
+		return nil // multicast disabled.
+	}
+	_, err := s.dualUDPSock.WriteToUDP(s.discoveryPayload(epoch), s.destAddr)
 	return err
 }
 
@@ -733,12 +798,15 @@ type Discovery struct {
 	PublicKey string
 	Epoch     int32
 	RunID     string // empty for older versions.
+	Proto     int    // protocol level, 0 for versions before 0.23.
+	Version   string // short version, empty for older versions.
 }
 
 func (s *Server) MCastMessageDecode(buf []byte) (Discovery, error) {
 	var d Discovery
-	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat, &d.Name, &d.PublicKey, &d.Epoch, &d.RunID)
-	if n < 3 { // older versions don't have the run id.
+	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat+DiscoveryExtraFormat,
+		&d.Name, &d.PublicKey, &d.Epoch, &d.RunID, &d.Proto, &d.Version)
+	if n < 3 { // older versions don't have the run id, protocol level (0) and version.
 		if err == nil {
 			err = fmt.Errorf("could not decode message %q", string(buf))
 		}
