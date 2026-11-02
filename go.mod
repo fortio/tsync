@@ -9,7 +9,7 @@ require (
 	fortio.org/smap v1.1.0
 	fortio.org/terminal v0.66.0
 	github.com/fsnotify/fsnotify v1.10.1
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/text v0.43.0
 )
