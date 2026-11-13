@@ -189,12 +189,22 @@ func TestNoteSkew(t *testing.T) {
 	if l.clockSkew != 100*ms || l.skewWarned {
 		t.Errorf("delayed sample: skew %v warned %v", l.clockSkew, l.skewWarned)
 	}
-	// the clock really moves: after skewWindow samples the old ones are gone.
-	for range skewWindow {
-		note(700 * ms)
+	note(100 * ms)
+	// the clock really moves: after 2 samples that are far above the old ones, they are dropped.
+	note(700 * ms)
+	if l.clockSkew != 100*ms {
+		t.Errorf("first moved sample: skew %v", l.clockSkew)
 	}
-	if l.clockSkew != 700*ms || !l.skewWarned {
-		t.Errorf("moved clock: skew %v warned %v", l.clockSkew, l.skewWarned)
+	note(700 * ms)
+	if l.clockSkew != 700*ms || !l.skewWarned || len(l.skewRecent) != 2 {
+		t.Errorf("moved clock: skew %v warned %v window %v", l.clockSkew, l.skewWarned, l.skewRecent)
+	}
+	// a small move is not a step: the old samples age out after skewWindow samples.
+	for range skewWindow {
+		note(720 * ms)
+	}
+	if l.clockSkew != 720*ms {
+		t.Errorf("small move: skew %v", l.clockSkew)
 	}
 	// back below the limit but not by the margin: still warned (no flapping).
 	for range skewWindow {
