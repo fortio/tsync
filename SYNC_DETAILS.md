@@ -119,8 +119,9 @@ deleted there" and make a copy of its version too). Scans are locked out during 
 The copies are counted on the sync line ("1 conflict copy to review") and listed in
 `~/.tsync/sync/<label>/conflicts.txt` until you delete them, on any machine (the deletion propagates).
 
-As the newest version wins, the clocks matter: each side sends its time when the link is up and both warn (log
-and sync line) if they differ by more than a second (`-sync-max-clock-skew`).
+As the newest version wins, the clocks matter: each side sends its time when the link is up, logs the difference (always, in the
+"has N sync folders" line) and both warn (log and sync line) if they differ by more than a second
+(`-sync-max-clock-skew`).
 
 With `-sync-conflicts list`, files changed on both sides are left alone (both versions stay where they are) and
 listed instead; resolve them by deleting or moving away the version you don't want: the other one is then

@@ -157,3 +157,15 @@ func TestSkewTooBig(t *testing.T) {
 		}
 	}
 }
+
+func TestSkewLimit(t *testing.T) {
+	if got := skewLimit(0); got != DefaultMaxClockSkew {
+		t.Errorf("skewLimit(0) = %v, want %v", got, DefaultMaxClockSkew)
+	}
+	if got := skewLimit(-time.Second); got != DefaultMaxClockSkew {
+		t.Errorf("skewLimit(-1s) = %v, want %v", got, DefaultMaxClockSkew)
+	}
+	if got := skewLimit(300 * time.Millisecond); got != 300*time.Millisecond {
+		t.Errorf("skewLimit(300ms) = %v, want 300ms", got)
+	}
+}

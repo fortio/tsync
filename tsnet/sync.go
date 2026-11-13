@@ -755,10 +755,15 @@ func (s *Server) handleSyncFrame(peer Peer, l *link, conn net.Conn, plain []byte
 
 // SkewTooBig returns true if the clock skew (either way) is more than max (DefaultMaxClockSkew if 0).
 func SkewTooBig(skew, maxSkew time.Duration) bool {
+	return skew.Abs() > skewLimit(maxSkew)
+}
+
+// skewLimit is the clock skew above which to warn: maxSkew, or DefaultMaxClockSkew if not positive.
+func skewLimit(maxSkew time.Duration) time.Duration {
 	if maxSkew <= 0 {
-		maxSkew = DefaultMaxClockSkew
+		return DefaultMaxClockSkew
 	}
-	return skew.Abs() > maxSkew
+	return maxSkew
 }
 
 // syncFoldersReceived records the peer's sync folders and sends it our index of the ones we have too.
@@ -783,7 +788,8 @@ func (s *Server) syncFoldersReceived(peer Peer, l *link, conn net.Conn, skew tim
 			}
 		}
 	}
-	log.Infof("%s has %d sync folders, %d in common with us %q", peer.Name, len(l.syncFolders), len(common), common)
+	log.Infof("%s has %d sync folders, %d in common with us %q, clock %v behind ours (warning above %v)",
+		peer.Name, len(l.syncFolders), len(common), common, skew.Round(time.Millisecond), skewLimit(s.SyncMaxClockSkew))
 }
 
 // syncIndexReceived processes a chunk of the peer's index of a folder.
