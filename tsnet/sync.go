@@ -766,15 +766,60 @@ func skewLimit(maxSkew time.Duration) time.Duration {
 	return maxSkew
 }
 
+// skewWindow is how many of the latest clock skew samples are kept: the transit time only ever adds to a
+// measured skew, so the smallest one is the best estimate of the real one.
+const skewWindow = 6
+
+// noteSkewLocked records a clock skew sample from the peer (how much its clock is behind ours, roughly) and
+// logs when the clock gets too far off (or back to normal). Needs stateMu.
+func (s *Server) noteSkewLocked(peer Peer, l *link, sample time.Duration) {
+	l.skewRecent = append(l.skewRecent, sample)
+	if len(l.skewRecent) > skewWindow {
+		l.skewRecent = l.skewRecent[1:]
+	}
+	old, wasWarned := l.clockSkew, l.skewWarned
+	l.clockSkew = slices.Min(l.skewRecent)
+	limit := skewLimit(s.SyncMaxClockSkew)
+	log.LogVf("Clock of %s: %v behind ours (sample %v)", peer.Name,
+		l.clockSkew.Round(time.Millisecond), sample.Round(time.Millisecond))
+	switch {
+	case !l.skewWarned && SkewTooBig(l.clockSkew, s.SyncMaxClockSkew):
+		l.skewWarned = true
+		log.Warnf("The clock of %s differs from ours by %v: sync conflicts are resolved by modification time, "+
+			"the older version may be the wrong one", peer.Name, l.clockSkew.Round(time.Millisecond))
+	case l.skewWarned && l.clockSkew.Abs() <= limit*8/10: // some margin, to not flap around the limit.
+		l.skewWarned = false
+		log.Infof("The clock of %s is back within %v of ours (%v)", peer.Name, limit, l.clockSkew.Round(time.Millisecond))
+	}
+	if old.Round(skewShown) != l.clockSkew.Round(skewShown) || l.skewWarned != wasWarned {
+		s.change(0) // the sync line shows it.
+	}
+}
+
+// skewShown is the resolution of the skew on the sync line (see syncui.go).
+const skewShown = 100 * time.Millisecond
+
+// keepAliveClock handles the time in a keepalive (when there is one: v0.24.1 and before send none): only needed when
+// we both have sync folders (the peer's names are known from its FrameSyncFolders).
+func (s *Server) keepAliveClock(peer Peer, l *link, plain []byte) {
+	if len(plain) < 9 {
+		return
+	}
+	theirs := time.Unix(0, int64(binary.BigEndian.Uint64(plain[1:9]))) //nolint:gosec // any value is fine.
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if len(s.Sync) == 0 || l.syncFolders == nil {
+		return
+	}
+	s.noteSkewLocked(peer, l, time.Since(theirs))
+}
+
 // syncFoldersReceived records the peer's sync folders and sends it our index of the ones we have too.
 func (s *Server) syncFoldersReceived(peer Peer, l *link, conn net.Conn, skew time.Duration, names string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	l.syncFolders, l.clockSkew = make(map[string]bool), skew
-	if SkewTooBig(skew, s.SyncMaxClockSkew) {
-		log.Warnf("The clock of %s differs from ours by %v: sync conflicts are resolved by modification time, "+
-			"the older version may be the wrong one", peer.Name, skew.Round(time.Millisecond))
-	}
+	l.syncFolders, l.skewRecent, l.skewWarned = make(map[string]bool), nil, false
+	s.noteSkewLocked(peer, l, skew)
 	var common []string
 	for name := range strings.SplitSeq(names, "\n") {
 		if ValidateSyncName(name) != nil {
@@ -789,7 +834,7 @@ func (s *Server) syncFoldersReceived(peer Peer, l *link, conn net.Conn, skew tim
 		}
 	}
 	log.Infof("%s has %d sync folders, %d in common with us %q, clock %v behind ours (warning above %v)",
-		peer.Name, len(l.syncFolders), len(common), common, skew.Round(time.Millisecond), skewLimit(s.SyncMaxClockSkew))
+		peer.Name, len(l.syncFolders), len(common), common, l.clockSkew.Round(time.Millisecond), skewLimit(s.SyncMaxClockSkew))
 }
 
 // syncIndexReceived processes a chunk of the peer's index of a folder.

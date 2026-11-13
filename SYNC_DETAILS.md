@@ -121,7 +121,11 @@ The copies are counted on the sync line ("1 conflict copy to review") and listed
 
 As the newest version wins, the clocks matter: each side sends its time when the link is up, logs the difference (always, in the
 "has N sync folders" line) and both warn (log and sync line) if they differ by more than a second
-(`-sync-max-clock-skew`).
+(`-sync-max-clock-skew`). The time is also in every keepalive (every 10s), so a clock that drifts or gets
+stepped later is noticed too: the warning is logged when it crosses the limit, and again when it's back
+(within 80% of it, to not flap). One-way transit time only adds to the measured difference, so the
+smallest of the last 6 samples (a minute) is used. Peers up to v0.24.1 send no time in their keepalives (and
+ignore ours): only the link-up check applies to them.
 
 With `-sync-conflicts list`, files changed on both sides are left alone (both versions stay where they are) and
 listed instead; resolve them by deleting or moving away the version you don't want: the other one is then
@@ -195,7 +199,7 @@ any new type: **when adding a frame type, decide if headless needs it and update
 | Frame | Meaning | Headless | Notes |
 |---|---|---|---|
 | `H` hello | first frame of a link, authenticates the dialer | n/a | read during the link setup, before the whitelist applies (always handled) |
-| `K` keepalive | empty, every 10s on each link; no frame for 30s drops the link | n/a | handled before the whitelist, like `H`; only sent to peers of protocol level 1+ (announced in their discovery messages), older ones would warn about an unknown frame |
+| `K` keepalive | our time (8 bytes, unix nano; empty up to v0.24.1, and ignored there), every 10s on each link; no frame for 30s drops the link | n/a | handled before the whitelist, like `H`; only sent to peers of protocol level 1+ (announced in their discovery messages), older ones would warn about an unknown frame |
 | `F` sync folders | our time and our labels, when the link is up | yes | both directions |
 | `I` sync index | our index of a shared directory, in chunks | yes | both directions |
 | `Q` sync get | pull a file (path + sha256) | yes | the puller sends it, the other side serves it |

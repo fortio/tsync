@@ -36,6 +36,10 @@ type link struct {
 	// syncFolders are the peer's sync folder names (see FrameSyncFolders).
 	syncFolders map[string]bool
 	clockSkew   time.Duration // how much the peer's clock is behind ours (roughly, from FrameSyncFolders).
+	// skewRecent are the latest clock skew samples (from FrameSyncFolders then the keepalives), skewWarned if
+	// we warned about the clock and it isn't back to normal yet. See noteSkewLocked.
+	skewRecent []time.Duration
+	skewWarned bool
 }
 
 const (
