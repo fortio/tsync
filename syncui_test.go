@@ -72,6 +72,16 @@ func TestSyncLine(t *testing.T) {
 		st.ClockSkew = -2500 * time.Millisecond
 		return st
 	}
+	tight := func(sum syncdir.Summary) tsnet.SyncStatus {
+		st := ready(sum)
+		st.ClockSkew, st.MaxClockSkew = 700*time.Millisecond, 500*time.Millisecond
+		return st
+	}
+	loose := func(sum syncdir.Summary) tsnet.SyncStatus {
+		st := ready(sum)
+		st.ClockSkew, st.MaxClockSkew = 2500*time.Millisecond, 5*time.Second
+		return st
+	}
 	for _, tc := range []struct {
 		st    tsnet.SyncStatus
 		text  string
@@ -88,6 +98,8 @@ func TestSyncLine(t *testing.T) {
 		{listed(conflict), "📁 d ↔ bob · 1 conflict (list in /x/conflicts.txt)", tcolor.BrightYellow},
 		{copies(inSync), "📁 d ↔ bob · in sync (3 items) · 2 conflict copies to review" + listedX, tcolor.BrightYellow},
 		{skewed(inSync), "📁 d ↔ bob · in sync (3 items) · ⚠ clocks differ by 2.5s", tcolor.BrightYellow},
+		{tight(inSync), "📁 d ↔ bob · in sync (3 items) · ⚠ clocks differ by 700ms", tcolor.BrightYellow},
+		{loose(inSync), "📁 d ↔ bob · in sync (3 items)", tcolor.BrightGreen},
 		{cantStore(inSync), "📁 d ↔ bob · in sync (3 items) · 2 from bob can't be stored here" + listedX, tcolor.BrightYellow},
 	} {
 		l := SyncLine(tc.st)

@@ -216,12 +216,13 @@ type syncFlags struct {
 	watch   *bool
 	// headless is -headless, here to keep Main short.
 	headless *bool
+	skew     *time.Duration
 }
 
 // Apply sets the sync flags values in the config.
 func (sf syncFlags) Apply(cfg *tsnet.Config) {
 	cfg.Sync, cfg.SyncKeep, cfg.SyncConflictList, cfg.SyncRescan = *sf.folders, *sf.keep, *sf.list, *sf.rescan
-	cfg.SyncWatch = *sf.watch
+	cfg.SyncWatch, cfg.SyncMaxClockSkew = *sf.watch, *sf.skew
 }
 
 // SyncFlags defines the sync flags: folders, replaced versions to keep, conflicts handling and rescan interval.
@@ -248,7 +249,9 @@ func SyncFlags() syncFlags {
 	})
 	headless := flag.Bool("headless", false, "Run without a UI: only directory sync (-sync) with already trusted peers (pair "+
 		"once with the UI first), no clipboard or file offers. Stop with Ctrl-C or SIGTERM")
-	return syncFlags{folders, keep, &list, rescan, watch, headless}
+	skew := flag.Duration("sync-max-clock-skew", tsnet.DefaultMaxClockSkew, "How much the clocks of syncing machines can "+
+		"differ before warning (conflicts keep the newest version, by modification time)")
+	return syncFlags{folders, keep, &list, rescan, watch, headless, skew}
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
