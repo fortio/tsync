@@ -217,3 +217,19 @@ func TestNoteSkew(t *testing.T) {
 		t.Errorf("negative: skew %v warned %v", l.clockSkew, l.skewWarned)
 	}
 }
+
+func TestSkewWords(t *testing.T) {
+	for _, tc := range []struct {
+		skew time.Duration
+		want string
+	}{
+		{15 * time.Millisecond, "15ms behind ours"},
+		{-15 * time.Millisecond, "15ms ahead of ours"},
+		{-1151 * time.Millisecond, "1.151s ahead of ours"},
+		{0, "0s behind ours"},
+	} {
+		if got := SkewWords(tc.skew); got != tc.want {
+			t.Errorf("SkewWords(%v) = %q, want %q", tc.skew, got, tc.want)
+		}
+	}
+}

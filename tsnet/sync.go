@@ -780,20 +780,27 @@ func (s *Server) noteSkewLocked(peer Peer, l *link, sample time.Duration) {
 	old, wasWarned := l.clockSkew, l.skewWarned
 	l.clockSkew = slices.Min(l.skewRecent)
 	limit := skewLimit(s.SyncMaxClockSkew)
-	log.LogVf("Clock of %s: %v behind ours (sample %v)", peer.Name,
-		l.clockSkew.Round(time.Millisecond), sample.Round(time.Millisecond))
+	log.LogVf("Clock of %s: %s (sample %s)", peer.Name, SkewWords(l.clockSkew), SkewWords(sample))
 	switch {
 	case !l.skewWarned && SkewTooBig(l.clockSkew, s.SyncMaxClockSkew):
 		l.skewWarned = true
-		log.Warnf("The clock of %s differs from ours by %v: sync conflicts are resolved by modification time, "+
-			"the older version may be the wrong one", peer.Name, l.clockSkew.Round(time.Millisecond))
+		log.Warnf("The clock of %s is %s: sync conflicts are resolved by modification time, "+
+			"the older version may be the wrong one", peer.Name, SkewWords(l.clockSkew))
 	case l.skewWarned && l.clockSkew.Abs() <= limit*8/10: // some margin, to not flap around the limit.
 		l.skewWarned = false
-		log.Infof("The clock of %s is back within %v of ours (%v)", peer.Name, limit, l.clockSkew.Round(time.Millisecond))
+		log.Infof("The clock of %s is back within %v of ours (%s)", peer.Name, limit, SkewWords(l.clockSkew))
 	}
 	if old.Round(skewShown) != l.clockSkew.Round(skewShown) || l.skewWarned != wasWarned {
 		s.change(0) // the sync line shows it.
 	}
+}
+
+// SkewWords says how a peer's clock compares to ours: skew is how much it is behind (ahead if negative).
+func SkewWords(skew time.Duration) string {
+	if skew < 0 {
+		return (-skew).Round(time.Millisecond).String() + " ahead of ours"
+	}
+	return skew.Round(time.Millisecond).String() + " behind ours"
 }
 
 // skewShown is the resolution of the skew on the sync line (see syncui.go).
@@ -833,8 +840,8 @@ func (s *Server) syncFoldersReceived(peer Peer, l *link, conn net.Conn, skew tim
 			}
 		}
 	}
-	log.Infof("%s has %d sync folders, %d in common with us %q, clock %v behind ours (warning above %v)",
-		peer.Name, len(l.syncFolders), len(common), common, l.clockSkew.Round(time.Millisecond), skewLimit(s.SyncMaxClockSkew))
+	log.Infof("%s has %d sync folders, %d in common with us %q, clock %s (warning above %v)",
+		peer.Name, len(l.syncFolders), len(common), common, SkewWords(l.clockSkew), skewLimit(s.SyncMaxClockSkew))
 }
 
 // syncIndexReceived processes a chunk of the peer's index of a folder.
