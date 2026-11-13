@@ -47,6 +47,10 @@ const (
 	DefaultDiscoveryPort       = 29556 // "ts" in ascii.
 )
 
+// mcastSilence is how long we can hear no multicast at all, not even our own (looped back), before we reopen the
+// multicast socket: the OS can drop the group membership (eg network change) leaving us deaf to it.
+var mcastSilence = 60 * time.Second
+
 // ProtocolVersion is our protocol level, sent in the discovery messages. 0 is before it existed (up to v0.22), 1
 // added the link keepalive. Increase it for a change that older versions can't handle, and keep handling the lower
 // levels where we can (eg skip what they don't understand): see PeerData.Proto.
@@ -163,6 +167,12 @@ type Server struct {
 	noMcast     bool // Config.Mcast is NoMulticast.
 	lastMcast   time.Time
 	staticState map[string]*staticBackoff
+	// multicast socket watchdog (see checkMulticast): the interface to join on, guard of broadcastListen once started,
+	// when we last received a multicast packet (unix nanos, 0 none yet) and when we last reopened the socket.
+	mcastIf       *net.Interface
+	mcastMu       sync.Mutex
+	lastMcastRecv atomic.Int64
+	lastRejoin    time.Time
 	// random id of this run, in our discovery messages (handshake context, restart detection).
 	runID string
 	// testDialAddr if set changes the address we dial (tests).
@@ -319,15 +329,67 @@ func (s *Server) openMulticast(goodIf *net.Interface) (err error) {
 		log.Infof("Multicast disabled (-mcast %s): discovery only through -peers", NoMulticast)
 		return nil
 	}
-	s.broadcastListen, err = net.ListenMulticastUDP("udp4", goodIf, s.destAddr)
+	s.mcastIf = goodIf
+	s.broadcastListen, err = s.listenMulticast()
+	return err
+}
+
+// listenMulticast joins the multicast group on s.mcastIf.
+func (s *Server) listenMulticast() (*net.UDPConn, error) {
+	conn, err := net.ListenMulticastUDP("udp4", s.mcastIf, s.destAddr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Enable multicast loopback so we can see our own packets (needed on Windows)
-	if err = ipv4.NewPacketConn(s.broadcastListen).SetMulticastLoopback(true); err != nil {
+	if err = ipv4.NewPacketConn(conn).SetMulticastLoopback(true); err != nil {
 		log.Warnf("Failed to enable multicast loopback: %v", err)
 	}
-	return nil
+	return conn, nil
+}
+
+// mcastConn returns the current multicast socket (it can be replaced by rejoinMulticast).
+func (s *Server) mcastConn() *net.UDPConn {
+	s.mcastMu.Lock()
+	defer s.mcastMu.Unlock()
+	return s.broadcastListen
+}
+
+// rejoinMulticast replaces the multicast socket by a new one (the receiver switches to it when the old one closes).
+func (s *Server) rejoinMulticast() {
+	conn, err := s.listenMulticast()
+	if err != nil {
+		log.Errf("Failed to rejoin the multicast group: %v", err)
+		return
+	}
+	s.mcastMu.Lock()
+	if s.Stopped() { // Stop closes the current socket after setting this, under the same lock.
+		s.mcastMu.Unlock()
+		conn.Close()
+		return
+	}
+	old := s.broadcastListen
+	s.broadcastListen = conn
+	s.mcastMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	log.Infof("Multicast socket reopened: %s", conn.LocalAddr())
+}
+
+// checkMulticast (from the sender, before a multicast send) reopens the multicast socket if we heard nothing, not
+// even our own multicast, for mcastSilence: the OS can silently drop the membership (eg after a network change or
+// sleep), we would then not see newer instances nor new peers (only the unicast from peers we already know).
+func (s *Server) checkMulticast(now time.Time) {
+	heard := s.startedAt
+	if last := s.lastMcastRecv.Load(); last != 0 {
+		heard = time.Unix(0, last)
+	}
+	if now.Sub(heard) < mcastSilence || now.Sub(s.lastRejoin) < mcastSilence {
+		return
+	}
+	log.Warnf("No multicast received for %v (not even ours), reopening the multicast socket", now.Sub(heard).Round(time.Second))
+	s.lastRejoin = now
+	s.rejoinMulticast()
 }
 
 // openUnicast creates the unicast UDP socket (also used to send multicast) and the TCP listener.
@@ -379,8 +441,8 @@ func (s *Server) Stop() {
 	}
 	s.cancel()
 	s.cancel = nil
-	if s.broadcastListen != nil {
-		s.broadcastListen.Close() // needed or write will block forever
+	if conn := s.mcastConn(); conn != nil {
+		conn.Close() // needed or write will block forever
 	}
 	s.dualUDPSock.Close()
 	s.tcpListen.Close() // TCP links get closed by the context cancel.
@@ -513,7 +575,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 	defer s.wg.Done()
 	buf := make([]byte, BufSize)
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
-		s.Name, s.broadcastListen.LocalAddr(), BufSize)
+		s.Name, s.mcastConn().LocalAddr(), BufSize)
 	ourAddr := s.ourSendAddr
 	for {
 		select {
@@ -522,15 +584,20 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 			return
 		default:
 			// we rely on Stop() closing the socket to unblock ReadFromUDP on exit.
-			n, addr, err := s.broadcastListen.ReadFromUDP(buf)
+			conn := s.mcastConn()
+			n, addr, err := conn.ReadFromUDP(buf)
 			if err != nil {
-				if ctx.Err() != nil {
+				switch {
+				case ctx.Err() != nil:
 					log.Infof("Normal read from closed error on exit: %v", err)
-				} else {
+				case conn != s.mcastConn():
+					log.Infof("Multicast socket replaced, switching to the new one")
+				default:
 					log.Errf("Error receiving UDP packet: %v", err)
 				}
 				continue
 			}
+			s.lastMcastRecv.Store(time.Now().UnixNano())
 			if addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
 				log.Debugf("Ignoring our own packet (%q)", buf[:n])
 				continue
@@ -559,6 +626,9 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		} else {
 			log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%q run %q epoch %d)",
 				peer, data.RunID, data.Epoch)
+			// Tell it directly too: it may not get our multicast anymore (eg lost its group membership after a
+			// network change) but still hears unicast on its discovery socket, and then exits.
+			s.sendDiscoveryTo(addr)
 		}
 		return
 	}
@@ -744,6 +814,7 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	case s.noMcast:
 	case fast || now.Sub(s.lastMcast) >= SlowDiscoveryInterval:
 		s.lastMcast = now
+		s.checkMulticast(now) // before sending: the reopened socket then gets this very message.
 		if err := s.MCastMessageSend(epoch); err != nil {
 			log.Errf("Error sending UDP packet: %v", err)
 		}
