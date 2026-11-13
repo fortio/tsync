@@ -218,6 +218,38 @@ func TestDialMeFallback(t *testing.T) {
 	}
 }
 
+// readDiscoveryWith reads from conn until a message containing marker (skipping the earlier ones).
+func readDiscoveryWith(conn *net.UDPConn, marker string) ([]byte, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, BufSize)
+	for {
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil || bytes.Contains(buf[:n], []byte(marker)) {
+			return buf[:n], err
+		}
+	}
+}
+
+// checkDuplicates: an older duplicate of ourselves (same name, ip, key) is ignored (and told directly), a newer one
+// makes us stop.
+func checkDuplicates(t *testing.T, s *Server, them *net.UDPConn, from *net.UDPAddr, msg func(string, string, int, string) []byte) {
+	t.Helper()
+	s.epoch.Store(5)
+	s.ourSendAddr = &net.UDPAddr{IP: from.IP, Port: 1000}
+	s.handleDiscovery(msg("Us", s.idStr, 9, "x"), from)
+	if s.Stopped() {
+		t.Errorf("should not stop for an older duplicate")
+	}
+	// ... and it's told directly (its multicast receive could be broken, unicast is the way to make it exit).
+	if got, err := readDiscoveryWith(them, ` e 5 `); err != nil {
+		t.Errorf("expected our discovery sent to the older duplicate, got %q, %v", got, err)
+	}
+	s.handleDiscovery(msg("Us", s.idStr, 3, "x"), from)
+	if !s.Stopped() {
+		t.Errorf("should stop when a newer duplicate is detected")
+	}
+}
+
 // handleDiscovery paths without network (messages fed directly).
 func TestHandleDiscovery(t *testing.T) {
 	id, _ := tcrypto.NewIdentity()
@@ -290,24 +322,15 @@ func TestHandleDiscovery(t *testing.T) {
 	if oldData.Compatible() {
 		t.Errorf("old version peer should not be compatible")
 	}
-	if err := s.ConnectToPeer(oldPeer); err == nil || !strings.Contains(err.Error(), "older") {
-		t.Errorf("expected incompatible version error, got %v", err)
+	if cerr := s.ConnectToPeer(oldPeer); cerr == nil || !strings.Contains(cerr.Error(), "older") {
+		t.Errorf("expected incompatible version error, got %v", cerr)
 	}
 	// Bad public key.
 	s.handleDiscovery(msg("BadKey", "p.notakey", 1, "r"), from)
 	if _, d := get("BadKey"); d.HumanHash != "BAD-PKEY" {
 		t.Errorf("expected BAD-PKEY, got %q", d.HumanHash)
 	}
-	// Older duplicate of ourselves (same name, ip, key): ignored, newer one: we stop.
-	s.epoch.Store(5)
-	s.handleDiscovery(msg("Us", s.idStr, 9, "x"), s.ourSendAddr)
-	if s.Stopped() {
-		t.Errorf("should not stop for an older duplicate")
-	}
-	s.handleDiscovery(msg("Us", s.idStr, 3, "x"), s.ourSendAddr)
-	if !s.Stopped() {
-		t.Errorf("should stop when a newer duplicate is detected")
-	}
+	checkDuplicates(t, s, them, from, msg)
 	// Dial me requests from unknown source or not connected peer are ignored.
 	s.handleDialMe(&net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1}, "x", "Us")
 	s.handleDialMe(from2, "Them", "Us")
@@ -507,4 +530,56 @@ func TestDiscoveryProtocolDecode(t *testing.T) {
 	if err != nil || d.Name != "old" || d.RunID != "r" || d.Proto != 0 || d.Version != "" {
 		t.Errorf("bad old decode %+v %v", d, err)
 	}
+}
+
+// A multicast socket that hears nothing anymore (membership lost) is reopened by the watchdog.
+func TestMulticastWatchdog(t *testing.T) {
+	if os.Getenv("CI") != "" && runtime.GOOS == "darwin" {
+		t.Skip("Skipping multicast test on macOS in CI (no multicast support)")
+	}
+	saved := mcastSilence
+	mcastSilence = 2 * time.Second // more than the sender's interval (up to 1.2s here).
+	defer func() { mcastSilence = saved }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	id, _ := tcrypto.NewIdentity()
+	cfg := Config{
+		Name: "Deaf", Port: DefaultDiscoveryPort + 14, Mcast: "239.255.115.124", Target: DefaultTarget,
+		Identity: id, BaseBroadcastInterval: 100 * time.Millisecond,
+	}
+	s := cfg.NewServer()
+	if err := s.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	waitRecv := func(after int64, what string) {
+		t.Helper()
+		for s.lastMcastRecv.Load() <= after {
+			if ctx.Err() != nil {
+				t.Fatalf("timeout: %s", what)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	waitRecv(0, "no multicast (our own) received at startup")
+	// Make it deaf: swap the socket for one that never joined the group.
+	deaf, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deaf.Close()
+	s.mcastMu.Lock()
+	old := s.broadcastListen
+	s.broadcastListen = deaf
+	s.mcastMu.Unlock()
+	old.Close()
+	time.Sleep(100 * time.Millisecond) // the receiver switches to the deaf socket.
+	before := s.lastMcastRecv.Load()
+	for s.mcastConn() == deaf {
+		if ctx.Err() != nil {
+			t.Fatal("multicast socket not reopened")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitRecv(before, "nothing received on the reopened multicast socket")
 }
