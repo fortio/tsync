@@ -46,8 +46,9 @@ const (
 	DefaultSyncRescan = 10 * time.Second
 	// MaxSyncNameLen is the maximum length of a sync folder name.
 	MaxSyncNameLen = 64
-	// MaxClockSkew is how much the clocks of 2 peers syncing folders can differ before we warn.
-	MaxClockSkew = time.Second
+	// DefaultMaxClockSkew is how much the clocks of 2 peers syncing folders can differ before we warn
+	// (see Config.SyncMaxClockSkew).
+	DefaultMaxClockSkew = time.Second
 	// syncReplanEvery is how often at most a folder is replanned while syncing (Plan of 100k files: ~70ms).
 	syncReplanEvery = time.Second
 	// syncSaveEvery is how often at most the bases are saved while syncing (else once done).
@@ -165,6 +166,8 @@ type SyncStatus struct {
 	ConflictCopies int
 	// ClockSkew is how much the peer's clock is behind ours (ahead if negative), roughly.
 	ClockSkew time.Duration
+	// MaxClockSkew is the ClockSkew above which (either way) to warn (DefaultMaxClockSkew if 0).
+	MaxClockSkew time.Duration
 	// CantStoreHere is how many of the peer's paths we can't store (eg on Windows), listed in ConflictsFile.
 	CantStoreHere int
 	// Watching is true when the folder is watched with file system notifications (see Config.SyncWatch).
@@ -190,6 +193,7 @@ func (s *Server) SyncStatus() []SyncStatus {
 			sp := f.peers[peer]
 			st.Peer, st.Ready, st.Summary, st.Getting = peer, sp.ready, sp.summary, len(sp.pulls)
 			st.CurFile, st.CurDone, st.CurSize, st.ConflictsFile, st.ClockSkew = "", 0, 0, "", sp.l.clockSkew
+			st.MaxClockSkew = s.SyncMaxClockSkew
 			st.CantStoreHere = len(sp.cantStore)
 			if len(sp.issues) > 0 || len(f.copies) > 0 || len(sp.cantStore) > 0 {
 				st.ConflictsFile = s.conflictsFile(f)
@@ -749,12 +753,20 @@ func (s *Server) handleSyncFrame(peer Peer, l *link, conn net.Conn, plain []byte
 	return true
 }
 
+// SkewTooBig returns true if the clock skew (either way) is more than max (DefaultMaxClockSkew if 0).
+func SkewTooBig(skew, maxSkew time.Duration) bool {
+	if maxSkew <= 0 {
+		maxSkew = DefaultMaxClockSkew
+	}
+	return skew.Abs() > maxSkew
+}
+
 // syncFoldersReceived records the peer's sync folders and sends it our index of the ones we have too.
 func (s *Server) syncFoldersReceived(peer Peer, l *link, conn net.Conn, skew time.Duration, names string) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	l.syncFolders, l.clockSkew = make(map[string]bool), skew
-	if skew > MaxClockSkew || skew < -MaxClockSkew {
+	if SkewTooBig(skew, s.SyncMaxClockSkew) {
 		log.Warnf("The clock of %s differs from ours by %v: sync conflicts are resolved by modification time, "+
 			"the older version may be the wrong one", peer.Name, skew.Round(time.Millisecond))
 	}

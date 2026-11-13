@@ -136,3 +136,24 @@ func TestNewWindowsSkips(t *testing.T) {
 		t.Errorf("expected only d|e, got %q", added)
 	}
 }
+
+func TestSkewTooBig(t *testing.T) {
+	ms := time.Millisecond
+	for _, tc := range []struct {
+		skew, maxSkew time.Duration
+		want          bool
+	}{
+		{0, 0, false},
+		{1000 * ms, 0, false},
+		{1001 * ms, 0, true},
+		{-1500 * ms, 0, true},
+		{700 * ms, 500 * ms, true},
+		{-700 * ms, 500 * ms, true},
+		{400 * ms, 500 * ms, false},
+		{2 * time.Second, 5 * time.Second, false},
+	} {
+		if got := SkewTooBig(tc.skew, tc.maxSkew); got != tc.want {
+			t.Errorf("SkewTooBig(%v, %v) = %v, want %v", tc.skew, tc.maxSkew, got, tc.want)
+		}
+	}
+}

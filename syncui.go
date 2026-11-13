@@ -64,7 +64,7 @@ func SyncLine(st tsnet.SyncStatus) syncLine {
 		warn = true
 	}
 	text += listedIn(st)
-	if st.ClockSkew > tsnet.MaxClockSkew || st.ClockSkew < -tsnet.MaxClockSkew {
+	if tsnet.SkewTooBig(st.ClockSkew, st.MaxClockSkew) {
 		text += " · ⚠ clocks differ by " + st.ClockSkew.Abs().Round(100*time.Millisecond).String()
 		warn = true
 	}
