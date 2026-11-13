@@ -770,10 +770,20 @@ func skewLimit(maxSkew time.Duration) time.Duration {
 // measured skew, so the smallest one is the best estimate of the real one.
 const skewWindow = 6
 
+// skewStep is the smallest jump of the clock skew (up) we take as a clock change right away, see noteSkewLocked.
+const skewStep = 50 * time.Millisecond
+
 // noteSkewLocked records a clock skew sample from the peer (how much its clock is behind ours, roughly) and
 // logs when the clock gets too far off (or back to normal). Needs stateMu.
 func (s *Server) noteSkewLocked(peer Peer, l *link, sample time.Duration) {
 	l.skewRecent = append(l.skewRecent, sample)
+	if n := len(l.skewRecent); n > 2 {
+		// a clock step forward leaves the old smaller samples in the window: if the last 2 are all well above
+		// the older ones (one delayed sample doesn't count), start over from them instead of waiting for the old to age out.
+		if slices.Min(l.skewRecent[n-2:])-slices.Min(l.skewRecent[:n-2]) > max(skewLimit(s.SyncMaxClockSkew), skewStep) {
+			l.skewRecent = slices.Clone(l.skewRecent[n-2:])
+		}
+	}
 	if len(l.skewRecent) > skewWindow {
 		l.skewRecent = l.skewRecent[1:]
 	}

@@ -124,7 +124,8 @@ As the newest version wins, the clocks matter: each side sends its time when the
 (`-sync-max-clock-skew`). The time is also in every keepalive (every 10s), so a clock that drifts or gets
 stepped later is noticed too: the warning is logged when it crosses the limit, and again when it's back
 (within 80% of it, to not flap). One-way transit time only adds to the measured difference, so the
-smallest of the last 6 samples (a minute) is used. Peers up to v0.24.1 send no time in their keepalives (and
+smallest of the last 6 samples (a minute) is used, except that when the last 2 are all well above the older ones (a clock
+step, not a delayed packet) the older ones are dropped. Peers up to v0.24.1 send no time in their keepalives (and
 ignore ours): only the link-up check applies to them.
 
 With `-sync-conflicts list`, files changed on both sides are left alone (both versions stay where they are) and
