@@ -169,3 +169,51 @@ func TestSkewLimit(t *testing.T) {
 		t.Errorf("skewLimit(300ms) = %v, want 300ms", got)
 	}
 }
+
+func TestNoteSkew(t *testing.T) {
+	ms := time.Millisecond
+	s := &Server{Config: Config{SyncMaxClockSkew: 500 * ms}}
+	l := &link{}
+	peer := Peer{Name: "p"}
+	note := func(sample time.Duration) {
+		s.stateMu.Lock()
+		defer s.stateMu.Unlock()
+		s.noteSkewLocked(peer, l, sample)
+	}
+	note(100 * ms)
+	if l.clockSkew != 100*ms || l.skewWarned {
+		t.Errorf("first sample: skew %v warned %v", l.clockSkew, l.skewWarned)
+	}
+	// a delayed sample doesn't count: the smallest of the recent ones is the estimate.
+	note(900 * ms)
+	if l.clockSkew != 100*ms || l.skewWarned {
+		t.Errorf("delayed sample: skew %v warned %v", l.clockSkew, l.skewWarned)
+	}
+	// the clock really moves: after skewWindow samples the old ones are gone.
+	for range skewWindow {
+		note(700 * ms)
+	}
+	if l.clockSkew != 700*ms || !l.skewWarned {
+		t.Errorf("moved clock: skew %v warned %v", l.clockSkew, l.skewWarned)
+	}
+	// back below the limit but not by the margin: still warned (no flapping).
+	for range skewWindow {
+		note(450 * ms)
+	}
+	if !l.skewWarned {
+		t.Errorf("450ms with a 500ms limit should not clear the warning yet")
+	}
+	for range skewWindow {
+		note(300 * ms)
+	}
+	if l.skewWarned || l.clockSkew != 300*ms {
+		t.Errorf("back to normal: skew %v warned %v", l.clockSkew, l.skewWarned)
+	}
+	// the peer's clock ahead of ours (negative): the smallest value is the real one too.
+	l = &link{}
+	note(-1000 * ms)
+	note(-950 * ms)
+	if l.clockSkew != -1000*ms || !l.skewWarned {
+		t.Errorf("negative: skew %v warned %v", l.clockSkew, l.skewWarned)
+	}
+}

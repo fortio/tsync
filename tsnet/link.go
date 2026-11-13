@@ -32,8 +32,9 @@ const (
 	FrameClip  = 'T' // clipboard: 8 bytes (big endian) unix nano time it was copied, then the text.
 	// FrameClipNoTime is the clipboard text without time, sent by older versions.
 	FrameClipNoTime = 'C'
-	// FrameKeepAlive (no payload) is sent on idle links: it keeps the peer listed (and detects dead links) when
-	// discovery slows down once everyone is linked.
+	// FrameKeepAlive is sent on idle links: it keeps the peer listed (and detects dead links) when
+	// discovery slows down once everyone is linked. Its payload (none up to v0.24.1, which ignore any) is our
+	// time (unix nano, 8 bytes) to keep checking the clocks are close, see FrameSyncFolders.
 	FrameKeepAlive = 'K'
 
 	linkDialTimeout  = 3 * time.Second
@@ -360,7 +361,9 @@ func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn
 			return
 		}
 		if plain[0] == FrameKeepAlive {
-			continue // the read itself is the proof of life (deadline reset above).
+			// the read itself is the proof of life (deadline reset above).
+			s.keepAliveClock(peer, l, plain)
+			continue
 		}
 		if s.Headless && !allowedHeadless(plain[0]) {
 			log.LogVf("Headless: ignoring frame %q from %q", plain[0], peer.Name)
@@ -401,7 +404,7 @@ func (s *Server) keepAlive(l *link, conn net.Conn, done <-chan struct{}) {
 		case <-done:
 			return
 		case <-ticker.C:
-			if err := l.send(conn, FrameKeepAlive, nil); err != nil {
+			if err := l.send(conn, FrameKeepAlive, binary.BigEndian.AppendUint64(nil, uint64(time.Now().UnixNano()))); err != nil {
 				return // closed by send, the read loop cleans up.
 			}
 		}
