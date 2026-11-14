@@ -375,7 +375,7 @@ func (s *Server) stopWatch(f *syncFolder, sw *syncWatch, why string) {
 func (s *Server) setWatching(f *syncFolder, watching bool) {
 	s.stateMu.Lock()
 	f.watching = watching
-	s.change(0)
+	s.change()
 	s.stateMu.Unlock()
 }
 
@@ -471,24 +471,18 @@ func (s *Server) syncScanDirs(f *syncFolder, prev syncdir.Index, dirs []string, 
 	return prev, added
 }
 
-type syncTarget struct {
-	peer Peer
-	l    *link
-	conn net.Conn
-}
-
 // syncScanned records a scan (of only the rescanned directories if not nil), returns the linked peers to send
 // the index to if it changed.
 func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Index, rescanned map[string]bool,
 	err error,
-) []syncTarget {
+) []linkTarget {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if err != nil {
 		if f.err != err.Error() {
 			log.Errf("Can't scan sync folder %q (%s): %v", f.Name, f.Path, err)
 			f.err = err.Error()
-			s.change(0)
+			s.change()
 		}
 		return nil
 	}
@@ -517,23 +511,17 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 		f.kickLocked() // to update the conflicts list.
 	}
 	s.replanAllLocked(f)
-	s.change(0)
-	return s.syncTargetsLocked(f)
+	s.change()
+	return s.linkTargetsLocked(f)
 }
 
 func sameEntry(a, b syncdir.Entry) bool {
 	return a.Path == b.Path && a.Dir == b.Dir && a.Mode == b.Mode && a.Size == b.Size && a.MTime.Equal(b.MTime) && a.Hash == b.Hash
 }
 
-// syncTargetsLocked returns the linked peers that have the folder.
-func (s *Server) syncTargetsLocked(f *syncFolder) []syncTarget {
-	var targets []syncTarget
-	for peer, l := range s.links {
-		if l.conn != nil && l.syncFolders[f.Name] {
-			targets = append(targets, syncTarget{peer, l, l.conn})
-		}
-	}
-	return targets
+// linkTargetsLocked returns the linked peers that have the folder.
+func (s *Server) linkTargetsLocked(f *syncFolder) []linkTarget {
+	return slices.DeleteFunc(s.linkedLocked(), func(t linkTarget) bool { return !t.l.syncFolders[f.Name] })
 }
 
 // sendSyncFolders tells a newly linked peer the names of our sync folders.
@@ -801,7 +789,7 @@ func (s *Server) noteSkewLocked(peer Peer, l *link, sample time.Duration) {
 		log.Infof("The clock of %s is back within %v of ours (%s)", peer.Name, limit, SkewWords(l.clockSkew))
 	}
 	if old.Round(skewShown) != l.clockSkew.Round(skewShown) || l.skewWarned != wasWarned {
-		s.change(0) // the sync line shows it.
+		s.change() // the sync line shows it.
 	}
 }
 
@@ -916,7 +904,7 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	log.LogVf("Received sync folder %q index from %s (%d entries)", name, peer.Name, len(sp.remote))
 	s.replanLocked(f, peer, sp)
 	s.cantStoreChangedLocked(f)
-	s.change(0)
+	s.change()
 	return nil
 }
 
@@ -942,7 +930,7 @@ func (s *Server) cantStoreChangedLocked(f *syncFolder) {
 	if f.local.Time.IsZero() {
 		return // sent once scanned.
 	}
-	for _, t := range s.syncTargetsLocked(f) {
+	for _, t := range s.linkTargetsLocked(f) {
 		s.wg.Go(func() { s.sendIndex(f, t.peer, t.l, t.conn) })
 	}
 }

@@ -534,14 +534,14 @@ func (s *Server) PeersCleanup() {
 	}
 	if len(toDelete) > 0 {
 		log.Infof("Removing %d expired peers: %q", len(toDelete), toDelete)
-		v := s.Peers.Delete(toDelete...)
+		s.Peers.Delete(toDelete...)
 		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
 		for _, peer := range toDelete {
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
 			s.expireOffersLocked(peer, "peer gone")
 		}
-		s.change(v) // UI refresh, otherwise the last peer to go away stays listed.
+		s.change() // UI refresh, otherwise the last peer to go away stays listed.
 	}
 	for src, e := range s.early {
 		if now.Sub(e.at) > earlyMaxAge {
@@ -556,9 +556,9 @@ func (s *Server) OurAddress() *net.UDPAddr {
 	return s.ourSendAddr
 }
 
-// change notifies OnChange. Peers map versions are ignored and our own counter is used
-// instead, so other changes (eg file transfers progress) also get distinct versions.
-func (s *Server) change(_ uint64) {
+// change notifies OnChange, with our own counter as version (not the Peers map's one) so all changes, eg file
+// transfers progress, get distinct versions.
+func (s *Server) change() {
 	v := s.changes.Add(1)
 	if s.OnChange != nil {
 		s.OnChange(v)
@@ -691,7 +691,8 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 			early = s.takeEarlyLocked(src)
 		}
 		// Update last seen and epoch
-		s.change(s.Peers.Set(peer, data))
+		s.Peers.Set(peer, data)
+		s.change()
 		if early == nil { // otherwise its connect request is handled instead.
 			s.autoConnectLocked(peer, data, time.Now())
 		}
@@ -703,7 +704,7 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
 		data.HumanHash = "BAD-PKEY"
 	}
-	nv := s.Peers.Set(peer, data)
+	s.Peers.Set(peer, data)
 	src := Source{IP: peer.IP, Port: data.Port}
 	s.Sources.Set(src, peer)
 	log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
@@ -711,7 +712,7 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	if !data.Compatible() {
 		log.Warnf("%s (%s) runs an older, incompatible tsync version: upgrade it to connect", peer.Name, peer.IP)
 	}
-	s.change(nv)
+	s.change()
 	// Tell the new peer about us right away (it may have just started and not seen our
 	// multicast yet) so a connect request from either side isn't from an unknown source.
 	s.sendDiscoveryTo(addr)

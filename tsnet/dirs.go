@@ -342,7 +342,7 @@ func (s *Server) prepareDirLocked(l *link, t *Transfer) error {
 	}
 	t.Path, t.Name, t.State, t.Start = root, filepath.Base(root), TransferActive, time.Now()
 	s.rdirs[dirKey{t.Peer, t.ID}] = &recvDir{t: t, l: l, root: root}
-	s.change(0)
+	s.change()
 	log.Infof("Downloading directory %q (%d files, %d bytes) from %s into %s", t.Name, t.Files, t.Size, t.Peer.Name, root)
 	return nil
 }

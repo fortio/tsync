@@ -189,10 +189,42 @@ func (s *Server) dial(ctx context.Context, peer Peer, l *link, addr string, fall
 	if !s.attach(peer, l, conn) {
 		return
 	}
+	s.runLink(ctx, peer, l, conn)
+}
+
+// runLink sends what a newly linked peer needs (our last clipboard, offers, sync folders) then handles its
+// frames until the link closes.
+func (s *Server) runLink(ctx context.Context, peer Peer, l *link, conn net.Conn) {
 	s.sendLastClip(peer, l, conn)
 	s.sendOffers(peer, l, conn)
 	s.sendSyncFolders(peer, l, conn)
 	s.readLoop(ctx, peer, l, conn)
+}
+
+// linkUpLocked sets the (authenticated) connection on the link.
+func (s *Server) linkUpLocked(peer Peer, l *link, conn net.Conn) {
+	l.conn = conn
+	l.outgoing, l.incoming = make(map[uint32]*Transfer), make(map[uint32]*recvFile)
+	log.Infof("TCP link up with %s (%s)", peer.Name, conn.RemoteAddr())
+	s.change() // UI refresh.
+}
+
+// linkTarget is a peer with its TCP link up, to send to without holding stateMu.
+type linkTarget struct {
+	peer Peer
+	l    *link
+	conn net.Conn
+}
+
+// linkedLocked returns the peers we have a TCP link with.
+func (s *Server) linkedLocked() []linkTarget {
+	var targets []linkTarget
+	for peer, l := range s.links {
+		if l.conn != nil {
+			targets = append(targets, linkTarget{peer, l, l.conn})
+		}
+	}
+	return targets
 }
 
 // askDialMe asks the peer to dial us, and gives up if it didn't in time.
@@ -221,12 +253,7 @@ func (s *Server) attach(peer Peer, l *link, conn net.Conn) bool {
 		_ = conn.Close()
 		return false
 	}
-	l.conn = conn
-	l.outgoing, l.incoming = make(map[uint32]*Transfer), make(map[uint32]*recvFile)
-	log.Infof("TCP link up with %s (%s)", peer.Name, conn.RemoteAddr())
-	if peerData, ok := s.Peers.Get(peer); ok {
-		s.change(s.Peers.Set(peer, peerData)) // just to bump version for UI refresh.
-	}
+	s.linkUpLocked(peer, l, conn)
 	return true
 }
 
@@ -275,17 +302,15 @@ func (s *Server) handleIncoming(ctx context.Context, conn net.Conn) {
 		return
 	}
 	for {
-		peer, l, found, bad := s.matchHello(remoteIP, frame, conn)
-		if bad {
+		peer, l, res := s.matchHello(remoteIP, frame, conn)
+		switch res {
+		case helloBad:
 			return
-		}
-		if found {
+		case helloOK:
 			_ = conn.SetReadDeadline(time.Time{})
-			s.sendLastClip(peer, l, conn)
-			s.sendOffers(peer, l, conn)
-			s.sendSyncFolders(peer, l, conn)
-			s.readLoop(ctx, peer, l, conn)
+			s.runLink(ctx, peer, l, conn)
 			return
+		case helloNoMatch:
 		}
 		// Our side of the handshake may not have completed yet (eg accept still in flight).
 		if time.Now().After(deadline) || ctx.Err() != nil {
@@ -297,9 +322,17 @@ func (s *Server) handleIncoming(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// matchHello returns the peer and link matching the hello frame if found, or bad
-// if the frame was from a peer but invalid (and the connection got closed).
-func (s *Server) matchHello(remoteIP string, frame []byte, conn net.Conn) (Peer, *link, bool, bool) {
+// helloResult is what matchHello found for the first frame of an incoming connection.
+type helloResult int
+
+const (
+	helloNoMatch helloResult = iota // no session opens it (yet).
+	helloOK                         // from that peer: the link is up.
+	helloBad                        // from a peer but not a hello: the connection got closed.
+)
+
+// matchHello returns the peer and link matching the hello frame, if found.
+func (s *Server) matchHello(remoteIP string, frame []byte, conn net.Conn) (Peer, *link, helloResult) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	for peer, l := range s.links {
@@ -317,15 +350,12 @@ func (s *Server) matchHello(remoteIP string, frame []byte, conn net.Conn) (Peer,
 		if len(plain) == 0 || plain[0] != FrameHello {
 			log.Warnf("Unexpected first frame type from %s", peer.Name)
 			_ = conn.Close()
-			return peer, nil, false, true
+			return peer, nil, helloBad
 		}
-		l.conn = conn
-		l.outgoing, l.incoming = make(map[uint32]*Transfer), make(map[uint32]*recvFile)
-		log.Infof("TCP link up with %s (%s)", peer.Name, conn.RemoteAddr())
-		s.change(s.Peers.Set(peer, peerData)) // bump version for UI refresh.
-		return peer, l, true, false
+		s.linkUpLocked(peer, l, conn)
+		return peer, l, helloOK
 	}
-	return Peer{}, nil, false, false
+	return Peer{}, nil, helloNoMatch
 }
 
 func (s *Server) readLoop(ctx context.Context, peer Peer, l *link, conn net.Conn) {
@@ -442,7 +472,8 @@ func (s *Server) receivedClip(peer Peer, l *link, clip string, when time.Time) {
 	log.Infof("Received %d bytes clipboard from %s", len(clip), peer.Name)
 	peerData.Clip = clip
 	peerData.ClipTime = when
-	s.change(s.Peers.Set(peer, peerData))
+	s.Peers.Set(peer, peerData)
+	s.change()
 }
 
 func clipPayload(clip string, when time.Time) []byte {
@@ -477,17 +508,7 @@ func (s *Server) SendClip(clip string) (int, error) {
 	payload := clipPayload(clip, now)
 	s.stateMu.Lock()
 	s.lastClip, s.lastClipTime = clip, now
-	type target struct {
-		peer Peer
-		l    *link
-		conn net.Conn
-	}
-	var targets []target
-	for peer, l := range s.links {
-		if l.conn != nil {
-			targets = append(targets, target{peer, l, l.conn})
-		}
-	}
+	targets := s.linkedLocked()
 	s.stateMu.Unlock()
 	sent := 0
 	var errs []error

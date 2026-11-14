@@ -503,7 +503,7 @@ func (s *Server) syncDoneLocked(p *syncPull, err error) {
 	// see runSync, which also rescans once all is synced so the peers learn what we got.
 	f.replan, f.synced = true, f.synced || err == nil
 	f.kickLocked()
-	s.change(0)
+	s.change()
 }
 
 // recordSyncedLocked records what we synced (as if scanned until the next scan sees it), and in the base.

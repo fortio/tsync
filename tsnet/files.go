@@ -167,7 +167,7 @@ func (s *Server) addTransferLocked(t *Transfer) {
 		}
 		s.transfers = append(s.transfers[:idx], s.transfers[idx+1:]...)
 	}
-	s.change(0)
+	s.change()
 }
 
 func (s *Server) progressLocked(t *Transfer, n int64) {
@@ -177,7 +177,7 @@ func (s *Server) progressLocked(t *Transfer, n int64) {
 	}
 	if now := time.Now(); now.Sub(t.lastProg) >= progressInterval {
 		t.lastProg = now
-		s.change(0)
+		s.change()
 	}
 }
 
@@ -199,7 +199,7 @@ func (s *Server) finishLocked(t *Transfer, err error) {
 	} else {
 		t.State = TransferDone
 	}
-	s.change(0)
+	s.change()
 	if t.pull != nil {
 		s.pullFinishedLocked(t, err)
 	}
@@ -276,17 +276,7 @@ func (s *Server) OfferPath(path string) (Offered, error) {
 		}
 		delete(s.offers, oldest)
 	}
-	type target struct {
-		peer Peer
-		l    *link
-		conn net.Conn
-	}
-	var targets []target
-	for peer, l := range s.links {
-		if l.conn != nil {
-			targets = append(targets, target{peer, l, l.conn})
-		}
-	}
+	targets := s.linkedLocked()
 	s.stateMu.Unlock()
 	n := 0
 	var errs []error
@@ -387,7 +377,7 @@ func (s *Server) prepareDownload(peer Peer, id uint32) (*link, error) {
 	l.incoming[id] = &recvFile{f: f, hash: sha256.New(), t: t}
 	t.State = TransferActive
 	t.Start = time.Now()
-	s.change(0)
+	s.change()
 	log.Infof("Downloading file %q (%d bytes) from %s", t.Name, t.Size, peer.Name)
 	return l, nil
 }
@@ -436,7 +426,7 @@ func (s *Server) pruneExpiredOffersLocked(now time.Time) {
 		return t.expired && now.Sub(t.End) > expiredOfferLinger
 	})
 	if len(s.transfers) != n {
-		s.change(0)
+		s.change()
 	}
 }
 
@@ -713,7 +703,7 @@ func (s *Server) fileOffered(peer Peer, id uint32, payload []byte, files int) {
 		if t.Incoming && t.Peer == peer && t.ID == id {
 			if t.expired { // failed because the peer looked restarted/gone but it is back with the offer.
 				t.State, t.Err, t.End, t.expired = TransferOffered, "", time.Time{}, false
-				s.change(0)
+				s.change()
 				return
 			}
 			return // already known (eg resent on reconnect).
