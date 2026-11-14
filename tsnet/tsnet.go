@@ -535,7 +535,7 @@ func (s *Server) peersCleanup() {
 	if len(toDelete) > 0 {
 		log.Infof("Removing %d expired peers: %q", len(toDelete), toDelete)
 		s.Peers.Delete(toDelete...)
-		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
+		s.Sources.Delete(toDeleteSources...)
 		for _, peer := range toDelete {
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
@@ -797,8 +797,8 @@ func newRunID() string {
 }
 
 func (s *Server) discoveryPayload(epoch int32) []byte {
-	return []byte(fmt.Sprintf(DiscoveryMessageFormat+DiscoveryExtraFormat,
-		s.Name, s.idStr, epoch, s.runID, ProtocolVersion, s.Version))
+	return fmt.Appendf(nil, DiscoveryMessageFormat+DiscoveryExtraFormat,
+		s.Name, s.idStr, epoch, s.runID, ProtocolVersion, s.Version)
 }
 
 // sendDiscoveryTo sends our discovery message directly to addr.

@@ -18,7 +18,6 @@ const (
 	SignedPrefix     = "s."
 	PrivateKeyPrefix = "k."
 	PublicKeyPrefix  = "p."
-	// MessagePrefix    = "m:".
 )
 
 // SignMessage returns the message and its signature in text form, for [VerifySignedMessage].

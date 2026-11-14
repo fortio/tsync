@@ -10,7 +10,6 @@ import (
 
 // Ephemeral holds a private/public keypair for X25519 ECDH.
 type Ephemeral struct {
-	Curve      ecdh.Curve
 	PrivateKey *ecdh.PrivateKey
 	PublicKey  *ecdh.PublicKey
 }
@@ -18,10 +17,9 @@ type Ephemeral struct {
 // NewEphemeralKeys generates a new X25519 key pair, to use for one handshake.
 func NewEphemeralKeys() (*Ephemeral, error) {
 	// Smallest keys (and secure enough too).
-	curve := ecdh.X25519()
 	var err error
-	c := &Ephemeral{Curve: curve}
-	c.PrivateKey, err = curve.GenerateKey(rand.Reader)
+	c := &Ephemeral{}
+	c.PrivateKey, err = ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
