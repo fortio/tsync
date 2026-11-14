@@ -9,11 +9,12 @@ import (
 	"strings"
 )
 
+// Default directory (in the home directory) and files of a [Storage].
 const (
 	TsyncDir                = ".tsync"
-	PrivateIdentityFile     = "id"
-	PublicIdentityFile      = "id.pub"
-	ValidatedPublicKeysFile = "checked.pub"
+	PrivateIdentityFile     = "id"          // our private key, only readable by the user.
+	PublicIdentityFile      = "id.pub"      // our public key.
+	ValidatedPublicKeysFile = "checked.pub" // the peers accepted by the user: one `<public key> "name"` per line.
 )
 
 func createDirectory(dir string) error {
@@ -26,12 +27,13 @@ func createDirectory(dir string) error {
 	return os.Mkdir(dir, 0o755) // public readable as only PrivateIdentityFile is sensitive
 }
 
+// Storage is the directory where our identity and the trusted peers' keys are kept.
 type Storage struct {
 	Dir string // Full path to the .tsync directory
 }
 
+// InitStorage returns the default storage, ~/.tsync, creating the directory if needed.
 func InitStorage() (s *Storage, err error) {
-	// Creates the ~/.tsync directory and files if they don't exist yet.
 	hdir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -53,6 +55,7 @@ func InitStorageDir(dir string) (*Storage, error) {
 	return &Storage{Dir: dir}, nil
 }
 
+// SaveIdentity writes the identity's private and public key files.
 func (s *Storage) SaveIdentity(id *Identity) error {
 	filePath := path.Join(s.Dir, PrivateIdentityFile)
 	b := []byte(id.PrivateKeyToString() + "\n")
@@ -65,6 +68,8 @@ func (s *Storage) SaveIdentity(id *Identity) error {
 	return os.WriteFile(filePath, b, 0o644) //nolint:gosec // public key readable by all
 }
 
+// LoadIdentity reads our identity. It is an error if there is none yet, or if the public key file doesn't
+// match the private key.
 func (s *Storage) LoadIdentity() (*Identity, error) {
 	filePath := path.Join(s.Dir, PrivateIdentityFile)
 	privKeyBytes, err := os.ReadFile(filePath)

@@ -53,13 +53,14 @@ const (
 	expiredOfferLinger = 5 * time.Second
 )
 
+// TransferState is the state of a [Transfer].
 type TransferState int
 
 const (
 	TransferOffered TransferState = iota // incoming offer, not (yet) accepted.
-	TransferActive
-	TransferDone
-	TransferFailed
+	TransferActive                       // being sent or received.
+	TransferDone                         // received and saved (confirmed by the receiver, for the sender).
+	TransferFailed                       // see Transfer.Err.
 )
 
 func (ts TransferState) String() string {

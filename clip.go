@@ -12,6 +12,7 @@ import (
 
 // Clipboard text handling: bracketed paste collection, sanitizing and display lines.
 
+// Bracketed paste markers: the terminal sends them around pasted (or dropped) text.
 const (
 	PasteStart = "\x1b[200~"
 	PasteEnd   = "\x1b[201~"

@@ -1,4 +1,9 @@
-// Package tsnet is the network library support for tsync (discovery/registration and communication).
+// Package tsnet is tsync's networking: discovery of the peers on the local network (multicast and direct UDP),
+// the signed handshake with trust on first use, one encrypted TCP link per connected peer, and what goes over
+// it: clipboard, file and directory offers and downloads, and directory sync.
+//
+// Make a [Config], then [Config.NewServer] and [Server.Start]; [Server.Peers] has who was found,
+// [Server.ConnectToPeer] connects (or accepts) and Config.OnChange says when to look again.
 package tsnet
 
 import (
@@ -32,9 +37,9 @@ const (
 	BufSize = 576 - 60 - 8
 	// DefaultTarget: which udp address we try by default to find our interface and ip.
 	DefaultTarget            = "8.8.8.8:53"
-	DefaultBroadcastInterval = 1500 * time.Millisecond
-	TimeFormat               = "15:04:05.000" // time only + millis.
-	DefaultPeerTimeout       = 10 * time.Second
+	DefaultBroadcastInterval = 1500 * time.Millisecond // default Config.BaseBroadcastInterval.
+	TimeFormat               = "15:04:05.000"          // time only + millis.
+	DefaultPeerTimeout       = 10 * time.Second        // default Config.PeerTimeout.
 	// NoMulticast as Config.Mcast disables multicast: discovery only through Config.Peers.
 	NoMulticast = "none"
 	// SlowDiscoveryInterval is how often we multicast once we are linked to all the peers we know.
@@ -66,22 +71,25 @@ func (pd PeerData) Compatible() bool {
 	return pd.RunID != ""
 }
 
+// Config is the configuration of a [Server], see [Config.NewServer]. Identity, Port and Mcast must be set.
 type Config struct {
 	// Short version of the software, sent to the peers (cosmetic).
 	Version string
 	// Name to use, if empty hostname will be used.
-	Name  string
-	Port  int
+	Name string
+	// Port is the discovery (UDP) port, the same on all the peers (eg DefaultDiscoveryPort).
+	Port int
+	// Mcast is the multicast group address used for discovery, or NoMulticast.
 	Mcast string
 	// Which ip:port we try to resolve to find our address and interface.
 	Target string
-	// Callback called when a the Server Peers map has changed, a new peer is detected
-	// or old one removed or updated. Must not block for long or
-	// it will delay processing of incoming messages.
+	// Callback called when something to show changed: a peer is found, removed or updated, a link goes up or
+	// down, a clipboard or offer is received, a transfer or a sync progresses... with a new version each time.
+	// Must not block for long or it will delay processing of incoming messages.
 	OnChange              func(version uint64)
 	Identity              *tcrypto.Identity // long term identity for this server
-	BaseBroadcastInterval time.Duration     // default to 1.5s if 0
-	PeerTimeout           time.Duration     // default to 10s if 0
+	BaseBroadcastInterval time.Duration     // between discovery messages, before the jitter: default to 1.5s if 0
+	PeerTimeout           time.Duration     // unlinked peers not heard from for that long are removed: default to 10s if 0
 	// Storage for the trusted peers (TOFU), if nil trust is only kept in memory.
 	Storage *tcrypto.Storage
 	// NoAutoConnect disables automatically connecting to trusted peers when discovered (or link lost).
@@ -114,6 +122,7 @@ type Config struct {
 	Headless bool
 }
 
+// ConnectionStatus is where the handshake with a peer is at (the TCP link itself: see [Server.Linked]).
 type ConnectionStatus int
 
 const (
@@ -129,6 +138,8 @@ const (
 	Failed
 )
 
+// Server is a running tsync instance: discovery, handshakes, links and what goes over them.
+// Create it with [Config.NewServer].
 type Server struct {
 	// Our copy of the input config.
 	Config
@@ -188,17 +199,21 @@ type Server struct {
 	early map[Source]earlyMsg
 }
 
+// Source is the address a peer's UDP messages come from.
 type Source struct {
 	IP   string
 	Port int
 }
 
+// Peer identifies a peer: a (name, IP, public key) seen in discovery. The same machine with another name or
+// address is another Peer (but stays trusted: trust goes with the public key).
 type Peer struct {
 	IP        string
 	Name      string
 	PublicKey string
 }
 
+// PeerData is what we know about a [Peer] (the values of [Server.Peers]).
 type PeerData struct {
 	HumanHash string
 	Port      int
@@ -213,6 +228,7 @@ type PeerData struct {
 	ClipTime time.Time
 }
 
+// NewServer returns a server with a copy of the config, to [Server.Start].
 func (c *Config) NewServer() *Server {
 	return &Server{
 		Config:   *c,
@@ -226,13 +242,16 @@ func (c *Config) NewServer() *Server {
 		// sync folders are set in Start.
 		syncFolders: make(map[string]*syncFolder),
 		early:       make(map[Source]earlyMsg),
-		// Random start so offer ids from different runs don't collide (eg in peers' lists).
+		// See Config.WindowsNames.
 		windowsNames: c.WindowsNames || runtime.GOOS == "windows",
+		// Random start so offer ids from different runs don't collide (eg in peers' lists).
 		// Below 2^30 so they never reach syncIDBit (even with the ids reserved by directory offers).
 		nextFileID: rand.Uint32() >> 2, //nolint:gosec // not cryptographic.
 	}
 }
 
+// Start opens the sockets and starts the discovery, handshake, link and sync goroutines. Call [Server.Stop] to
+// shut it down: canceling the context alone doesn't close the sockets the receivers wait on.
 func (s *Server) Start(ctx context.Context) error {
 	s.idStr = s.Identity.PublicKeyToString()
 	s.runID = newRunID()
@@ -433,6 +452,7 @@ func (s *Server) openUnicast(ctx context.Context, goodIf *net.Interface, localIP
 	return nil
 }
 
+// Stop stops the server and waits for its goroutines. The server can't be started again.
 func (s *Server) Stop() {
 	if s.Stopped() {
 		return
@@ -451,6 +471,8 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
+// Stopped returns true once the server is stopped: by [Server.Stop], or by itself when a newer instance with
+// the same name, address and key started.
 func (s *Server) Stopped() bool {
 	return s.epoch.Load() < 0 // we may stop with -999 and some extra Add(1) happens but stays negative.
 }
@@ -491,6 +513,8 @@ func (s *Server) runAdv(ctx context.Context) {
 	}
 }
 
+// PeersCleanup removes the peers not heard from for Config.PeerTimeout (unless linked, the link then has its
+// own keepalive) and what was kept for them. Called on every discovery tick.
 func (s *Server) PeersCleanup() {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -527,6 +551,7 @@ func (s *Server) PeersCleanup() {
 	s.pruneExpiredOffersLocked(now)
 }
 
+// OurAddress returns our local IP and the UDP port our messages are sent from (what the peers list us as).
 func (s *Server) OurAddress() *net.UDPAddr {
 	return s.ourSendAddr
 }
@@ -857,6 +882,7 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	}
 }
 
+// MCastMessageSend sends our discovery message to the multicast group (nothing if multicast is disabled).
 func (s *Server) MCastMessageSend(epoch int32) error {
 	if s.destAddr == nil {
 		return nil // multicast disabled.
@@ -875,6 +901,7 @@ type Discovery struct {
 	Version   string // short version, empty for older versions.
 }
 
+// MCastMessageDecode decodes (and validates the name of) a discovery message, received by multicast or directly.
 func (s *Server) MCastMessageDecode(buf []byte) (Discovery, error) {
 	var d Discovery
 	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat+DiscoveryExtraFormat,

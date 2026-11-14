@@ -1,4 +1,6 @@
-// Package tcrypto is the library for tsync crypto operations (key generation etc).
+// Package tcrypto has all of tsync's crypto: the long term Ed25519 [Identity] of a machine (signing, and its
+// short [HumanHash] that users compare), its [Storage] on disk with the trusted peers' keys, the X25519
+// [Ephemeral] keys of a handshake and the AES-GCM [Session] derived from them.
 package tcrypto
 
 import (
@@ -13,6 +15,7 @@ type Ephemeral struct {
 	PublicKey  *ecdh.PublicKey
 }
 
+// NewEphemeralKeys generates a new X25519 key pair, to use for one handshake.
 func NewEphemeralKeys() (*Ephemeral, error) {
 	// Smallest keys (and secure enough too).
 	curve := ecdh.X25519()
@@ -26,10 +29,12 @@ func NewEphemeralKeys() (*Ephemeral, error) {
 	return c, nil
 }
 
+// PublicKeyToString returns the public key in text form (see [StringToPublicKey]).
 func (c *Ephemeral) PublicKeyToString() string {
 	return EncodeBytes(PublicKeyPrefix, c.PublicKey.Bytes())
 }
 
+// StringToPublicKey decodes an ephemeral (X25519) public key from [Ephemeral.PublicKeyToString].
 func StringToPublicKey(s string) (*ecdh.PublicKey, error) {
 	bytes, err := DecodeBytes(PublicKeyPrefix, s)
 	if err != nil {
@@ -42,7 +47,8 @@ func StringToPublicKey(s string) (*ecdh.PublicKey, error) {
 	return pub, nil
 }
 
+// SharedSecret derives the ECDH shared secret from our private key and the peer's public key. Not a key by
+// itself: see [Identity.VerifiedSession] for the authenticated session keys.
 func (c *Ephemeral) SharedSecret(peerPublicKey *ecdh.PublicKey) ([]byte, error) {
-	// Derives the shared secret using private key and peer's public key
 	return c.PrivateKey.ECDH(peerPublicKey)
 }

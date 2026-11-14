@@ -67,6 +67,7 @@ var alignment = []ansipixels.Alignment{
 	ansipixels.Right,  // Human Hash
 }
 
+// PeerLine is the table row of a peer: its number colored by connection status, name, IP, port and hash.
 func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData, linked bool) []string {
 	idxStr := strconv.Itoa(idx)
 	switch peerData.Status {
@@ -102,6 +103,7 @@ func HeaderLine() []string {
 	return []string{DarkGray("Id"), "🔗 " + DarkGray("Name"), DarkGray("Ip"), DarkGray("Port"), DarkGray("Hash")}
 }
 
+// OurLine is the table row of this machine.
 func OurLine(srv *tsnet.Server, ourIP, ourPort, humanID string) []string {
 	return []string{
 		"🏠",
@@ -122,6 +124,7 @@ func Color16f(color tcolor.BasicColor, format string, args ...any) string {
 	return Color16(color, fmt.Sprintf(format, args...))
 }
 
+// DarkGray returns s in dark gray (titles, borders).
 func DarkGray(s string) string {
 	return Color16(tcolor.DarkGray, s)
 }
@@ -234,7 +237,7 @@ func SyncFlags() syncFlags {
 		" when not watched (see -sync-watch)")
 	watch := flag.Bool("sync-watch", tsnet.SyncWatchDefault, "Watch the sync folders "+
 		"(file system notifications): only the directories that changed are scanned again, and all of it every 15m"+
-		" (default on Linux, Windows and macOS; a macOS build without cgo needs a file descriptor per file)")
+		". Off by default on a macOS build without cgo, which needs a file descriptor per file")
 	list := false
 	flag.Func("sync-conflicts", "Sync conflicts (changed on both sides, or changed on one and deleted on the "+
 		"other) `handling`: copy (the newest version keeps the name, the other one is kept as a visible "+
@@ -471,6 +474,7 @@ func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, files *FilePanel,
 	return true
 }
 
+// InitiatePeerConnection connects to the peer, or accepts its pending connection request.
 func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.PeerData) {
 	if peerData.Status == tsnet.ReceivedConn {
 		log.Infof("Accepting connection from peer %q at %s:%d (%s)", peer.Name, peer.IP, peerData.Port, peerData.HumanHash)
@@ -482,7 +486,7 @@ func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.P
 	}
 }
 
-// MouseInsideBox returns whether the mouse is inside the box and the index of the line inside the box.
+// MouseInsideBox returns whether the mouse is on a peer's row of the peers table, and that peer's index.
 func MouseInsideBox(ap *ansipixels.AnsiPixels, tableWidth, numPeers int) (int, bool) {
 	tableWidth -= 2                       // remove the borders
 	startTable := (ap.W-tableWidth)/2 + 1 // mouse coordinates start at 1
@@ -499,6 +503,7 @@ func MouseInsideBox(ap *ansipixels.AnsiPixels, tableWidth, numPeers int) (int, b
 	return -1, false
 }
 
+// Main parses the flags, then runs headless (see RunHeadless) or the TUI until quit. Returns the exit code.
 func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
 	// echo -n "ts" | od -d -> 29556
@@ -508,7 +513,7 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 		"Multicast address to use for server discovery, or \"none\" to not use multicast (see -peers)")
 	fTarget := flag.String("target", tsnet.DefaultTarget, "Test target udp ip:port to use to find the right interface and local ip")
 	fInterval := flag.Duration("interval", tsnet.DefaultBroadcastInterval,
-		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
+		"Base interval between discovery messages (before up to 1s of random jitter)")
 	fClipLines := flag.Int("clip-lines", 3, "Max number of lines shown for each clipboard box")
 	fAutoConnect := flag.Bool("auto-connect", true, "Automatically connect to trusted (previously accepted) peers")
 	fDir := flag.String("dir", "",

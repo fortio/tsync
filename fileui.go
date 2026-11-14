@@ -38,6 +38,7 @@ type fileLine struct {
 	y     int
 }
 
+// NewFilePanel returns the files box, showing at most maxLines lines; dir is where received files are saved.
 func NewFilePanel(ap *ansipixels.AnsiPixels, srv *tsnet.Server, dir string, maxLines int) *FilePanel {
 	return &FilePanel{ap: ap, srv: srv, Dir: dir, MaxLines: maxLines, bars: make(map[transferKey]*progressbar.Bar)}
 }

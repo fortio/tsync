@@ -20,6 +20,7 @@ type LogArea struct {
 	h   int // screen height the region was set for.
 }
 
+// NewLogArea returns the log area of ap: call SetTop to reserve the top lines.
 func NewLogArea(ap *ansipixels.AnsiPixels) *LogArea {
 	return &LogArea{ap: ap, top: -1}
 }

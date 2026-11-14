@@ -6,11 +6,14 @@ import (
 	"strings"
 )
 
+// Identity is the long term Ed25519 key pair of a machine: what the peers trust once the user checked its
+// hash ([Identity.HumanID]).
 type Identity struct {
 	PrivateKey ed25519.PrivateKey
 	PublicKey  ed25519.PublicKey
 }
 
+// Prefixes of the text form of signed messages and keys (see [EncodeBytes]).
 const (
 	SignedPrefix     = "s."
 	PrivateKeyPrefix = "k."
@@ -18,11 +21,14 @@ const (
 	// MessagePrefix    = "m:".
 )
 
+// SignMessage returns the message and its signature in text form, for [VerifySignedMessage].
 func (id *Identity) SignMessage(message []byte) string {
 	signature := ed25519.Sign(id.PrivateKey, message)
 	return EncodeBytes(SignedPrefix, message) + "/" + EncodeBytes("", signature)
 }
 
+// VerifySignedMessage checks a message from [Identity.SignMessage] was signed by pubKey and returns the message.
+// The error is a [SignatureInvalidError].
 func VerifySignedMessage(signedMessage string, pubKey ed25519.PublicKey) ([]byte, error) {
 	if len(pubKey) != ed25519.PublicKeySize {
 		// ed25519.Verify would panic.
@@ -46,6 +52,7 @@ func VerifySignedMessage(signedMessage string, pubKey ed25519.PublicKey) ([]byte
 	return message, nil
 }
 
+// NewIdentity generates a new identity (not saved, see [Storage.SaveIdentity]).
 func NewIdentity() (*Identity, error) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -57,6 +64,7 @@ func NewIdentity() (*Identity, error) {
 	}, nil
 }
 
+// IdentityFromPrivateKey returns the identity for a private key from [Identity.PrivateKeyToString].
 func IdentityFromPrivateKey(privKeyStr string) (*Identity, error) {
 	privKeyBytes, err := DecodeBytes(PrivateKeyPrefix, privKeyStr)
 	if err != nil {
@@ -70,18 +78,23 @@ func IdentityFromPrivateKey(privKeyStr string) (*Identity, error) {
 	}, nil
 }
 
+// PrivateKeyToString returns the private key in text form (what is in the [PrivateIdentityFile]).
 func (id *Identity) PrivateKeyToString() string {
 	return EncodeBytes(PrivateKeyPrefix, id.PrivateKey)
 }
 
+// PublicKeyToString returns the public key in text form: how peers are identified in discovery messages and
+// in the trusted keys file.
 func (id *Identity) PublicKeyToString() string {
 	return EncodeBytes(PublicKeyPrefix, id.PublicKey)
 }
 
+// HumanID returns the [HumanHash] of our public key (DDD-DDDD), what users compare before accepting a peer.
 func (id *Identity) HumanID() string {
 	return HumanHash(id.PublicKey)
 }
 
+// IdentityPublicKeyString decodes an identity public key from [Identity.PublicKeyToString].
 func IdentityPublicKeyString(s string) (ed25519.PublicKey, error) {
 	bytes, err := DecodeBytes(PublicKeyPrefix, s)
 	if err != nil {

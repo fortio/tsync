@@ -4,13 +4,13 @@
 
 # tsync
 
-Share your clipboard and files between your machines (macOS, Linux, Windows) from a terminal UI.
+Share your clipboard and files between your machines (macOS, Linux, Windows) from a terminal UI, and keep directories in sync between them.
 
-Run `tsync` on each machine of your local network and they find each other. You approve a new machine once, after checking its short hash matches, and from then on they reconnect by themselves over an encrypted link. Paste text in tsync on one machine and click to copy it on another; drop a file in and click to download it on the other side.
+Run `tsync` on each machine of your local network and they find each other. You approve a new machine once, after checking its short hash matches, and from then on they reconnect by themselves over an encrypted link. Paste text in tsync on one machine and click to copy it on another; drop a file in and click to download it on the other side. With `-sync` the machines also keep a directory in sync, with or without the UI (see [Directory sync](#directory-sync)).
 
-The `tsnet` and `tcrypto` packages can also be used as a Go library for local network discovery, authenticated and encrypted links between peers, and clipboard/file transfer.
+The `tsnet`, `tcrypto` and `syncdir` packages can also be used as a Go library for local network discovery, authenticated and encrypted links between peers, clipboard/file transfer and the directory sync logic.
 
-Clipboard sharing and the file sharing works and is tested between macOS, Windows and Linux machines, including VMs.
+Clipboard and file sharing work and are tested between macOS, Windows and Linux machines, including VMs.
 
 ![Example Screenshot](screenshot.png)
 
@@ -31,7 +31,7 @@ CGO_ENABLED=0 go run fortio.org/tsync@latest      # to run without installing
 ```
 On macOS, leave out `CGO_ENABLED=0` (needs the Xcode command line tools) to get `-sync-watch` with FSEvents.
 
-Use the same version on all your machines: the protocol still changes, and peers running an older one show as "(old version)".
+Use the same version on all your machines when you can: the protocol still changes. Versions before 0.15 can't connect and show as "(old version)".
 
 ## Usage
 
@@ -56,6 +56,22 @@ Copying uses the OSC 52 escape sequence, which the terminal has to support and a
 
 Escape sequences and control characters are removed from the text received before it's displayed or copied.
 
+### Directory sync
+
+`tsync -sync docs=~/Documents` syncs the content of that directory with the linked peers that use the same label (`docs` here). The label only pairs the directories, which can be anywhere and called anything on each machine (eg `-sync docs=D:\work\papers` on another one). Repeat `-sync` for more directories. Each side gets what the other has new or changed, and a sync box below the files one shows where each folder is at with each peer.
+
+- Deletions are propagated too: the other side moves its copy to `.tsync-old/`. A file modified on one side since the last sync wins over its deletion on the other, and a peer deleting most files at once (eg its disk not mounted) is held rather than followed.
+- Moved or renamed files are moved on the other side too (no new transfer).
+- A file changed on both sides since the last sync (a conflict, eg edited on a laptop while offline), or changed on one side and deleted on the other, is resolved without losing anything: the newest version keeps the name and the other one is kept next to it as `name.sync-conflict-<host>-<time>.ext`, synced to all machines. Review and delete it, on any machine. `-sync-conflicts list` leaves conflicts alone and only lists them instead.
+- The conflict copies, and anything else to look at, are listed in `~/.tsync/sync/<label>/conflicts.txt`.
+- As the newest version wins, tsync warns if the machines' clocks differ by more than a second (`-sync-max-clock-skew`, eg `500ms`).
+- Hidden files are ignored unless there is a `.tsyncignore`, which then lists what to ignore with the usual `.gitignore` syntax (`*`, `**`, trailing `/`, `!` to re-include; no nested files, escapes or `[!...]`).
+- The versions replaced by sync are kept in `.tsync-old/` in the folder (`-sync-keep`, the last 3 per file by default, 0 for none). Nothing removes them otherwise, clean it up yourself when you don't need them.
+- `-sync-watch` (default on) watches the sync folders for changes: only the directories with changes are scanned again (and all of it every 15 minutes, in case). When it can't (eg too many directories for the Linux inotify limit) or the notifications missed changes (eg a network folder), it goes back to scanning every `-sync-rescan` (default 10s). On macOS it uses FSEvents when built with cgo (the release and brew binaries are); without cgo it's off by default, as it then needs a file descriptor per file.
+- It's meant for directories of up to some tens of thousands of files (more works, but sync a big tree as a few `-sync` folders rather than one).
+
+How it works: [SYNC_DETAILS.md](SYNC_DETAILS.md). For a server without a UI, see [Headless](#headless).
+
 ### Flags
 
 ```
@@ -66,10 +82,8 @@ tsync [flags] [file...]
 The useful ones:
 - `-name` to use another name than the hostname, eg to run 2 instances on one machine.
 - `-max-rate` limits the file sending rate (per peer connection, whatever the number of files being sent), eg `-max-rate 10MB/s` (K, M, G are powers of 1024, case insensitive). Default is unlimited.
-- `-sync name=path` (repeatable) syncs the content of that directory with the linked peers that use the same `name`: it's just a label pairing the directories, which can be anywhere and called anything on each machine (eg `-sync docs=~/Documents` on one and `-sync docs=D:\work\papers` on another): each side gets what the other has new or changed. Deletions are propagated too: the other side moves its copy to `.tsync-old/` (a file modified on one side since the last sync wins over its deletion on the other, and a peer deleting most files at once, eg its disk not mounted, is held rather than followed). A file changed on both sides since the last sync (a conflict, eg edited on a laptop while offline), or changed on one side and deleted on the other, is resolved without losing anything: the newest version keeps the name and the other one is kept next to it as `name.sync-conflict-<host>-<time>.ext`, synced to all machines; review and delete it (on any machine). They're listed, with anything else to look at, in `~/.tsync/sync/<name>/conflicts.txt` (`-sync-conflicts list` leaves conflicts alone and only lists them instead). As the newest version wins, tsync warns if the machines' clocks differ by more than a second (`-sync-max-clock-skew`, eg `500ms`). Moved or renamed files are moved on the other side too (no new transfer), hidden files are ignored unless there is a `.tsyncignore`, which then lists what to ignore with the usual `.gitignore` syntax (`*`, `**`, trailing `/`, `!` to re-include; no nested files, escapes or `[!...]`). The versions replaced by sync are kept in `.tsync-old/` in the folder (`-sync-keep`, the last 3 per file by default, 0 for none); nothing removes them otherwise, clean it up yourself when you don't need them. It's meant for directories of up to some tens of thousands of files (more works, but sync a big tree as a few `-sync` folders rather than one). How it works: [SYNC_DETAILS.md](SYNC_DETAILS.md).
+- `-sync label=path` (repeatable) syncs that directory with the linked peers that use the same label, with `-sync-keep`, `-sync-conflicts`, `-sync-max-clock-skew`, `-sync-watch` and `-sync-rescan` to adjust it: see [Directory sync](#directory-sync).
 - `-headless` runs without a UI, for a server or a service (see [Headless](#headless)).
-- `-sync-watch` (default on) watches the sync folders for changes: only the directories with changes are scanned again (and all of it every 15 minutes, in case). When it can't (eg too many directories for the Linux inotify limit) or the notifications missed changes (eg a network folder), it goes back to scanning every `-sync-rescan`. On macOS it uses FSEvents when built with cgo (the release and brew binaries are); without cgo it's off by default, as it then needs a file descriptor per file.
-- `-sync-rescan` (default 10s) is how often the sync folders are scanned for changes when not watched.
 - `-tsync-dir` (default `~/.tsync`) is where the identity, trusted peers and sync state (bases, conflicts list) are, eg to run several tsync with different identities on one machine.
 - `-dir` for where received files are saved. Default is `~/Downloads` if it exists, else the current directory.
 - `-peers host[:port],...` to also send discovery directly to these addresses when multicast doesn't work at all (some VPNs, cloud VMs...). The port defaults to 29556. Each peer is reached through the interface the OS routes it to (eg tailscale's), no need for `-target` to match: with `-peers` tsync listens on all addresses, multicast still uses the `-target` interface.
@@ -115,7 +129,7 @@ WantedBy=multi-user.target
 
 ### Trying it on a single machine
 
-Run 2 instances with different names and identities: `tsync -name a` and `HOME=/tmp/b tsync -name b`.
+Run 2 instances with different names and identities: `tsync -name a` and `tsync -name b -tsync-dir /tmp/b`.
 
 ### Troubleshooting
 
@@ -132,7 +146,7 @@ Run 2 instances with different names and identities: `tsync -name a` and `HOME=/
 - Identity: each machine has an Ed25519 key pair in `~/.tsync/`, created on first run. The `DDD-DDDD` hash comes from the public key; checking it on both sides is what makes the first connection safe (trust on first use).
 - Handshake: connection requests and accepts carry a new X25519 key signed with the sender's identity and tied to both run ids, so old messages can't be replayed. Both sides derive the session keys with HKDF-SHA256, one AES-256-GCM key per direction.
 - Link: one side then opens a TCP connection. Every frame on it is encrypted and authenticated, with counter nonces so frames can't be replayed or reordered, and the first frame proves which peer it is.
-- Clipboard: the text (1 MiB max) and the time it was copied go to all the linked peers, and the receiver keeps the newest.
+- Clipboard: the text (1 Mb max) and the time it was copied go to all the linked peers, and the receiver keeps the newest.
 - Files: the offer (path, size, modification time) goes to the linked peers. Once accepted, the sender checks the file didn't change and streams it, followed by its SHA-256. The receiver writes a temporary file, checks size and hash, then renames it to the last part of the sender's path, cleaned up: no `../`, control characters, characters Windows refuses or leading dot; look-alike spaces (like the one macOS puts before AM/PM in screenshot names) become normal spaces and invisible characters (eg bidi overrides) are removed, while accents, other scripts and emojis are kept. Saved files are never executable (mode 0644) and keep their modification time.
 - Directory sync: each side keeps an index (path, type, mode, size, time, SHA-256) of its synced directories, exchanges it with the peers using the same label, and compares, path by path, its version, the peer's and what both had at the last sync, to tell who changed what (no clocks needed, except to pick the newest version of a conflict). See [SYNC_DETAILS.md](SYNC_DETAILS.md) for the full story: decisions, moves, conflicts, the mass deletion guard, and what's on the wire.
 

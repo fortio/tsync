@@ -25,6 +25,7 @@ type syncLine struct {
 	color tcolor.BasicColor
 }
 
+// NewSyncPanel returns the sync box for the server's sync folders.
 func NewSyncPanel(ap *ansipixels.AnsiPixels, srv *tsnet.Server) *SyncPanel {
 	return &SyncPanel{ap: ap, srv: srv}
 }
