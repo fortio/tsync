@@ -217,9 +217,7 @@ type syncFlags struct {
 	list    *bool
 	rescan  *time.Duration
 	watch   *bool
-	// headless is -headless, here to keep Main short.
-	headless *bool
-	skew     *time.Duration
+	skew    *time.Duration
 }
 
 // Apply sets the sync flags values in the config.
@@ -250,11 +248,9 @@ func SyncFlags() syncFlags {
 			return fmt.Errorf("expected copy or list, got %q", s)
 		}
 	})
-	headless := flag.Bool("headless", false, "Run without a UI: only directory sync (-sync) with already trusted peers (pair "+
-		"once with the UI first), no clipboard or file offers. Stop with Ctrl-C or SIGTERM")
 	skew := flag.Duration("sync-max-clock-skew", tsnet.DefaultMaxClockSkew, "How much the clocks of syncing machines can "+
 		"differ before warning (conflicts keep the newest version, by modification time)")
-	return syncFlags{folders, keep, &list, rescan, watch, headless, skew}
+	return syncFlags{folders, keep, &list, rescan, watch, skew}
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
@@ -468,10 +464,23 @@ func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, files *FilePanel,
 	case 'q', 'Q', 3: // Ctrl-C
 		log.Infof("Exiting on %q", c)
 		return false
-	default:
-		log.Infof("Input %q", c)
+	default: // eg Esc: say so, without filling the log.
+		log.LogVf("Input %q", c)
+		Notices.Show(tcolor.BrightYellow, fmt.Sprintf("No function for %s: q or Ctrl-C to quit", KeyName(c)))
 	}
 	return true
+}
+
+// KeyName names a key for the user: Esc, Ctrl-X, or the (quoted) character.
+func KeyName(c byte) string {
+	switch {
+	case c == 0x1b:
+		return "Esc"
+	case c < 0x20:
+		return "Ctrl-" + string(rune(c+'@'))
+	default:
+		return strconv.QuoteToASCII(string(rune(c)))
+	}
 }
 
 // InitiatePeerConnection connects to the peer, or accepts its pending connection request.
@@ -522,6 +531,8 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	fMaxRate := RateFlag("max-rate")
 	fSync := SyncFlags()
+	fHeadless := flag.Bool("headless", false, "Run without a UI: only directory sync (-sync) with already trusted peers (pair "+
+		"once with the UI first), no clipboard or file offers. Stop with Ctrl-C or SIGTERM")
 	fTsyncDir := flag.String("tsync-dir", "", "Directory with our identity, trusted peers and sync state (conflicts "+
 		"list...), default ~/.tsync (eg to run several tsync with different identities on one machine)")
 	cli.ArgsHelp = "[file...]"
@@ -531,11 +542,22 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	if err := CheckFiles(flag.Args()); err != nil {
 		return log.FErrf("Can't offer %v", err)
 	}
-	if *fSync.headless {
-		return RunHeadless(flag.Args(), tsnet.Config{
-			Name: *fName, Port: *fPort, Mcast: *fMcast, Target: *fTarget, BaseBroadcastInterval: *fInterval, Version: cli.ShortVersion,
-			Peers: SplitList(*fPeers), FileDir: DownloadDir(*fDir), MaxRate: *fMaxRate,
-		}, fSync, *fTsyncDir)
+	// The identity, storage and change callback are set by each mode.
+	cfg := tsnet.Config{
+		Name:                  *fName,
+		Version:               cli.ShortVersion,
+		Port:                  *fPort,
+		Mcast:                 *fMcast,
+		Target:                *fTarget,
+		BaseBroadcastInterval: *fInterval,
+		NoAutoConnect:         !*fAutoConnect,
+		Peers:                 SplitList(*fPeers),
+		FileDir:               DownloadDir(*fDir),
+		MaxRate:               *fMaxRate,
+	}
+	fSync.Apply(&cfg)
+	if *fHeadless {
+		return RunHeadless(flag.Args(), cfg, *fTsyncDir)
 	}
 	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
@@ -555,24 +577,10 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 		return log.FErrf("Failed to load or create identity: %v", err)
 	}
 	var version atomic.Uint64
-	cfg := tsnet.Config{
-		Name:    *fName,
-		Version: cli.ShortVersion,
-		Port:    *fPort,
-		Mcast:   *fMcast,
-		Target:  *fTarget,
-		OnChange: func(v uint64) {
-			version.Store(v)
-		},
-		Identity:              id,
-		BaseBroadcastInterval: *fInterval,
-		Storage:               storage,
-		NoAutoConnect:         !*fAutoConnect,
-		Peers:                 SplitList(*fPeers),
-		FileDir:               DownloadDir(*fDir),
-		MaxRate:               *fMaxRate,
+	cfg.Identity, cfg.Storage = id, storage
+	cfg.OnChange = func(v uint64) {
+		version.Store(v)
 	}
-	fSync.Apply(&cfg)
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
