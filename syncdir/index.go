@@ -158,7 +158,7 @@ func ScanDirs(root string, prev Index, dirs []string, ig *Ignore, force map[stri
 	}
 	gone := make(map[string]bool) // directories (children of dirty ones) not seen again (yet).
 	for k, e := range idx.Entries {
-		if dirty[parentKey(k)] {
+		if dirty[ParentKey(k)] {
 			delete(idx.Entries, k)
 			if e.Dir {
 				gone[k] = true
@@ -208,8 +208,8 @@ func ScanDirs(root string, prev Index, dirs []string, ig *Ignore, force map[stri
 	return idx, added, nil
 }
 
-// parentKey returns the key of the directory containing key ("" for the root).
-func parentKey(key string) string {
+// ParentKey returns the key of the directory containing key ("" for the root).
+func ParentKey(key string) string {
 	if i := strings.LastIndexByte(key, '/'); i >= 0 {
 		return key[:i]
 	}
@@ -218,7 +218,7 @@ func parentKey(key string) string {
 
 // inAny returns true if one of key's parent directories is in dirs.
 func inAny(key string, dirs map[string]bool) bool {
-	for p := parentKey(key); p != ""; p = parentKey(p) {
+	for p := ParentKey(key); p != ""; p = ParentKey(p) {
 		if dirs[p] {
 			return true
 		}
@@ -332,16 +332,25 @@ func ValidWindowsKey(key string) error {
 		if strings.ContainsAny(part, `<>:"|?*`) || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
 			return errors.New("invalid name on windows")
 		}
-		base := strings.ToUpper(part)
-		if i := strings.IndexByte(base, '.'); i >= 0 {
-			base = base[:i]
-		}
-		switch base = strings.TrimSpace(base); {
-		case base == "CON" || base == "PRN" || base == "AUX" || base == "NUL",
-			len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
-				base[3] >= '0' && base[3] <= '9':
+		if WindowsReservedName(part) {
 			return errors.New("reserved device name on windows")
 		}
 	}
 	return nil
+}
+
+// WindowsReservedName returns true if name (a single path part) is a Windows device name: CON, PRN, AUX, NUL,
+// COM0-9 or LPT0-9, in any case, with or without an extension.
+func WindowsReservedName(name string) bool {
+	base := strings.ToUpper(name)
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	base = strings.TrimSpace(base)
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
+		base[3] >= '0' && base[3] <= '9'
 }

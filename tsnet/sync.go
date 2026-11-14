@@ -495,7 +495,7 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 	f.err = ""
 	seen := 0 // synced paths this scan saw (started after they were synced, in a directory it read).
 	for k, r := range f.recent {
-		if r.at.Before(idx.Time) && (rescanned == nil || rescanned[parentDir(k)]) {
+		if r.at.Before(idx.Time) && (rescanned == nil || rescanned[syncdir.ParentKey(k)]) {
 			delete(f.recent, k)
 			seen++
 		}
@@ -1026,12 +1026,4 @@ func (s *Server) syncLinkClosedLocked(l *link) {
 			f.kickLocked() // to save the base, update the conflicts list.
 		}
 	}
-}
-
-// parentDir returns the key of the directory containing key ("" for the root).
-func parentDir(key string) string {
-	if i := strings.LastIndexByte(key, '/'); i >= 0 {
-		return key[:i]
-	}
-	return ""
 }

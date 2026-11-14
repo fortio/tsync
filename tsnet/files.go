@@ -23,6 +23,7 @@ import (
 
 	"fortio.org/log"
 	"fortio.org/progressbar"
+	"fortio.org/tsync/syncdir"
 )
 
 // File transfer over the TCP link: the sender offers a file (name, size, time) to its
@@ -895,7 +896,7 @@ func safeFileName(name string, hidden bool) string {
 	if name[0] == '.' && !hidden { // can't be "." or "..": no trailing dots.
 		name = "_" + name
 	}
-	if isWindowsReserved(name) {
+	if syncdir.WindowsReservedName(name) {
 		name = "_" + name
 	}
 	if len(name) > MaxFileNameLen {
@@ -910,20 +911,6 @@ func safeFileName(name string, hidden bool) string {
 		name = name[:cut] + ext
 	}
 	return name
-}
-
-func isWindowsReserved(name string) bool {
-	base := strings.ToUpper(name)
-	if i := strings.IndexByte(base, '.'); i >= 0 {
-		base = base[:i]
-	}
-	base = strings.TrimSpace(base)
-	switch base {
-	case "CON", "PRN", "AUX", "NUL":
-		return true
-	}
-	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
-		base[3] >= '0' && base[3] <= '9'
 }
 
 // pacer limits the sending rate of a link: the files being sent in parallel share it.
