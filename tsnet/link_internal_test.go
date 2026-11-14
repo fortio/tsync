@@ -85,20 +85,20 @@ func TestValidateNameAndDecode(t *testing.T) {
 		}
 	}
 	s := &Server{}
-	d, err := s.MCastMessageDecode([]byte(`tsync1 "ok" p.key e 3 r abc`))
+	d, err := s.decodeDiscovery([]byte(`tsync1 "ok" p.key e 3 r abc`))
 	if err != nil || d != (Discovery{Name: "ok", PublicKey: "p.key", Epoch: 3, RunID: "abc"}) {
 		t.Errorf("valid discovery message: %+v %v", d, err)
 	}
-	if d, err = s.MCastMessageDecode([]byte(`tsync1 "old" p.key e 3`)); err != nil || d.RunID != "" || d.Epoch != 3 {
+	if d, err = s.decodeDiscovery([]byte(`tsync1 "old" p.key e 3`)); err != nil || d.RunID != "" || d.Epoch != 3 {
 		t.Errorf("older version discovery message: %+v %v", d, err)
 	}
 	if (PeerData{}).Compatible() || !(PeerData{RunID: "x"}).Compatible() {
 		t.Errorf("Compatible() wrong")
 	}
-	if _, err = s.MCastMessageDecode([]byte(`tsync1 "x" p.key`)); err == nil {
+	if _, err = s.decodeDiscovery([]byte(`tsync1 "x" p.key`)); err == nil {
 		t.Errorf("truncated discovery message accepted")
 	}
-	if _, err := s.MCastMessageDecode([]byte(`tsync1 "evil\x1b]52;c;aGk=\a" p.key e 3 r x`)); err == nil {
+	if _, err := s.decodeDiscovery([]byte(`tsync1 "evil\x1b]52;c;aGk=\a" p.key e 3 r x`)); err == nil {
 		t.Errorf("discovery message with escape in name accepted")
 	}
 }
@@ -344,7 +344,7 @@ func TestPeersCleanupNotifiesChange(t *testing.T) {
 	s.Sources.Set(Source{IP: peer.IP, Port: 1234}, peer)
 	offered := &Transfer{Peer: peer, Incoming: true, State: TransferOffered}
 	s.addTransferLocked(offered)
-	s.PeersCleanup()
+	s.peersCleanup()
 	if s.Peers.Len() != 0 || s.Sources.Len() != 0 {
 		t.Errorf("expired peer not removed: %d peers, %d sources", s.Peers.Len(), s.Sources.Len())
 	}
@@ -355,7 +355,7 @@ func TestPeersCleanupNotifiesChange(t *testing.T) {
 		t.Errorf("offer from expired peer should be failed (and still listed), got %v", offered.State)
 	}
 	offered.End = offered.End.Add(-2 * expiredOfferLinger)
-	s.PeersCleanup()
+	s.peersCleanup()
 	if len(s.transfers) != 0 {
 		t.Errorf("expired offer should be removed after a bit")
 	}
@@ -396,7 +396,7 @@ func TestEarlyConnect(t *testing.T) {
 		e.at = e.at.Add(-2 * earlyMaxAge)
 		s.early[src] = e
 	}
-	s.PeersCleanup()
+	s.peersCleanup()
 	if len(s.early) != 0 {
 		t.Errorf("stale early message not dropped")
 	}
@@ -414,7 +414,7 @@ func TestNoEscapesInLogs(t *testing.T) {
 		log.SetOutput(os.Stderr)
 	})
 	s := (&Config{Name: "us", PeerTimeout: time.Second}).NewServer()
-	d, err := s.MCastMessageDecode([]byte("tsync1 \"x\" p.\x1b]52;c;aGk=\a e 1 r \x1b[2J"))
+	d, err := s.decodeDiscovery([]byte("tsync1 \"x\" p.\x1b]52;c;aGk=\a e 1 r \x1b[2J"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestNoEscapesInLogs(t *testing.T) {
 	s.Sources.Set(Source{IP: good.IP, Port: 1235}, good)
 	s.handleDirectMessage([]byte(`reject1 "good" "us" "\x1b]0;title\a"`), &net.UDPAddr{IP: net.ParseIP(good.IP), Port: 1235})
 	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now().Add(-2 * time.Second), RunID: d.RunID})
-	s.PeersCleanup()
+	s.peersCleanup()
 	out := buf.String()
 	if !strings.Contains(out, "Removing 1 expired peers") || !strings.Contains(out, "rejected by good") {
 		t.Errorf("expected log lines missing: %s", out)
@@ -447,12 +447,12 @@ func TestPeersCleanupKeepsLinkedPeers(t *testing.T) {
 	peer := Peer{Name: "linked", IP: "10.0.0.1", PublicKey: "k"}
 	s.Peers.Set(peer, PeerData{Port: 1234, Proto: 1, LastSeen: time.Now().Add(-time.Minute)})
 	s.links[peer] = &link{conn: &net.TCPConn{}}
-	s.PeersCleanup()
+	s.peersCleanup()
 	if s.Peers.Len() != 1 {
 		t.Fatalf("linked peer must not expire from missing discovery")
 	}
 	s.resetLinkLocked(peer) // link lost: grace period before expiry.
-	s.PeersCleanup()
+	s.peersCleanup()
 	if s.Peers.Len() != 1 {
 		t.Errorf("peer with a just lost link expired right away")
 	}
@@ -521,12 +521,12 @@ func TestDiscoveryRoundStaticPeerBackoff(t *testing.T) {
 func TestDiscoveryProtocolDecode(t *testing.T) {
 	s := (&Config{Name: "us", Version: "v1.2.3"}).NewServer()
 	s.idStr, s.runID = "key", "run"
-	d, err := s.MCastMessageDecode(s.discoveryPayload(7))
+	d, err := s.decodeDiscovery(s.discoveryPayload(7))
 	if err != nil || d.Name != "us" || d.Epoch != 7 || d.RunID != "run" || d.Proto != ProtocolVersion || d.Version != "v1.2.3" {
 		t.Errorf("bad decode %+v %v", d, err)
 	}
 	// 0.22: no protocol level or version.
-	d, err = s.MCastMessageDecode([]byte(fmt.Sprintf(DiscoveryMessageFormat, "old", "key", 3, "r")))
+	d, err = s.decodeDiscovery([]byte(fmt.Sprintf(DiscoveryMessageFormat, "old", "key", 3, "r")))
 	if err != nil || d.Name != "old" || d.RunID != "r" || d.Proto != 0 || d.Version != "" {
 		t.Errorf("bad old decode %+v %v", d, err)
 	}
@@ -569,8 +569,8 @@ func TestMulticastWatchdog(t *testing.T) {
 	}
 	defer deaf.Close()
 	s.mcastMu.Lock()
-	old := s.broadcastListen
-	s.broadcastListen = deaf
+	old := s.mcastListen
+	s.mcastListen = deaf
 	s.mcastMu.Unlock()
 	old.Close()
 	time.Sleep(100 * time.Millisecond) // the receiver switches to the deaf socket.

@@ -144,16 +144,16 @@ type Server struct {
 	// Our copy of the input config.
 	Config
 	// internal state
-	ourSendAddr     *net.UDPAddr
-	destAddr        *net.UDPAddr
-	broadcastListen *net.UDPConn
-	dualUDPSock     *net.UDPConn // used for both sending (to multicast/unicast) and receiving (unicast)
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	Peers           *smap.Map[Peer, PeerData]
-	Sources         *smap.Map[Source, Peer] // maps ip,port to peer
-	idStr           string
-	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
+	ourSendAddr *net.UDPAddr
+	destAddr    *net.UDPAddr
+	mcastListen *net.UDPConn
+	dualUDPSock *net.UDPConn // used for both sending (to multicast/unicast) and receiving (unicast)
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	Peers       *smap.Map[Peer, PeerData]
+	Sources     *smap.Map[Source, Peer] // maps ip,port to peer
+	idStr       string
+	epoch       atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
 	// Handshake/session state: stateMu serializes all read-modify-write of Peers data (status) and links.
 	stateMu sync.Mutex
 	links   map[Peer]*link
@@ -180,7 +180,7 @@ type Server struct {
 	noMcast     bool // Config.Mcast is NoMulticast.
 	lastMcast   time.Time
 	staticState map[string]*staticBackoff
-	// multicast socket watchdog (see checkMulticast): the interface to join on, guard of broadcastListen once started,
+	// multicast socket watchdog (see checkMulticast): the interface to join on, guard of mcastListen once started,
 	// when we last received a multicast packet (unix nanos, 0 none yet) and when we last reopened the socket.
 	mcastIf       *net.Interface
 	mcastMu       sync.Mutex
@@ -317,14 +317,14 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	if err = s.openUnicast(ctx, goodIf, localIP); err != nil {
-		if s.broadcastListen != nil {
-			s.broadcastListen.Close()
+		if s.mcastListen != nil {
+			s.mcastListen.Close()
 		}
 		return err
 	}
 	log.Infof("Sockets created - unicast: %s, tcp: %s", s.ourSendAddr, s.tcpListen.Addr())
-	if s.broadcastListen != nil {
-		log.Infof("Multicast listen: %s", s.broadcastListen.LocalAddr())
+	if s.mcastListen != nil {
+		log.Infof("Multicast listen: %s", s.mcastListen.LocalAddr())
 	}
 
 	// get a cancelable context
@@ -351,7 +351,7 @@ func (s *Server) openMulticast(goodIf *net.Interface) (err error) {
 		return nil
 	}
 	s.mcastIf = goodIf
-	s.broadcastListen, err = s.listenMulticast()
+	s.mcastListen, err = s.listenMulticast()
 	return err
 }
 
@@ -372,7 +372,7 @@ func (s *Server) listenMulticast() (*net.UDPConn, error) {
 func (s *Server) mcastConn() *net.UDPConn {
 	s.mcastMu.Lock()
 	defer s.mcastMu.Unlock()
-	return s.broadcastListen
+	return s.mcastListen
 }
 
 // rejoinMulticast replaces the multicast socket by a new one (the receiver switches to it when the old one closes).
@@ -388,8 +388,8 @@ func (s *Server) rejoinMulticast() {
 		conn.Close()
 		return
 	}
-	old := s.broadcastListen
-	s.broadcastListen = conn
+	old := s.mcastListen
+	s.mcastListen = conn
 	s.mcastMu.Unlock()
 	if old != nil {
 		old.Close()
@@ -507,15 +507,15 @@ func (s *Server) runAdv(ctx context.Context) {
 			epoch = newEpoch
 			s.discoveryRound(epoch, time.Now())
 			// Run some cleanup/expire entries
-			s.PeersCleanup()
+			s.peersCleanup()
 			s.handshakeTick()
 		}
 	}
 }
 
-// PeersCleanup removes the peers not heard from for Config.PeerTimeout (unless linked, the link then has its
+// peersCleanup removes the peers not heard from for Config.PeerTimeout (unless linked, the link then has its
 // own keepalive) and what was kept for them. Called on every discovery tick.
-func (s *Server) PeersCleanup() {
+func (s *Server) peersCleanup() {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	var toDelete []Peer
@@ -637,7 +637,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 
 // handleDiscovery processes a discovery message, received by multicast or directly (unicast).
 func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
-	d, err := s.MCastMessageDecode(buf)
+	d, err := s.decodeDiscovery(buf)
 	if err != nil {
 		log.Errf("Error decoding UDP packet %q from %v: %v", buf, addr, err)
 		return
@@ -843,7 +843,7 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	case fast || now.Sub(s.lastMcast) >= SlowDiscoveryInterval:
 		s.lastMcast = now
 		s.checkMulticast(now) // before sending: the reopened socket then gets this very message.
-		if err := s.MCastMessageSend(epoch); err != nil {
+		if err := s.mcastSend(epoch); err != nil {
 			log.Errf("Error sending UDP packet: %v", err)
 		}
 	default:
@@ -883,8 +883,8 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	}
 }
 
-// MCastMessageSend sends our discovery message to the multicast group (nothing if multicast is disabled).
-func (s *Server) MCastMessageSend(epoch int32) error {
+// mcastSend sends our discovery message to the multicast group (nothing if multicast is disabled).
+func (s *Server) mcastSend(epoch int32) error {
 	if s.destAddr == nil {
 		return nil // multicast disabled.
 	}
@@ -902,8 +902,8 @@ type Discovery struct {
 	Version   string // short version, empty for older versions.
 }
 
-// MCastMessageDecode decodes (and validates the name of) a discovery message, received by multicast or directly.
-func (s *Server) MCastMessageDecode(buf []byte) (Discovery, error) {
+// decodeDiscovery decodes (and validates the name of) a discovery message, received by multicast or directly.
+func (s *Server) decodeDiscovery(buf []byte) (Discovery, error) {
 	var d Discovery
 	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat+DiscoveryExtraFormat,
 		&d.Name, &d.PublicKey, &d.Epoch, &d.RunID, &d.Proto, &d.Version)
