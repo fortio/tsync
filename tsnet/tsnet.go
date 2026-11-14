@@ -644,22 +644,9 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		log.Errf("Error decoding UDP packet %q from %v: %v", buf, addr, err)
 		return
 	}
-	theirEpoch := d.Epoch
-	data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now(), RunID: d.RunID, Proto: d.Proto, Version: d.Version}
+	data := PeerData{Port: addr.Port, Epoch: d.Epoch, LastSeen: time.Now(), RunID: d.RunID, Proto: d.Proto, Version: d.Version}
 	peer := Peer{Name: d.Name, IP: addr.IP.String(), PublicKey: d.PublicKey}
-	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
-	if peer == us {
-		if theirEpoch <= s.epoch.Load() {
-			log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%q run %q epoch %d)", peer, data.RunID, data.Epoch)
-			s.epoch.Store(epochStopMarker) // Stopped() right away,
-			go s.Stop()                    // the rest not from this (receiver) goroutine: Stop waits for it.
-		} else {
-			log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%q run %q epoch %d)",
-				peer, data.RunID, data.Epoch)
-			// Tell it directly too: it may not get our multicast anymore (eg lost its group membership after a
-			// network change) but still hears unicast on its discovery socket, and then exits.
-			s.sendDiscoveryTo(addr)
-		}
+	if s.duplicateInstance(peer, data, addr) {
 		return
 	}
 	var early []byte
@@ -722,6 +709,27 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	if early = s.takeEarlyLocked(src); early == nil {
 		s.autoConnectLocked(peer, data, time.Now())
 	}
+}
+
+// duplicateInstance handles the discovery of another instance with our name, address and key (returns false
+// for any other peer): the newer one stays, so we stop if that's the other one, else tell it to.
+func (s *Server) duplicateInstance(peer Peer, data PeerData, addr *net.UDPAddr) bool {
+	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
+	if peer != us {
+		return false
+	}
+	if data.Epoch <= s.epoch.Load() {
+		log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%q run %q epoch %d)", peer, data.RunID, data.Epoch)
+		s.epoch.Store(epochStopMarker) // Stopped() right away,
+		go s.Stop()                    // the rest not from this (receiver) goroutine: Stop waits for it.
+		return true
+	}
+	log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%q run %q epoch %d)",
+		peer, data.RunID, data.Epoch)
+	// Tell it directly too: it may not get our multicast anymore (eg lost its group membership after a
+	// network change) but still hears unicast on its discovery socket, and then exits.
+	s.sendDiscoveryTo(addr)
+	return true
 }
 
 // logPeerInterfaces logs which interface and local address is used to reach each static peer.

@@ -280,27 +280,7 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		case <-wake.C:
 		case <-f.kick:
 		}
-		s.stateMu.Lock()
-		if f.replan && (len(f.inflight) == 0 || time.Since(f.lastReplan) >= syncReplanEvery) {
-			s.replanAllLocked(f)
-		}
-		s.stateMu.Unlock()
-		s.startPulls(f)
-		s.stateMu.Lock()
-		idle := len(f.inflight) == 0 && !f.replan
-		rescan := idle && f.synced
-		if idle {
-			f.synced = false
-		}
-		save := idle || time.Since(f.lastSave) >= syncSaveEvery
-		retry := time.Duration(0)
-		for _, fail := range f.failed { // eg a file still being written there.
-			retry = minPositive(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
-		}
-		if f.replan {
-			retry = minPositive(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
-		}
-		s.stateMu.Unlock()
+		rescan, save, retry := s.syncStep(f)
 		switch { // so the peers learn what we got.
 		case rescan && sw != nil:
 			// What's notified so far, without waiting: we're done writing. What's notified later is scanned then
@@ -317,6 +297,33 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 			wake.Reset(retry)
 		}
 	}
+}
+
+// syncStep replans the folder if due and starts what can be: returns whether to scan again (all synced, for the
+// peers to learn what we got), whether to save the bases, and when to wake up for the retries and the next
+// replan (0 for none).
+func (s *Server) syncStep(f *syncFolder) (rescan, save bool, retry time.Duration) {
+	s.stateMu.Lock()
+	if f.replan && (len(f.inflight) == 0 || time.Since(f.lastReplan) >= syncReplanEvery) {
+		s.replanAllLocked(f)
+	}
+	s.stateMu.Unlock()
+	s.startPulls(f)
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	idle := len(f.inflight) == 0 && !f.replan
+	rescan = idle && f.synced
+	if idle {
+		f.synced = false
+	}
+	save = idle || time.Since(f.lastSave) >= syncSaveEvery
+	for _, fail := range f.failed { // eg a file still being written there.
+		retry = minPositive(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
+	}
+	if f.replan {
+		retry = minPositive(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
+	}
+	return rescan, save, retry
 }
 
 // minPositive is the min of a and b, ignoring a zero a.

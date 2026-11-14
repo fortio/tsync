@@ -629,6 +629,12 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 		log.LogVf("File frame %q for unknown/aborted transfer %d from %s", ftype, id, peer.Name)
 		return true
 	}
+	s.incomingFileFrame(peer, l, conn, ftype, id, rf, payload)
+	return true
+}
+
+// incomingFileFrame handles the data, end or abort frame of a file we are receiving (rf).
+func (s *Server) incomingFileFrame(peer Peer, l *link, conn net.Conn, ftype byte, id uint32, rf *recvFile, payload []byte) {
 	var err error
 	switch ftype {
 	case FrameFileData:
@@ -636,7 +642,7 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 	case FrameFileEnd:
 		if rf.t.pull != nil {
 			s.syncFileEnd(l, conn, id, rf, payload)
-			return true
+			return
 		}
 		err = s.fileEnd(rf, payload)
 		if err == nil {
@@ -647,13 +653,13 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 			if rf.t.parent != nil {
 				s.requestMoreFiles(peer, l, conn, rf.t.parent)
 			}
-			return true
+			return
 		}
 	case FrameFileAbort:
 		err = fmt.Errorf("aborted by sender: %s", sanitizeReason(payload))
 	}
 	if err == nil {
-		return true
+		return
 	}
 	if ftype != FrameFileAbort {
 		_ = l.send(conn, FrameFileRefuse, idPayload(id, err.Error()))
@@ -661,7 +667,6 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 	s.stateMu.Lock()
 	s.dropIncomingLocked(l, id, err)
 	s.stateMu.Unlock()
-	return true
 }
 
 // sanitizeReason makes a (peer provided) error message safe to log/display: single
