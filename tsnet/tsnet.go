@@ -197,6 +197,8 @@ type Server struct {
 	ctx       context.Context //nolint:containedctx // server lifetime context, for dial goroutines.
 	// direct messages received before the sender's discovery, by source (see stashEarlyLocked).
 	early map[Source]earlyMsg
+	// stopMu serializes Stop.
+	stopMu sync.Mutex
 }
 
 // Source is the address a peer's UDP messages come from.
@@ -453,12 +455,12 @@ func (s *Server) openUnicast(ctx context.Context, goodIf *net.Interface, localIP
 }
 
 // Stop stops the server and waits for its goroutines. The server can't be started again.
+// Not to be called from one of the server's goroutines (it would wait for itself).
 func (s *Server) Stop() {
-	if s.Stopped() {
-		return
-	}
-	s.epoch.Store(epochStopMarker)
-	if s.cancel == nil {
+	s.stopMu.Lock() // a concurrent Stop waits for the first one to be done.
+	defer s.stopMu.Unlock()
+	s.epoch.Store(epochStopMarker) // Stopped() from now on.
+	if s.cancel == nil {           // not started, or already stopped.
 		return
 	}
 	s.cancel()
@@ -649,7 +651,8 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	if peer == us {
 		if theirEpoch <= s.epoch.Load() {
 			log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%q run %q epoch %d)", peer, data.RunID, data.Epoch)
-			s.Stop()
+			s.epoch.Store(epochStopMarker) // Stopped() right away,
+			go s.Stop()                    // the rest not from this (receiver) goroutine: Stop waits for it.
 		} else {
 			log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%q run %q epoch %d)",
 				peer, data.RunID, data.Epoch)
