@@ -70,6 +70,9 @@ func IdentityFromPrivateKey(privKeyStr string) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(privKeyBytes) != ed25519.PrivateKeySize { // Public() would panic.
+		return nil, NewEncodingErr(fmt.Sprintf("invalid private key size %d", len(privKeyBytes)))
+	}
 	privKey := ed25519.PrivateKey(privKeyBytes)
 	pubKey := privKey.Public().(ed25519.PublicKey)
 	return &Identity{

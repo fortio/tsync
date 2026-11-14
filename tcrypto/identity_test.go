@@ -97,3 +97,12 @@ func TestInitStorageDir(t *testing.T) {
 		t.Errorf("unexpected identity %v %v", loaded, lerr)
 	}
 }
+
+func TestIdentityFromBadPrivateKey(t *testing.T) {
+	// A truncated key (eg a damaged id file) is an error, not a panic.
+	for _, s := range []string{"k.AAAA", "k.", "x.AAAA", ""} {
+		if id, err := tcrypto.IdentityFromPrivateKey(s); err == nil {
+			t.Errorf("expected an error for %q, got %v", s, id)
+		}
+	}
+}

@@ -62,8 +62,12 @@ func DownloadDir(dir string) string {
 
 // ShortPath replaces the home directory prefix by ~.
 func ShortPath(p string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(p, home) {
-		return "~" + p[len(home):]
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if rest, ok := strings.CutPrefix(p, home); ok && (rest == "" || os.IsPathSeparator(rest[0])) {
+		return "~" + rest
 	}
 	return p
 }
