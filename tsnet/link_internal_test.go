@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -642,5 +643,49 @@ func TestCheckAddress(t *testing.T) {
 	}
 	if _, err = conn.Write([]byte("x")); err == nil {
 		t.Errorf("link from the old address should be closed")
+	}
+}
+
+// A newer duplicate's discovery, through a started server's receiver, stops it (Stop not run on the receiver,
+// which it waits for), and concurrent and later Stop calls return.
+func TestDuplicateStopsServer(t *testing.T) {
+	id, _ := tcrypto.NewIdentity()
+	s := (&Config{
+		Name: "Dup", Port: DefaultDiscoveryPort + 15, Mcast: NoMulticast, Target: DefaultTarget, Identity: id,
+		BaseBroadcastInterval: time.Hour, // no ticks: only the newer duplicate's message matters.
+	}).NewServer()
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ours := s.OurAddress()
+	// From our own address (same name, ip and key) with an older epoch, so a newer instance: we must stop.
+	dup, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ours.IP})
+	if err != nil {
+		s.Stop()
+		t.Fatal(err)
+	}
+	defer dup.Close()
+	msg := fmt.Appendf(nil, DiscoveryMessageFormat+DiscoveryExtraFormat, "Dup", s.idStr, 0, "newer", ProtocolVersion, "x")
+	if _, err = dup.WriteToUDP(msg, &net.UDPAddr{IP: ours.IP, Port: s.Port}); err != nil {
+		s.Stop()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		for !s.Stopped() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		var wg sync.WaitGroup
+		for range 3 { // concurrently with the one duplicateInstance started.
+			wg.Go(s.Stop)
+		}
+		wg.Wait()
+		s.Stop() // and once stopped.
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server didn't stop, or Stop didn't return")
 	}
 }
