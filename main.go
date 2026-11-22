@@ -590,10 +590,11 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	log.Infof("Paste to send to connected peers, Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
-	ourAddress := srv.OurAddress()
-	ourIP := ourAddress.IP.String()
-	ourPort := strconv.Itoa(ourAddress.Port)
-	ourLine := OurLine(srv, ourIP, ourPort, id.HumanID())
+	// ourLine is our row of the table: our address can change (eg new DHCP lease after sleep).
+	ourLine := func() []string {
+		a := srv.OurAddress()
+		return OurLine(srv, a.IP.String(), strconv.Itoa(a.Port), id.HumanID())
+	}
 	ap.OnResize = func() error {
 		prev = ^uint64(0) // force repaint
 		return nil
@@ -624,7 +625,7 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	paste := &PasteCollector{MaxSize: tsnet.MaxClipSize + 1}
 	top := &TopArea{
 		ap: ap, srv: srv, logArea: logArea, clips: clips, files: files,
-		fixedLines: [][]string{ourLine, HeaderLine()},
+		fixedLines: [][]string{ourLine(), HeaderLine()},
 		syncs:      NewSyncPanel(ap, srv),
 		help:       " paste/drop file: send · click box or c: copy · d: download · click or 1-9: connect/accept · q: quit ",
 	}
@@ -652,6 +653,7 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 			prev = curVersion
 			peersSnapshot = srv.Peers.KeysValuesSnapshot()
 			slices.SortFunc(peersSnapshot, tsnet.PeerKVSort)
+			top.fixedLines[0] = ourLine()
 			tableWidth = top.Draw(peersSnapshot)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()

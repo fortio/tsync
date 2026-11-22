@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -235,7 +236,7 @@ func readDiscoveryWith(conn *net.UDPConn, marker string) ([]byte, error) {
 func checkDuplicates(t *testing.T, s *Server, them *net.UDPConn, from *net.UDPAddr, msg func(string, string, int, string) []byte) {
 	t.Helper()
 	s.epoch.Store(5)
-	s.ourSendAddr = &net.UDPAddr{IP: from.IP, Port: 1000}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: from.IP, Port: 1000})
 	s.handleDiscovery(msg("Us", s.idStr, 9, "x"), from)
 	if s.Stopped() {
 		t.Errorf("should not stop for an older duplicate")
@@ -257,7 +258,7 @@ func TestHandleDiscovery(t *testing.T) {
 	s := (&Config{Name: "Us", Identity: id, NoAutoConnect: true}).NewServer()
 	s.idStr = id.PublicKeyToString()
 	s.runID = "ourrun"
-	s.ourSendAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000})
 	var err error
 	if s.dualUDPSock, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
 		t.Fatal(err)
@@ -330,6 +331,12 @@ func TestHandleDiscovery(t *testing.T) {
 	if _, d := get("BadKey"); d.HumanHash != "BAD-PKEY" {
 		t.Errorf("expected BAD-PKEY, got %q", d.HumanHash)
 	}
+	// Our own message (this run) from another address (eg ours just changed): ignored, not a peer.
+	nPeers := s.Peers.Len()
+	s.handleDiscovery(msg("Us", s.idStr, 1, "ourrun"), from)
+	if s.Stopped() || s.Peers.Len() != nPeers {
+		t.Errorf("our own discovery should be ignored (stopped %v, peers %d -> %d)", s.Stopped(), nPeers, s.Peers.Len())
+	}
 	checkDuplicates(t, s, them, from, msg)
 	// Dial me requests from unknown source or not connected peer are ignored.
 	s.handleDialMe(&net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1}, "x", "Us")
@@ -368,7 +375,7 @@ func TestEarlyConnect(t *testing.T) {
 	s := (&Config{Name: "Us", Identity: id, NoAutoConnect: true, PeerTimeout: time.Minute}).NewServer()
 	s.idStr = id.PublicKeyToString()
 	s.runID = "ourrun"
-	s.ourSendAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000})
 	var err error
 	if s.dualUDPSock, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
 		t.Fatal(err)
@@ -582,4 +589,58 @@ func TestMulticastWatchdog(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	waitRecv(before, "nothing received on the reopened multicast socket")
+}
+
+// checkAddress: a new local address (eg new DHCP lease after sleep) is adopted and the links from the old one
+// are closed; a failed lookup or the same address changes nothing.
+func TestCheckAddress(t *testing.T) {
+	id, _ := tcrypto.NewIdentity()
+	s := (&Config{Name: "Us", Identity: id, Mcast: NoMulticast}).NewServer()
+	s.noMcast = true
+	var err error
+	if s.dualUDPSock, err = net.ListenUDP("udp4", nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.dualUDPSock.Close()
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1000})
+	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	conn, err := net.DialTCP("tcp4", nil, ln.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	peer := Peer{Name: "them", IP: "127.0.0.1", PublicKey: "p.x"}
+	s.links[peer] = &link{conn: conn}
+	lo := &net.Interface{Index: 1, Name: "lo"}
+	var lookupErr error
+	newIP := net.IPv4(127, 0, 0, 1)
+	s.lookupIf = func(context.Context, string) (*net.Interface, *net.UDPAddr, error) {
+		return lo, &net.UDPAddr{IP: newIP}, lookupErr
+	}
+	v := s.changes.Load()
+	s.checkAddress(t.Context()) // same address.
+	lookupErr = errors.New("network down")
+	newIP = net.IPv4(10, 1, 2, 3)
+	s.checkAddress(t.Context()) // lookup failed: keep ours.
+	if got := s.OurAddress(); !got.IP.Equal(net.IPv4(127, 0, 0, 1)) || s.changes.Load() != v {
+		t.Fatalf("address shouldn't change: %v (changes %d -> %d)", got, v, s.changes.Load())
+	}
+	if _, err = conn.Write([]byte("x")); err != nil {
+		t.Fatalf("link shouldn't be closed: %v", err)
+	}
+	lookupErr = nil
+	s.checkAddress(t.Context())
+	if got := s.OurAddress(); !got.IP.Equal(newIP) || got.Port != 1000 {
+		t.Errorf("expected the new address with the same port, got %v", got)
+	}
+	if s.changes.Load() == v {
+		t.Errorf("expected a change notification")
+	}
+	if _, err = conn.Write([]byte("x")); err == nil {
+		t.Errorf("link from the old address should be closed")
+	}
 }

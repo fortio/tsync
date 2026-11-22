@@ -144,7 +144,7 @@ type Server struct {
 	// Our copy of the input config.
 	Config
 	// internal state
-	ourSendAddr *net.UDPAddr
+	ourSendAddr atomic.Pointer[net.UDPAddr] // see OurAddress: changes with the local address (see checkAddress).
 	destAddr    *net.UDPAddr
 	mcastListen *net.UDPConn
 	dualUDPSock *net.UDPConn // used for both sending (to multicast/unicast) and receiving (unicast)
@@ -199,6 +199,8 @@ type Server struct {
 	early map[Source]earlyMsg
 	// stopMu serializes Stop.
 	stopMu sync.Mutex
+	// lookupIf is GetInternetInterface (replaced in tests).
+	lookupIf func(ctx context.Context, target string) (*net.Interface, *net.UDPAddr, error)
 }
 
 // Source is the address a peer's UDP messages come from.
@@ -249,6 +251,7 @@ func (c *Config) NewServer() *Server {
 		// Random start so offer ids from different runs don't collide (eg in peers' lists).
 		// Below 2^30 so they never reach syncIDBit (even with the ids reserved by directory offers).
 		nextFileID: rand.Uint32() >> 2, //nolint:gosec // not cryptographic.
+		lookupIf:   GetInternetInterface,
 	}
 }
 
@@ -309,7 +312,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.destAddr)
 	// Try to get the right interface to listen on
-	goodIf, localIP, err := GetInternetInterface(ctx, s.Target)
+	goodIf, localIP, err := s.lookupIf(ctx, s.Target)
 	if err != nil {
 		log.Warnf("Could not get default route interface using %q as test destination, will listen on all: %v", s.Target, err)
 	} else {
@@ -324,7 +327,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		return err
 	}
-	log.Infof("Sockets created - unicast: %s, tcp: %s", s.ourSendAddr, s.tcpListen.Addr())
+	log.Infof("Sockets created - unicast: %s, tcp: %s", s.OurAddress(), s.tcpListen.Addr())
 	if s.mcastListen != nil {
 		log.Infof("Multicast listen: %s", s.mcastListen.LocalAddr())
 	}
@@ -416,42 +419,72 @@ func (s *Server) checkMulticast(now time.Time) {
 }
 
 // openUnicast creates the unicast UDP socket (also used to send multicast) and the TCP listener.
-// With static peers (eg over a VPN like tailscale) each peer may be reached through a different interface:
-// listen on all addresses so the OS picks the right source address per peer; multicast stays on goodIf.
+// They listen on all addresses: the OS picks the source address per peer (eg a static peer over a VPN like
+// tailscale through its interface) and they keep working when the local address changes (eg a new DHCP lease
+// after sleep, see checkAddress); multicast is sent on goodIf.
 func (s *Server) openUnicast(ctx context.Context, goodIf *net.Interface, localIP *net.UDPAddr) (err error) {
-	bindIP := localIP
 	if len(s.staticPeers) > 0 {
-		bindIP = nil
 		s.logPeerInterfaces(ctx)
 	}
-	laddr := bindIP
+	var laddr *net.UDPAddr
 	if s.noMcast {
 		// Without the multicast socket (which also gets the unicast messages sent to the discovery port, eg by the
 		// -peers of others), the unicast socket has to be on the discovery port.
 		laddr = &net.UDPAddr{Port: s.Port}
-		if bindIP != nil {
-			laddr.IP = bindIP.IP
-		}
 	}
 	s.dualUDPSock, err = net.ListenUDP("udp4", laddr) // was net.DialUDP("udp4", localIP, s.destAddr)
 	if err != nil {
 		return err
 	}
-	if bindIP == nil && goodIf != nil {
+	if goodIf != nil {
 		if err = ipv4.NewPacketConn(s.dualUDPSock).SetMulticastInterface(goodIf); err != nil {
 			log.Warnf("Failed to set multicast interface %q: %v", goodIf.Name, err)
 		}
 	}
-	s.ourSendAddr = s.dualUDPSock.LocalAddr().(*net.UDPAddr)
-	if localIP != nil && bindIP == nil {
+	ours := s.dualUDPSock.LocalAddr().(*net.UDPAddr)
+	if localIP != nil {
 		// keep the default route address as our identity (and to ignore our own multicast).
-		s.ourSendAddr = &net.UDPAddr{IP: localIP.IP, Port: s.ourSendAddr.Port}
+		ours = &net.UDPAddr{IP: localIP.IP, Port: ours.Port}
 	}
-	if err = s.startTCP(bindIP); err != nil {
+	s.ourSendAddr.Store(ours)
+	if err = s.startTCP(nil); err != nil {
 		s.dualUDPSock.Close()
 		return err
 	}
 	return nil
+}
+
+// checkAddress looks up the default route's interface and address again (cheap: nothing is sent) and adopts
+// them if they changed, eg a new DHCP lease after sleep: our address, the multicast interface, and the links
+// (closed: their TCP connections are from the old address, that's gone).
+func (s *Server) checkAddress(ctx context.Context) {
+	iface, local, err := s.lookupIf(ctx, s.Target)
+	if err != nil || local == nil {
+		log.LogVf("Can't check our address (yet): %v", err)
+		return // eg the network isn't back yet: keep the current one.
+	}
+	old := s.OurAddress()
+	if old.IP.Equal(local.IP) {
+		return
+	}
+	log.Warnf("Our address changed from %v to %v (interface %q)", old.IP, local.IP, iface.Name)
+	s.ourSendAddr.Store(&net.UDPAddr{IP: local.IP, Port: old.Port})
+	if err = ipv4.NewPacketConn(s.dualUDPSock).SetMulticastInterface(iface); err != nil {
+		log.Warnf("Failed to set multicast interface %q: %v", iface.Name, err)
+	}
+	if !s.noMcast {
+		s.mcastIf = iface // only used by this (runAdv) goroutine once started.
+		s.rejoinMulticast()
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	for _, t := range s.linkedLocked() {
+		if a, ok := t.conn.LocalAddr().(*net.TCPAddr); ok && !a.IP.Equal(local.IP) {
+			log.Infof("Closing the link with %s, from our old address %v", t.peer.Name, a.IP)
+			_ = t.conn.Close()
+		}
+	}
+	s.change() // our line in the UI.
 }
 
 // Stop stops the server and waits for its goroutines. The server can't be started again.
@@ -486,7 +519,7 @@ func (s *Server) runAdv(ctx context.Context) {
 	interval := s.BaseBroadcastInterval + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
 	log.Infof("Starting tsync broadcast sender %q (%v) with %v interval (jitter %d ms)",
-		s.Name, s.ourSendAddr, interval, jitter)
+		s.Name, s.OurAddress(), interval, jitter)
 	defer ticker.Stop()
 	epoch := s.epoch.Load()
 	s.startedAt = time.Now()
@@ -507,6 +540,7 @@ func (s *Server) runAdv(ctx context.Context) {
 				return
 			}
 			epoch = newEpoch
+			s.checkAddress(ctx) // before sending: from the new address, which our own multicast filter knows.
 			s.discoveryRound(epoch, time.Now())
 			// Run some cleanup/expire entries
 			s.peersCleanup()
@@ -555,7 +589,7 @@ func (s *Server) peersCleanup() {
 
 // OurAddress returns our local IP and the UDP port our messages are sent from (what the peers list us as).
 func (s *Server) OurAddress() *net.UDPAddr {
-	return s.ourSendAddr
+	return s.ourSendAddr.Load()
 }
 
 // change notifies OnChange, with our own counter as version (not the Peers map's one) so all changes, eg file
@@ -605,7 +639,6 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 	buf := make([]byte, BufSize)
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
 		s.Name, s.mcastConn().LocalAddr(), BufSize)
-	ourAddr := s.ourSendAddr
 	for {
 		select {
 		case <-ctx.Done():
@@ -627,7 +660,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				continue
 			}
 			s.lastMcastRecv.Store(time.Now().UnixNano())
-			if addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
+			if ourAddr := s.OurAddress(); addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
 				log.Debugf("Ignoring our own packet (%q)", buf[:n])
 				continue
 			}
@@ -711,10 +744,16 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	}
 }
 
-// duplicateInstance handles the discovery of another instance with our name, address and key (returns false
-// for any other peer): the newer one stays, so we stop if that's the other one, else tell it to.
+// duplicateInstance handles the discovery of ourselves (ignored) or of another instance with our name, address
+// and key (returns false for any other peer): the newer one stays, so we stop if that's the other one, else tell it
+// to.
 func (s *Server) duplicateInstance(peer Peer, data PeerData, addr *net.UDPAddr) bool {
-	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
+	if peer.PublicKey == s.idStr && data.RunID == s.runID {
+		// Our own multicast, from a new address not seen by checkAddress yet (or the multicast filter missed it).
+		log.LogVf("Ignoring our own discovery from %v", addr)
+		return true
+	}
+	us := Peer{Name: s.Name, IP: s.OurAddress().IP.String(), PublicKey: s.idStr}
 	if peer != us {
 		return false
 	}
