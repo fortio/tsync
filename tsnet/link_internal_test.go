@@ -593,7 +593,7 @@ func TestMulticastWatchdog(t *testing.T) {
 }
 
 // checkAddress: a new local address (eg new DHCP lease after sleep) is adopted and the links from the old one
-// are closed; a failed lookup or the same address changes nothing.
+// are closed, not the others; a failed lookup or the same address changes nothing.
 func TestCheckAddress(t *testing.T) {
 	id, _ := tcrypto.NewIdentity()
 	s := (&Config{Name: "Us", Identity: id, Mcast: NoMulticast}).NewServer()
@@ -634,6 +634,14 @@ func TestCheckAddress(t *testing.T) {
 		t.Fatalf("link shouldn't be closed: %v", err)
 	}
 	lookupErr = nil
+	// A change between other addresses: our link (eg over a VPN) isn't from the old one, it stays.
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 9), Port: 1000})
+	s.checkAddress(t.Context())
+	if _, err = conn.Write([]byte("x")); err != nil {
+		t.Fatalf("link from another address shouldn't be closed: %v", err)
+	}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1000})
+	v = s.changes.Load()
 	s.checkAddress(t.Context())
 	if got := s.OurAddress(); !got.IP.Equal(newIP) || got.Port != 1000 {
 		t.Errorf("expected the new address with the same port, got %v", got)

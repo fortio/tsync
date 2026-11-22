@@ -456,7 +456,7 @@ func (s *Server) openUnicast(ctx context.Context, goodIf *net.Interface, localIP
 
 // checkAddress looks up the default route's interface and address again (cheap: nothing is sent) and adopts
 // them if they changed, eg a new DHCP lease after sleep: our address, the multicast interface, and the links
-// (closed: their TCP connections are from the old address, that's gone).
+// from the old address (closed: it's gone). Links from other addresses (eg a VPN for -peers) are kept.
 func (s *Server) checkAddress(ctx context.Context) {
 	iface, local, err := s.lookupIf(ctx, s.Target)
 	if err != nil || local == nil {
@@ -479,7 +479,7 @@ func (s *Server) checkAddress(ctx context.Context) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	for _, t := range s.linkedLocked() {
-		if a, ok := t.conn.LocalAddr().(*net.TCPAddr); ok && !a.IP.Equal(local.IP) {
+		if a, ok := t.conn.LocalAddr().(*net.TCPAddr); ok && a.IP.Equal(old.IP) {
 			log.Infof("Closing the link with %s, from our old address %v", t.peer.Name, a.IP)
 			_ = t.conn.Close()
 		}
