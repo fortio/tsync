@@ -280,27 +280,7 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 		case <-wake.C:
 		case <-f.kick:
 		}
-		s.stateMu.Lock()
-		if f.replan && (len(f.inflight) == 0 || time.Since(f.lastReplan) >= syncReplanEvery) {
-			s.replanAllLocked(f)
-		}
-		s.stateMu.Unlock()
-		s.startPulls(f)
-		s.stateMu.Lock()
-		idle := len(f.inflight) == 0 && !f.replan
-		rescan := idle && f.synced
-		if idle {
-			f.synced = false
-		}
-		save := idle || time.Since(f.lastSave) >= syncSaveEvery
-		retry := time.Duration(0)
-		for _, fail := range f.failed { // eg a file still being written there.
-			retry = minPositive(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
-		}
-		if f.replan {
-			retry = minPositive(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
-		}
-		s.stateMu.Unlock()
+		rescan, save, retry := s.syncStep(f)
 		switch { // so the peers learn what we got.
 		case rescan && sw != nil:
 			// What's notified so far, without waiting: we're done writing. What's notified later is scanned then
@@ -317,6 +297,33 @@ func (s *Server) runSync(ctx context.Context, f *syncFolder) {
 			wake.Reset(retry)
 		}
 	}
+}
+
+// syncStep replans the folder if due and starts what can be: returns whether to scan again (all synced, for the
+// peers to learn what we got), whether to save the bases, and when to wake up for the retries and the next
+// replan (0 for none).
+func (s *Server) syncStep(f *syncFolder) (rescan, save bool, retry time.Duration) {
+	s.stateMu.Lock()
+	if f.replan && (len(f.inflight) == 0 || time.Since(f.lastReplan) >= syncReplanEvery) {
+		s.replanAllLocked(f)
+	}
+	s.stateMu.Unlock()
+	s.startPulls(f)
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	idle := len(f.inflight) == 0 && !f.replan
+	rescan = idle && f.synced
+	if idle {
+		f.synced = false
+	}
+	save = idle || time.Since(f.lastSave) >= syncSaveEvery
+	for _, fail := range f.failed { // eg a file still being written there.
+		retry = minPositive(retry, max(time.Until(fail.retryAt()), 100*time.Millisecond))
+	}
+	if f.replan {
+		retry = minPositive(retry, max(syncReplanEvery-time.Since(f.lastReplan), 10*time.Millisecond))
+	}
+	return rescan, save, retry
 }
 
 // minPositive is the min of a and b, ignoring a zero a.
@@ -375,7 +382,7 @@ func (s *Server) stopWatch(f *syncFolder, sw *syncWatch, why string) {
 func (s *Server) setWatching(f *syncFolder, watching bool) {
 	s.stateMu.Lock()
 	f.watching = watching
-	s.change(0)
+	s.change()
 	s.stateMu.Unlock()
 }
 
@@ -471,31 +478,25 @@ func (s *Server) syncScanDirs(f *syncFolder, prev syncdir.Index, dirs []string, 
 	return prev, added
 }
 
-type syncTarget struct {
-	peer Peer
-	l    *link
-	conn net.Conn
-}
-
 // syncScanned records a scan (of only the rescanned directories if not nil), returns the linked peers to send
 // the index to if it changed.
 func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Index, rescanned map[string]bool,
 	err error,
-) []syncTarget {
+) []linkTarget {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if err != nil {
 		if f.err != err.Error() {
 			log.Errf("Can't scan sync folder %q (%s): %v", f.Name, f.Path, err)
 			f.err = err.Error()
-			s.change(0)
+			s.change()
 		}
 		return nil
 	}
 	f.err = ""
 	seen := 0 // synced paths this scan saw (started after they were synced, in a directory it read).
 	for k, r := range f.recent {
-		if r.at.Before(idx.Time) && (rescanned == nil || rescanned[parentDir(k)]) {
+		if r.at.Before(idx.Time) && (rescanned == nil || rescanned[syncdir.ParentKey(k)]) {
 			delete(f.recent, k)
 			seen++
 		}
@@ -517,23 +518,17 @@ func (s *Server) syncScanned(f *syncFolder, ig *syncdir.Ignore, idx syncdir.Inde
 		f.kickLocked() // to update the conflicts list.
 	}
 	s.replanAllLocked(f)
-	s.change(0)
-	return s.syncTargetsLocked(f)
+	s.change()
+	return s.linkTargetsLocked(f)
 }
 
 func sameEntry(a, b syncdir.Entry) bool {
 	return a.Path == b.Path && a.Dir == b.Dir && a.Mode == b.Mode && a.Size == b.Size && a.MTime.Equal(b.MTime) && a.Hash == b.Hash
 }
 
-// syncTargetsLocked returns the linked peers that have the folder.
-func (s *Server) syncTargetsLocked(f *syncFolder) []syncTarget {
-	var targets []syncTarget
-	for peer, l := range s.links {
-		if l.conn != nil && l.syncFolders[f.Name] {
-			targets = append(targets, syncTarget{peer, l, l.conn})
-		}
-	}
-	return targets
+// linkTargetsLocked returns the linked peers that have the folder.
+func (s *Server) linkTargetsLocked(f *syncFolder) []linkTarget {
+	return slices.DeleteFunc(s.linkedLocked(), func(t linkTarget) bool { return !t.l.syncFolders[f.Name] })
 }
 
 // sendSyncFolders tells a newly linked peer the names of our sync folders.
@@ -801,7 +796,7 @@ func (s *Server) noteSkewLocked(peer Peer, l *link, sample time.Duration) {
 		log.Infof("The clock of %s is back within %v of ours (%s)", peer.Name, limit, SkewWords(l.clockSkew))
 	}
 	if old.Round(skewShown) != l.clockSkew.Round(skewShown) || l.skewWarned != wasWarned {
-		s.change(0) // the sync line shows it.
+		s.change() // the sync line shows it.
 	}
 }
 
@@ -916,7 +911,7 @@ func (s *Server) syncIndexReceived(peer Peer, l *link, b []byte) error {
 	log.LogVf("Received sync folder %q index from %s (%d entries)", name, peer.Name, len(sp.remote))
 	s.replanLocked(f, peer, sp)
 	s.cantStoreChangedLocked(f)
-	s.change(0)
+	s.change()
 	return nil
 }
 
@@ -942,7 +937,7 @@ func (s *Server) cantStoreChangedLocked(f *syncFolder) {
 	if f.local.Time.IsZero() {
 		return // sent once scanned.
 	}
-	for _, t := range s.syncTargetsLocked(f) {
+	for _, t := range s.linkTargetsLocked(f) {
 		s.wg.Go(func() { s.sendIndex(f, t.peer, t.l, t.conn) })
 	}
 }
@@ -1026,12 +1021,4 @@ func (s *Server) syncLinkClosedLocked(l *link) {
 			f.kickLocked() // to save the base, update the conflicts list.
 		}
 	}
-}
-
-// parentDir returns the key of the directory containing key ("" for the root).
-func parentDir(key string) string {
-	if i := strings.LastIndexByte(key, '/'); i >= 0 {
-		return key[:i]
-	}
-	return ""
 }

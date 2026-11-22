@@ -3,10 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"fortio.org/log"
@@ -38,36 +35,20 @@ type fileLine struct {
 	y     int
 }
 
+// NewFilePanel returns the files box, showing at most maxLines lines; dir is where received files are saved.
 func NewFilePanel(ap *ansipixels.AnsiPixels, srv *tsnet.Server, dir string, maxLines int) *FilePanel {
 	return &FilePanel{ap: ap, srv: srv, Dir: dir, MaxLines: maxLines, bars: make(map[transferKey]*progressbar.Bar)}
 }
 
-// DownloadDir returns dir if not empty, else ~/Downloads if it exists, else the current directory.
-func DownloadDir(dir string) string {
-	if dir != "" {
-		return dir
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		d := filepath.Join(home, "Downloads")
-		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
-			return d
-		}
-	}
-	if wd, err := os.Getwd(); err == nil {
-		return wd
-	}
-	return "."
-}
-
-// ShortPath replaces the home directory prefix by ~.
-func ShortPath(p string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(p, home) {
-		return "~" + p[len(home):]
-	}
-	return p
-}
-
 const barWidth = 20
+
+// percentOf is how much of size is done, 100 for an empty file.
+func percentOf(done, size int64) float64 {
+	if size <= 0 {
+		return 100
+	}
+	return 100 * float64(done) / float64(size)
+}
 
 // transferKey identifies a transfer (for its progress bar).
 type transferKey struct {
@@ -93,11 +74,7 @@ func (fp *FilePanel) bar(t tsnet.Transfer, color string, file bool) *progressbar
 }
 
 func (fp *FilePanel) activeLine(icon string, t tsnet.Transfer, color, dir string) fileLine {
-	percent := 100.
-	if t.Size > 0 {
-		percent = 100 * float64(t.Done) / float64(t.Size)
-	}
-	lead := icon + " " + fp.bar(t, color, false).Render(percent)
+	lead := icon + " " + fp.bar(t, color, false).Render(percentOf(t.Done, t.Size))
 	return fileLine{
 		when:  t.Start,
 		lead:  lead,
@@ -110,11 +87,7 @@ func (fp *FilePanel) activeLine(icon string, t tsnet.Transfer, color, dir string
 
 // curFileLine is the second line of an active directory transfer: the file in progress.
 func (fp *FilePanel) curFileLine(t tsnet.Transfer, color string) fileLine {
-	percent := 100.
-	if t.CurSize > 0 {
-		percent = 100 * float64(t.CurDone) / float64(t.CurSize)
-	}
-	lead := "   " + fp.bar(t, color, true).Render(percent)
+	lead := "   " + fp.bar(t, color, true).Render(percentOf(t.CurDone, t.CurSize))
 	return fileLine{
 		when:  t.Start,
 		lead:  lead,

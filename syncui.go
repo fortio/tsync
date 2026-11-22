@@ -2,9 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"fortio.org/terminal/ansipixels"
@@ -25,6 +22,7 @@ type syncLine struct {
 	color tcolor.BasicColor
 }
 
+// NewSyncPanel returns the sync box for the server's sync folders.
 func NewSyncPanel(ap *ansipixels.AnsiPixels, srv *tsnet.Server) *SyncPanel {
 	return &SyncPanel{ap: ap, srv: srv}
 }
@@ -43,11 +41,7 @@ func SyncLine(st tsnet.SyncStatus) syncLine {
 	peer := SanitizeName(st.Peer.Name)
 	what += " ↔ " + peer
 	if st.Getting > 0 {
-		percent := 100.
-		if st.CurSize > 0 {
-			percent = 100 * float64(st.CurDone) / float64(st.CurSize)
-		}
-		what += fmt.Sprintf(" · ⬇ %s %.0f%%", st.CurFile, percent)
+		what += fmt.Sprintf(" · ⬇ %s %.0f%%", st.CurFile, percentOf(st.CurDone, st.CurSize))
 	}
 	if !st.Ready {
 		return syncLine{what + ": waiting for its list", tcolor.Cyan}
@@ -60,7 +54,11 @@ func SyncLine(st tsnet.SyncStatus) syncLine {
 		warn = true
 	}
 	if n := st.ConflictCopies; n > 0 {
-		text += fmt.Sprintf(" · %d conflict %s to review", n, map[bool]string{true: "copy", false: "copies"}[n == 1])
+		copies := "copies"
+		if n == 1 {
+			copies = "copy"
+		}
+		text += fmt.Sprintf(" · %d conflict %s to review", n, copies)
 		warn = true
 	}
 	text += listedIn(st)
@@ -111,39 +109,4 @@ func (sp *SyncPanel) Draw(y int, lines []syncLine) int {
 		ap.WriteAt(2, y+1+i, "%s", Color16(l.color, text))
 	}
 	return h
-}
-
-// ExpandHome replaces a leading ~/ by the home directory (for flags given as name=~/dir, which shells don't
-// expand).
-func ExpandHome(p string) string {
-	if rest, ok := strings.CutPrefix(p, "~/"); ok {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, rest)
-		}
-	}
-	return p
-}
-
-// ParseSyncFolder parses a -sync flag value: name=path (path must be a directory, a leading ~/ is the
-// home directory).
-func ParseSyncFolder(s string) (tsnet.SyncFolder, error) {
-	name, path, ok := strings.Cut(s, "=")
-	if !ok || path == "" {
-		return tsnet.SyncFolder{}, fmt.Errorf("expected name=path, got %q", s)
-	}
-	if err := tsnet.ValidateSyncName(name); err != nil {
-		return tsnet.SyncFolder{}, err
-	}
-	abs, err := filepath.Abs(ExpandHome(path))
-	if err != nil {
-		return tsnet.SyncFolder{}, err
-	}
-	fi, err := os.Stat(abs)
-	if err != nil {
-		return tsnet.SyncFolder{}, err
-	}
-	if !fi.IsDir() {
-		return tsnet.SyncFolder{}, fmt.Errorf("%q is not a directory", abs)
-	}
-	return tsnet.SyncFolder{Name: name, Path: abs}, nil
 }

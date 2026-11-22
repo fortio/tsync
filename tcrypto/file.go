@@ -4,45 +4,31 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
+// Default directory (in the home directory) and files of a [Storage].
 const (
 	TsyncDir                = ".tsync"
-	PrivateIdentityFile     = "id"
-	PublicIdentityFile      = "id.pub"
-	ValidatedPublicKeysFile = "checked.pub"
+	PrivateIdentityFile     = "id"          // our private key, only readable by the user.
+	PublicIdentityFile      = "id.pub"      // our public key.
+	ValidatedPublicKeysFile = "checked.pub" // the peers accepted by the user: one `<public key> "name"` per line.
 )
 
-func createDirectory(dir string) error {
-	// Already exists ?
-	_, err := os.Stat(dir)
-	if err == nil {
-		// Exists, nothing to do
-		return nil
-	}
-	return os.Mkdir(dir, 0o755) // public readable as only PrivateIdentityFile is sensitive
-}
-
+// Storage is the directory where our identity and the trusted peers' keys are kept.
 type Storage struct {
 	Dir string // Full path to the .tsync directory
 }
 
-func InitStorage() (s *Storage, err error) {
-	// Creates the ~/.tsync directory and files if they don't exist yet.
+// InitStorage returns the default storage, ~/.tsync, creating the directory if needed.
+func InitStorage() (*Storage, error) {
 	hdir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	s = &Storage{}
-	s.Dir = path.Join(hdir, TsyncDir)
-	err = createDirectory(s.Dir)
-	if err != nil {
-		return s, err
-	}
-	return s, nil
+	return InitStorageDir(filepath.Join(hdir, TsyncDir))
 }
 
 // InitStorageDir is [InitStorage] with another directory than ~/.tsync (created, with its parents, if needed).
@@ -53,20 +39,23 @@ func InitStorageDir(dir string) (*Storage, error) {
 	return &Storage{Dir: dir}, nil
 }
 
+// SaveIdentity writes the identity's private and public key files.
 func (s *Storage) SaveIdentity(id *Identity) error {
-	filePath := path.Join(s.Dir, PrivateIdentityFile)
+	filePath := filepath.Join(s.Dir, PrivateIdentityFile)
 	b := []byte(id.PrivateKeyToString() + "\n")
 	err := os.WriteFile(filePath, b, 0o600) // private key only readable by user
 	if err != nil {
 		return err
 	}
 	b = []byte(id.PublicKeyToString() + "\n")
-	filePath = path.Join(s.Dir, PublicIdentityFile)
+	filePath = filepath.Join(s.Dir, PublicIdentityFile)
 	return os.WriteFile(filePath, b, 0o644) //nolint:gosec // public key readable by all
 }
 
+// LoadIdentity reads our identity. It is an error if there is none yet, or if the public key file doesn't
+// match the private key.
 func (s *Storage) LoadIdentity() (*Identity, error) {
-	filePath := path.Join(s.Dir, PrivateIdentityFile)
+	filePath := filepath.Join(s.Dir, PrivateIdentityFile)
 	privKeyBytes, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -78,7 +67,7 @@ func (s *Storage) LoadIdentity() (*Identity, error) {
 		return nil, err
 	}
 	// check public key file too
-	pubFilePath := path.Join(s.Dir, PublicIdentityFile)
+	pubFilePath := filepath.Join(s.Dir, PublicIdentityFile)
 	pubKeyBytes, err := os.ReadFile(pubFilePath)
 	if err != nil {
 		return nil, err
@@ -95,7 +84,7 @@ func (s *Storage) LoadIdentity() (*Identity, error) {
 // A missing file is not an error (no trusted peers yet).
 func (s *Storage) LoadTrusted() (map[string]string, error) {
 	res := map[string]string{}
-	b, err := os.ReadFile(path.Join(s.Dir, ValidatedPublicKeysFile))
+	b, err := os.ReadFile(filepath.Join(s.Dir, ValidatedPublicKeysFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return res, nil
 	}
@@ -126,7 +115,7 @@ func (s *Storage) AddTrusted(pubKey, name string) error {
 	if err := ValidatePublicKeyString(pubKey); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path.Join(s.Dir, ValidatedPublicKeysFile),
+	f, err := os.OpenFile(filepath.Join(s.Dir, ValidatedPublicKeysFile),
 		os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err

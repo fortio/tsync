@@ -67,6 +67,7 @@ var alignment = []ansipixels.Alignment{
 	ansipixels.Right,  // Human Hash
 }
 
+// PeerLine is the table row of a peer: its number colored by connection status, name, IP, port and hash.
 func PeerLine(idx int, peer tsnet.Peer, peerData tsnet.PeerData, linked bool) []string {
 	idxStr := strconv.Itoa(idx)
 	switch peerData.Status {
@@ -102,6 +103,7 @@ func HeaderLine() []string {
 	return []string{DarkGray("Id"), "🔗 " + DarkGray("Name"), DarkGray("Ip"), DarkGray("Port"), DarkGray("Hash")}
 }
 
+// OurLine is the table row of this machine.
 func OurLine(srv *tsnet.Server, ourIP, ourPort, humanID string) []string {
 	return []string{
 		"🏠",
@@ -122,6 +124,7 @@ func Color16f(color tcolor.BasicColor, format string, args ...any) string {
 	return Color16(color, fmt.Sprintf(format, args...))
 }
 
+// DarkGray returns s in dark gray (titles, borders).
 func DarkGray(s string) string {
 	return Color16(tcolor.DarkGray, s)
 }
@@ -214,9 +217,7 @@ type syncFlags struct {
 	list    *bool
 	rescan  *time.Duration
 	watch   *bool
-	// headless is -headless, here to keep Main short.
-	headless *bool
-	skew     *time.Duration
+	skew    *time.Duration
 }
 
 // Apply sets the sync flags values in the config.
@@ -234,7 +235,7 @@ func SyncFlags() syncFlags {
 		" when not watched (see -sync-watch)")
 	watch := flag.Bool("sync-watch", tsnet.SyncWatchDefault, "Watch the sync folders "+
 		"(file system notifications): only the directories that changed are scanned again, and all of it every 15m"+
-		" (default on Linux, Windows and macOS; a macOS build without cgo needs a file descriptor per file)")
+		". Off by default on a macOS build without cgo, which needs a file descriptor per file")
 	list := false
 	flag.Func("sync-conflicts", "Sync conflicts (changed on both sides, or changed on one and deleted on the "+
 		"other) `handling`: copy (the newest version keeps the name, the other one is kept as a visible "+
@@ -247,11 +248,9 @@ func SyncFlags() syncFlags {
 			return fmt.Errorf("expected copy or list, got %q", s)
 		}
 	})
-	headless := flag.Bool("headless", false, "Run without a UI: only directory sync (-sync) with already trusted peers (pair "+
-		"once with the UI first), no clipboard or file offers. Stop with Ctrl-C or SIGTERM")
 	skew := flag.Duration("sync-max-clock-skew", tsnet.DefaultMaxClockSkew, "How much the clocks of syncing machines can "+
 		"differ before warning (conflicts keep the newest version, by modification time)")
-	return syncFlags{folders, keep, &list, rescan, watch, headless, skew}
+	return syncFlags{folders, keep, &list, rescan, watch, skew}
 }
 
 // SyncFlag defines the (repeatable) sync folder flag, see ParseSyncFolder.
@@ -465,12 +464,26 @@ func HandleKey(c byte, srv *tsnet.Server, clips *ClipPanel, files *FilePanel,
 	case 'q', 'Q', 3: // Ctrl-C
 		log.Infof("Exiting on %q", c)
 		return false
-	default:
-		log.Infof("Input %q", c)
+	default: // eg Esc: say so, without filling the log.
+		log.LogVf("Input %q", c)
+		Notices.Show(tcolor.BrightYellow, fmt.Sprintf("No function for %s: q or Ctrl-C to quit", KeyName(c)))
 	}
 	return true
 }
 
+// KeyName names a key for the user: Esc, Ctrl-X, or the (quoted) character.
+func KeyName(c byte) string {
+	switch {
+	case c == 0x1b:
+		return "Esc"
+	case c < 0x20:
+		return "Ctrl-" + string(rune(c+'@'))
+	default:
+		return strconv.QuoteToASCII(string(rune(c)))
+	}
+}
+
+// InitiatePeerConnection connects to the peer, or accepts its pending connection request.
 func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.PeerData) {
 	if peerData.Status == tsnet.ReceivedConn {
 		log.Infof("Accepting connection from peer %q at %s:%d (%s)", peer.Name, peer.IP, peerData.Port, peerData.HumanHash)
@@ -482,7 +495,7 @@ func InitiatePeerConnection(srv *tsnet.Server, peer tsnet.Peer, peerData tsnet.P
 	}
 }
 
-// MouseInsideBox returns whether the mouse is inside the box and the index of the line inside the box.
+// MouseInsideBox returns whether the mouse is on a peer's row of the peers table, and that peer's index.
 func MouseInsideBox(ap *ansipixels.AnsiPixels, tableWidth, numPeers int) (int, bool) {
 	tableWidth -= 2                       // remove the borders
 	startTable := (ap.W-tableWidth)/2 + 1 // mouse coordinates start at 1
@@ -499,6 +512,7 @@ func MouseInsideBox(ap *ansipixels.AnsiPixels, tableWidth, numPeers int) (int, b
 	return -1, false
 }
 
+// Main parses the flags, then runs headless (see RunHeadless) or the TUI until quit. Returns the exit code.
 func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	fName := flag.String("name", "", "Name to use for this machine instead of the hostname")
 	// echo -n "ts" | od -d -> 29556
@@ -508,7 +522,7 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 		"Multicast address to use for server discovery, or \"none\" to not use multicast (see -peers)")
 	fTarget := flag.String("target", tsnet.DefaultTarget, "Test target udp ip:port to use to find the right interface and local ip")
 	fInterval := flag.Duration("interval", tsnet.DefaultBroadcastInterval,
-		"Base interval in milliseconds between broadcasts (before [0-1]s jitter)")
+		"Base interval between discovery messages (before up to 1s of random jitter)")
 	fClipLines := flag.Int("clip-lines", 3, "Max number of lines shown for each clipboard box")
 	fAutoConnect := flag.Bool("auto-connect", true, "Automatically connect to trusted (previously accepted) peers")
 	fDir := flag.String("dir", "",
@@ -517,6 +531,8 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 		"Comma separated `host[:port]` list to also send discovery to directly, when multicast doesn't work (eg VMs, VPNs)")
 	fMaxRate := RateFlag("max-rate")
 	fSync := SyncFlags()
+	fHeadless := flag.Bool("headless", false, "Run without a UI: only directory sync (-sync) with already trusted peers (pair "+
+		"once with the UI first), no clipboard or file offers. Stop with Ctrl-C or SIGTERM")
 	fTsyncDir := flag.String("tsync-dir", "", "Directory with our identity, trusted peers and sync state (conflicts "+
 		"list...), default ~/.tsync (eg to run several tsync with different identities on one machine)")
 	cli.ArgsHelp = "[file...]"
@@ -526,11 +542,22 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	if err := CheckFiles(flag.Args()); err != nil {
 		return log.FErrf("Can't offer %v", err)
 	}
-	if *fSync.headless {
-		return RunHeadless(flag.Args(), tsnet.Config{
-			Name: *fName, Port: *fPort, Mcast: *fMcast, Target: *fTarget, BaseBroadcastInterval: *fInterval, Version: cli.ShortVersion,
-			Peers: SplitList(*fPeers), FileDir: DownloadDir(*fDir), MaxRate: *fMaxRate,
-		}, fSync, *fTsyncDir)
+	// The identity, storage and change callback are set by each mode.
+	cfg := tsnet.Config{
+		Name:                  *fName,
+		Version:               cli.ShortVersion,
+		Port:                  *fPort,
+		Mcast:                 *fMcast,
+		Target:                *fTarget,
+		BaseBroadcastInterval: *fInterval,
+		NoAutoConnect:         !*fAutoConnect,
+		Peers:                 SplitList(*fPeers),
+		FileDir:               DownloadDir(*fDir),
+		MaxRate:               *fMaxRate,
+	}
+	fSync.Apply(&cfg)
+	if *fHeadless {
+		return RunHeadless(flag.Args(), cfg, *fTsyncDir)
 	}
 	ap := ansipixels.NewAnsiPixels(60)
 	if err := ap.Open(); err != nil {
@@ -550,24 +577,10 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 		return log.FErrf("Failed to load or create identity: %v", err)
 	}
 	var version atomic.Uint64
-	cfg := tsnet.Config{
-		Name:    *fName,
-		Version: cli.ShortVersion,
-		Port:    *fPort,
-		Mcast:   *fMcast,
-		Target:  *fTarget,
-		OnChange: func(v uint64) {
-			version.Store(v)
-		},
-		Identity:              id,
-		BaseBroadcastInterval: *fInterval,
-		Storage:               storage,
-		NoAutoConnect:         !*fAutoConnect,
-		Peers:                 SplitList(*fPeers),
-		FileDir:               DownloadDir(*fDir),
-		MaxRate:               *fMaxRate,
+	cfg.Identity, cfg.Storage = id, storage
+	cfg.OnChange = func(v uint64) {
+		version.Store(v)
 	}
-	fSync.Apply(&cfg)
 	srv := cfg.NewServer()
 	if err = srv.Start(context.Background()); err != nil {
 		return log.FErrf("Failed to start tsync server: %v", err)
@@ -577,10 +590,11 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	log.Infof("Paste to send to connected peers, Q, q or Ctrl-C to stop")
 	ap.AutoSync = false
 	prev := ^uint64(0)
-	ourAddress := srv.OurAddress()
-	ourIP := ourAddress.IP.String()
-	ourPort := strconv.Itoa(ourAddress.Port)
-	ourLine := OurLine(srv, ourIP, ourPort, id.HumanID())
+	// ourLine is our row of the table: our address can change (eg new DHCP lease after sleep).
+	ourLine := func() []string {
+		a := srv.OurAddress()
+		return OurLine(srv, a.IP.String(), strconv.Itoa(a.Port), id.HumanID())
+	}
 	ap.OnResize = func() error {
 		prev = ^uint64(0) // force repaint
 		return nil
@@ -611,7 +625,7 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 	paste := &PasteCollector{MaxSize: tsnet.MaxClipSize + 1}
 	top := &TopArea{
 		ap: ap, srv: srv, logArea: logArea, clips: clips, files: files,
-		fixedLines: [][]string{ourLine, HeaderLine()},
+		fixedLines: [][]string{ourLine(), HeaderLine()},
 		syncs:      NewSyncPanel(ap, srv),
 		help:       " paste/drop file: send · click box or c: copy · d: download · click or 1-9: connect/accept · q: quit ",
 	}
@@ -639,6 +653,7 @@ func Main() int { //nolint:funlen // flags, then the TUI setup and loop.
 			prev = curVersion
 			peersSnapshot = srv.Peers.KeysValuesSnapshot()
 			slices.SortFunc(peersSnapshot, tsnet.PeerKVSort)
+			top.fixedLines[0] = ourLine()
 			tableWidth = top.Draw(peersSnapshot)
 			ap.RestoreCursorPos()
 			ap.EndSyncMode()

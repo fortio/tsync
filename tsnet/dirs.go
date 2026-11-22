@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fortio.org/log"
+	"fortio.org/tsync/syncdir"
 )
 
 // Directory send: a directory is offered as one offer (FrameDirOffer). When accepted the
@@ -341,7 +342,7 @@ func (s *Server) prepareDirLocked(l *link, t *Transfer) error {
 	}
 	t.Path, t.Name, t.State, t.Start = root, filepath.Base(root), TransferActive, time.Now()
 	s.rdirs[dirKey{t.Peer, t.ID}] = &recvDir{t: t, l: l, root: root}
-	s.change(0)
+	s.change()
 	log.Infof("Downloading directory %q (%d files, %d bytes) from %s into %s", t.Name, t.Files, t.Size, t.Peer.Name, root)
 	return nil
 }
@@ -442,18 +443,12 @@ func (rd *recvDir) makeDirs() error {
 	return nil
 }
 
-// keptMode is the mode we set on received files and directories (of a directory): the sender's
-// permissions, except group and other write (eg Windows shows all files as writable by all).
-func keptMode(mode fs.FileMode) fs.FileMode {
-	return mode.Perm() &^ 0o022
-}
-
 // setAttrs sets the mode and times of the directories once all the files are written: deepest first so
 // a directory without write or search permission doesn't prevent setting its sub directories'.
 func (rd *recvDir) setAttrs() {
 	dirs := append(slices.Clone(rd.dirs), recvEntry{dir: rd.root, mode: rd.mode, mtime: rd.t.MTime})
 	for _, d := range slices.Backward(dirs) {
-		err := os.Chmod(d.dir, keptMode(d.mode))
+		err := os.Chmod(d.dir, syncdir.KeptMode(d.mode))
 		if err == nil {
 			err = os.Chtimes(d.dir, d.mtime, d.mtime)
 		}
@@ -520,7 +515,7 @@ func (s *Server) nextDirFile(l *link, parent *Transfer) (uint32, error) {
 		Start: time.Now(), State: TransferActive, parent: parent,
 	}
 	parent.addKid(child)
-	l.incoming[id] = &recvFile{f: f, hash: sha256.New(), t: child, dest: e.dir, mode: keptMode(e.mode)}
+	l.incoming[id] = &recvFile{f: f, hash: sha256.New(), t: child, dest: e.dir, mode: syncdir.KeptMode(e.mode)}
 	return id, nil
 }
 

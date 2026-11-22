@@ -134,3 +134,20 @@ func TestRateString(t *testing.T) {
 		t.Errorf("RateString(50Kb) = %q", got)
 	}
 }
+
+func TestKeyName(t *testing.T) {
+	for c, want := range map[byte]string{0x1b: "Esc", 1: "Ctrl-A", 'x': `"x"`, 0xe9: `"\u00e9"`} {
+		if got := KeyName(c); got != want {
+			t.Errorf("KeyName(%#x) = %q, want %q", c, got, want)
+		}
+	}
+}
+
+func TestUnknownKeyNotice(t *testing.T) {
+	if !HandleKey(0x1b, nil, nil, nil, nil) {
+		t.Fatal("Esc shouldn't quit")
+	}
+	if msg, _, ok := Notices.Current(); !ok || !strings.Contains(msg, "No function for Esc") {
+		t.Errorf("unexpected notice %q %v", msg, ok)
+	}
+}

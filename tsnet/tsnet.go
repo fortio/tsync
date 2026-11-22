@@ -1,4 +1,9 @@
-// Package tsnet is the network library support for tsync (discovery/registration and communication).
+// Package tsnet is tsync's networking: discovery of the peers on the local network (multicast and direct UDP),
+// the signed handshake with trust on first use, one encrypted TCP link per connected peer, and what goes over
+// it: clipboard, file and directory offers and downloads, and directory sync.
+//
+// Make a [Config], then [Config.NewServer] and [Server.Start]; [Server.Peers] has who was found,
+// [Server.ConnectToPeer] connects (or accepts) and Config.OnChange says when to look again.
 package tsnet
 
 import (
@@ -32,9 +37,9 @@ const (
 	BufSize = 576 - 60 - 8
 	// DefaultTarget: which udp address we try by default to find our interface and ip.
 	DefaultTarget            = "8.8.8.8:53"
-	DefaultBroadcastInterval = 1500 * time.Millisecond
-	TimeFormat               = "15:04:05.000" // time only + millis.
-	DefaultPeerTimeout       = 10 * time.Second
+	DefaultBroadcastInterval = 1500 * time.Millisecond // default Config.BaseBroadcastInterval.
+	TimeFormat               = "15:04:05.000"          // time only + millis.
+	DefaultPeerTimeout       = 10 * time.Second        // default Config.PeerTimeout.
 	// NoMulticast as Config.Mcast disables multicast: discovery only through Config.Peers.
 	NoMulticast = "none"
 	// SlowDiscoveryInterval is how often we multicast once we are linked to all the peers we know.
@@ -66,22 +71,25 @@ func (pd PeerData) Compatible() bool {
 	return pd.RunID != ""
 }
 
+// Config is the configuration of a [Server], see [Config.NewServer]. Identity, Port and Mcast must be set.
 type Config struct {
 	// Short version of the software, sent to the peers (cosmetic).
 	Version string
 	// Name to use, if empty hostname will be used.
-	Name  string
-	Port  int
+	Name string
+	// Port is the discovery (UDP) port, the same on all the peers (eg DefaultDiscoveryPort).
+	Port int
+	// Mcast is the multicast group address used for discovery, or NoMulticast.
 	Mcast string
 	// Which ip:port we try to resolve to find our address and interface.
 	Target string
-	// Callback called when a the Server Peers map has changed, a new peer is detected
-	// or old one removed or updated. Must not block for long or
-	// it will delay processing of incoming messages.
+	// Callback called when something to show changed: a peer is found, removed or updated, a link goes up or
+	// down, a clipboard or offer is received, a transfer or a sync progresses... with a new version each time.
+	// Must not block for long or it will delay processing of incoming messages.
 	OnChange              func(version uint64)
 	Identity              *tcrypto.Identity // long term identity for this server
-	BaseBroadcastInterval time.Duration     // default to 1.5s if 0
-	PeerTimeout           time.Duration     // default to 10s if 0
+	BaseBroadcastInterval time.Duration     // between discovery messages, before the jitter: default to 1.5s if 0
+	PeerTimeout           time.Duration     // unlinked peers not heard from for that long are removed: default to 10s if 0
 	// Storage for the trusted peers (TOFU), if nil trust is only kept in memory.
 	Storage *tcrypto.Storage
 	// NoAutoConnect disables automatically connecting to trusted peers when discovered (or link lost).
@@ -114,6 +122,7 @@ type Config struct {
 	Headless bool
 }
 
+// ConnectionStatus is where the handshake with a peer is at (the TCP link itself: see [Server.Linked]).
 type ConnectionStatus int
 
 const (
@@ -129,20 +138,22 @@ const (
 	Failed
 )
 
+// Server is a running tsync instance: discovery, handshakes, links and what goes over them.
+// Create it with [Config.NewServer].
 type Server struct {
 	// Our copy of the input config.
 	Config
 	// internal state
-	ourSendAddr     *net.UDPAddr
-	destAddr        *net.UDPAddr
-	broadcastListen *net.UDPConn
-	dualUDPSock     *net.UDPConn // used for both sending (to multicast/unicast) and receiving (unicast)
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	Peers           *smap.Map[Peer, PeerData]
-	Sources         *smap.Map[Source, Peer] // maps ip,port to peer
-	idStr           string
-	epoch           atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
+	ourSendAddr atomic.Pointer[net.UDPAddr] // see OurAddress: changes with the local address (see checkAddress).
+	destAddr    *net.UDPAddr
+	mcastListen *net.UDPConn
+	dualUDPSock *net.UDPConn // used for both sending (to multicast/unicast) and receiving (unicast)
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	Peers       *smap.Map[Peer, PeerData]
+	Sources     *smap.Map[Source, Peer] // maps ip,port to peer
+	idStr       string
+	epoch       atomic.Int32 // set to negative when stopped, panics after 2B ticks/if it wraps.
 	// Handshake/session state: stateMu serializes all read-modify-write of Peers data (status) and links.
 	stateMu sync.Mutex
 	links   map[Peer]*link
@@ -169,7 +180,7 @@ type Server struct {
 	noMcast     bool // Config.Mcast is NoMulticast.
 	lastMcast   time.Time
 	staticState map[string]*staticBackoff
-	// multicast socket watchdog (see checkMulticast): the interface to join on, guard of broadcastListen once started,
+	// multicast socket watchdog (see checkMulticast): the interface to join on, guard of mcastListen once started,
 	// when we last received a multicast packet (unix nanos, 0 none yet) and when we last reopened the socket.
 	mcastIf       *net.Interface
 	mcastMu       sync.Mutex
@@ -186,19 +197,27 @@ type Server struct {
 	ctx       context.Context //nolint:containedctx // server lifetime context, for dial goroutines.
 	// direct messages received before the sender's discovery, by source (see stashEarlyLocked).
 	early map[Source]earlyMsg
+	// stopMu serializes Stop.
+	stopMu sync.Mutex
+	// lookupIf is GetInternetInterface (replaced in tests).
+	lookupIf func(ctx context.Context, target string) (*net.Interface, *net.UDPAddr, error)
 }
 
+// Source is the address a peer's UDP messages come from.
 type Source struct {
 	IP   string
 	Port int
 }
 
+// Peer identifies a peer: a (name, IP, public key) seen in discovery. The same machine with another name or
+// address is another Peer (but stays trusted: trust goes with the public key).
 type Peer struct {
 	IP        string
 	Name      string
 	PublicKey string
 }
 
+// PeerData is what we know about a [Peer] (the values of [Server.Peers]).
 type PeerData struct {
 	HumanHash string
 	Port      int
@@ -213,6 +232,7 @@ type PeerData struct {
 	ClipTime time.Time
 }
 
+// NewServer returns a server with a copy of the config, to [Server.Start].
 func (c *Config) NewServer() *Server {
 	return &Server{
 		Config:   *c,
@@ -226,13 +246,17 @@ func (c *Config) NewServer() *Server {
 		// sync folders are set in Start.
 		syncFolders: make(map[string]*syncFolder),
 		early:       make(map[Source]earlyMsg),
-		// Random start so offer ids from different runs don't collide (eg in peers' lists).
+		// See Config.WindowsNames.
 		windowsNames: c.WindowsNames || runtime.GOOS == "windows",
+		// Random start so offer ids from different runs don't collide (eg in peers' lists).
 		// Below 2^30 so they never reach syncIDBit (even with the ids reserved by directory offers).
 		nextFileID: rand.Uint32() >> 2, //nolint:gosec // not cryptographic.
+		lookupIf:   GetInternetInterface,
 	}
 }
 
+// Start opens the sockets and starts the discovery, handshake, link and sync goroutines. Call [Server.Stop] to
+// shut it down: canceling the context alone doesn't close the sockets the receivers wait on.
 func (s *Server) Start(ctx context.Context) error {
 	s.idStr = s.Identity.PublicKeyToString()
 	s.runID = newRunID()
@@ -288,7 +312,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	log.Infof("Starting tsync server %q on %s -> %s", s.Name, addr, s.destAddr)
 	// Try to get the right interface to listen on
-	goodIf, localIP, err := GetInternetInterface(ctx, s.Target)
+	goodIf, localIP, err := s.lookupIf(ctx, s.Target)
 	if err != nil {
 		log.Warnf("Could not get default route interface using %q as test destination, will listen on all: %v", s.Target, err)
 	} else {
@@ -298,14 +322,14 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	if err = s.openUnicast(ctx, goodIf, localIP); err != nil {
-		if s.broadcastListen != nil {
-			s.broadcastListen.Close()
+		if s.mcastListen != nil {
+			s.mcastListen.Close()
 		}
 		return err
 	}
-	log.Infof("Sockets created - unicast: %s, tcp: %s", s.ourSendAddr, s.tcpListen.Addr())
-	if s.broadcastListen != nil {
-		log.Infof("Multicast listen: %s", s.broadcastListen.LocalAddr())
+	log.Infof("Sockets created - unicast: %s, tcp: %s", s.OurAddress(), s.tcpListen.Addr())
+	if s.mcastListen != nil {
+		log.Infof("Multicast listen: %s", s.mcastListen.LocalAddr())
 	}
 
 	// get a cancelable context
@@ -332,7 +356,7 @@ func (s *Server) openMulticast(goodIf *net.Interface) (err error) {
 		return nil
 	}
 	s.mcastIf = goodIf
-	s.broadcastListen, err = s.listenMulticast()
+	s.mcastListen, err = s.listenMulticast()
 	return err
 }
 
@@ -353,7 +377,7 @@ func (s *Server) listenMulticast() (*net.UDPConn, error) {
 func (s *Server) mcastConn() *net.UDPConn {
 	s.mcastMu.Lock()
 	defer s.mcastMu.Unlock()
-	return s.broadcastListen
+	return s.mcastListen
 }
 
 // rejoinMulticast replaces the multicast socket by a new one (the receiver switches to it when the old one closes).
@@ -369,8 +393,8 @@ func (s *Server) rejoinMulticast() {
 		conn.Close()
 		return
 	}
-	old := s.broadcastListen
-	s.broadcastListen = conn
+	old := s.mcastListen
+	s.mcastListen = conn
 	s.mcastMu.Unlock()
 	if old != nil {
 		old.Close()
@@ -395,50 +419,81 @@ func (s *Server) checkMulticast(now time.Time) {
 }
 
 // openUnicast creates the unicast UDP socket (also used to send multicast) and the TCP listener.
-// With static peers (eg over a VPN like tailscale) each peer may be reached through a different interface:
-// listen on all addresses so the OS picks the right source address per peer; multicast stays on goodIf.
+// They listen on all addresses: the OS picks the source address per peer (eg a static peer over a VPN like
+// tailscale through its interface) and they keep working when the local address changes (eg a new DHCP lease
+// after sleep, see checkAddress); multicast is sent on goodIf.
 func (s *Server) openUnicast(ctx context.Context, goodIf *net.Interface, localIP *net.UDPAddr) (err error) {
-	bindIP := localIP
 	if len(s.staticPeers) > 0 {
-		bindIP = nil
 		s.logPeerInterfaces(ctx)
 	}
-	laddr := bindIP
+	var laddr *net.UDPAddr
 	if s.noMcast {
 		// Without the multicast socket (which also gets the unicast messages sent to the discovery port, eg by the
 		// -peers of others), the unicast socket has to be on the discovery port.
 		laddr = &net.UDPAddr{Port: s.Port}
-		if bindIP != nil {
-			laddr.IP = bindIP.IP
-		}
 	}
 	s.dualUDPSock, err = net.ListenUDP("udp4", laddr) // was net.DialUDP("udp4", localIP, s.destAddr)
 	if err != nil {
 		return err
 	}
-	if bindIP == nil && goodIf != nil {
+	if goodIf != nil {
 		if err = ipv4.NewPacketConn(s.dualUDPSock).SetMulticastInterface(goodIf); err != nil {
 			log.Warnf("Failed to set multicast interface %q: %v", goodIf.Name, err)
 		}
 	}
-	s.ourSendAddr = s.dualUDPSock.LocalAddr().(*net.UDPAddr)
-	if localIP != nil && bindIP == nil {
+	ours := s.dualUDPSock.LocalAddr().(*net.UDPAddr)
+	if localIP != nil {
 		// keep the default route address as our identity (and to ignore our own multicast).
-		s.ourSendAddr = &net.UDPAddr{IP: localIP.IP, Port: s.ourSendAddr.Port}
+		ours = &net.UDPAddr{IP: localIP.IP, Port: ours.Port}
 	}
-	if err = s.startTCP(bindIP); err != nil {
+	s.ourSendAddr.Store(ours)
+	if err = s.startTCP(nil); err != nil {
 		s.dualUDPSock.Close()
 		return err
 	}
 	return nil
 }
 
-func (s *Server) Stop() {
-	if s.Stopped() {
+// checkAddress looks up the default route's interface and address again (cheap: nothing is sent) and adopts
+// them if they changed, eg a new DHCP lease after sleep: our address, the multicast interface, and the links
+// from the old address (closed: it's gone). Links from other addresses (eg a VPN for -peers) are kept.
+func (s *Server) checkAddress(ctx context.Context) {
+	iface, local, err := s.lookupIf(ctx, s.Target)
+	if err != nil || local == nil {
+		log.LogVf("Can't check our address (yet): %v", err)
+		return // eg the network isn't back yet: keep the current one.
+	}
+	old := s.OurAddress()
+	if old.IP.Equal(local.IP) {
 		return
 	}
-	s.epoch.Store(epochStopMarker)
-	if s.cancel == nil {
+	log.Warnf("Our address changed from %v to %v (interface %q)", old.IP, local.IP, iface.Name)
+	s.ourSendAddr.Store(&net.UDPAddr{IP: local.IP, Port: old.Port})
+	if err = ipv4.NewPacketConn(s.dualUDPSock).SetMulticastInterface(iface); err != nil {
+		log.Warnf("Failed to set multicast interface %q: %v", iface.Name, err)
+	}
+	if !s.noMcast {
+		s.mcastIf = iface // only used by this (runAdv) goroutine once started.
+		s.rejoinMulticast()
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	for _, t := range s.linkedLocked() {
+		if a, ok := t.conn.LocalAddr().(*net.TCPAddr); ok && a.IP.Equal(old.IP) {
+			log.Infof("Closing the link with %s, from our old address %v", t.peer.Name, a.IP)
+			_ = t.conn.Close()
+		}
+	}
+	s.change() // our line in the UI.
+}
+
+// Stop stops the server and waits for its goroutines. The server can't be started again.
+// Not to be called from one of the server's goroutines (it would wait for itself).
+func (s *Server) Stop() {
+	s.stopMu.Lock() // a concurrent Stop waits for the first one to be done.
+	defer s.stopMu.Unlock()
+	s.epoch.Store(epochStopMarker) // Stopped() from now on.
+	if s.cancel == nil {           // not started, or already stopped.
 		return
 	}
 	s.cancel()
@@ -451,6 +506,8 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
+// Stopped returns true once the server is stopped: by [Server.Stop], or by itself when a newer instance with
+// the same name, address and key started.
 func (s *Server) Stopped() bool {
 	return s.epoch.Load() < 0 // we may stop with -999 and some extra Add(1) happens but stays negative.
 }
@@ -462,7 +519,7 @@ func (s *Server) runAdv(ctx context.Context) {
 	interval := s.BaseBroadcastInterval + time.Duration(jitter)*time.Millisecond
 	ticker := time.NewTicker(interval)
 	log.Infof("Starting tsync broadcast sender %q (%v) with %v interval (jitter %d ms)",
-		s.Name, s.ourSendAddr, interval, jitter)
+		s.Name, s.OurAddress(), interval, jitter)
 	defer ticker.Stop()
 	epoch := s.epoch.Load()
 	s.startedAt = time.Now()
@@ -483,15 +540,18 @@ func (s *Server) runAdv(ctx context.Context) {
 				return
 			}
 			epoch = newEpoch
+			s.checkAddress(ctx) // before sending: from the new address, which our own multicast filter knows.
 			s.discoveryRound(epoch, time.Now())
 			// Run some cleanup/expire entries
-			s.PeersCleanup()
+			s.peersCleanup()
 			s.handshakeTick()
 		}
 	}
 }
 
-func (s *Server) PeersCleanup() {
+// peersCleanup removes the peers not heard from for Config.PeerTimeout (unless linked, the link then has its
+// own keepalive) and what was kept for them. Called on every discovery tick.
+func (s *Server) peersCleanup() {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	var toDelete []Peer
@@ -510,14 +570,14 @@ func (s *Server) PeersCleanup() {
 	}
 	if len(toDelete) > 0 {
 		log.Infof("Removing %d expired peers: %q", len(toDelete), toDelete)
-		v := s.Peers.Delete(toDelete...)
-		s.Sources.Delete(toDeleteSources...) // TODO share lock/transaction.
+		s.Peers.Delete(toDelete...)
+		s.Sources.Delete(toDeleteSources...)
 		for _, peer := range toDelete {
 			s.dropLinkLocked(peer)
 			delete(s.lastAuto, peer)
 			s.expireOffersLocked(peer, "peer gone")
 		}
-		s.change(v) // UI refresh, otherwise the last peer to go away stays listed.
+		s.change() // UI refresh, otherwise the last peer to go away stays listed.
 	}
 	for src, e := range s.early {
 		if now.Sub(e.at) > earlyMaxAge {
@@ -527,13 +587,14 @@ func (s *Server) PeersCleanup() {
 	s.pruneExpiredOffersLocked(now)
 }
 
+// OurAddress returns our local IP and the UDP port our messages are sent from (what the peers list us as).
 func (s *Server) OurAddress() *net.UDPAddr {
-	return s.ourSendAddr
+	return s.ourSendAddr.Load()
 }
 
-// change notifies OnChange. Peers map versions are ignored and our own counter is used
-// instead, so other changes (eg file transfers progress) also get distinct versions.
-func (s *Server) change(_ uint64) {
+// change notifies OnChange, with our own counter as version (not the Peers map's one) so all changes, eg file
+// transfers progress, get distinct versions.
+func (s *Server) change() {
 	v := s.changes.Add(1)
 	if s.OnChange != nil {
 		s.OnChange(v)
@@ -578,7 +639,6 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 	buf := make([]byte, BufSize)
 	log.Infof("Starting tsync broadcast receiver %q on %s with %d bytes buffer",
 		s.Name, s.mcastConn().LocalAddr(), BufSize)
-	ourAddr := s.ourSendAddr
 	for {
 		select {
 		case <-ctx.Done():
@@ -600,7 +660,7 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 				continue
 			}
 			s.lastMcastRecv.Store(time.Now().UnixNano())
-			if addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
+			if ourAddr := s.OurAddress(); addr.IP.Equal(ourAddr.IP) && addr.Port == ourAddr.Port {
 				log.Debugf("Ignoring our own packet (%q)", buf[:n])
 				continue
 			}
@@ -612,26 +672,14 @@ func (s *Server) runMulticastReceive(ctx context.Context) {
 
 // handleDiscovery processes a discovery message, received by multicast or directly (unicast).
 func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
-	d, err := s.MCastMessageDecode(buf)
+	d, err := s.decodeDiscovery(buf)
 	if err != nil {
 		log.Errf("Error decoding UDP packet %q from %v: %v", buf, addr, err)
 		return
 	}
-	theirEpoch := d.Epoch
-	data := PeerData{Port: addr.Port, Epoch: theirEpoch, LastSeen: time.Now(), RunID: d.RunID, Proto: d.Proto, Version: d.Version}
+	data := PeerData{Port: addr.Port, Epoch: d.Epoch, LastSeen: time.Now(), RunID: d.RunID, Proto: d.Proto, Version: d.Version}
 	peer := Peer{Name: d.Name, IP: addr.IP.String(), PublicKey: d.PublicKey}
-	us := Peer{Name: s.Name, IP: s.ourSendAddr.IP.String(), PublicKey: s.idStr}
-	if peer == us {
-		if theirEpoch <= s.epoch.Load() {
-			log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%q run %q epoch %d)", peer, data.RunID, data.Epoch)
-			s.Stop()
-		} else {
-			log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%q run %q epoch %d)",
-				peer, data.RunID, data.Epoch)
-			// Tell it directly too: it may not get our multicast anymore (eg lost its group membership after a
-			// network change) but still hears unicast on its discovery socket, and then exits.
-			s.sendDiscoveryTo(addr)
-		}
+	if s.duplicateInstance(peer, data, addr) {
 		return
 	}
 	var early []byte
@@ -666,7 +714,8 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 			early = s.takeEarlyLocked(src)
 		}
 		// Update last seen and epoch
-		s.change(s.Peers.Set(peer, data))
+		s.Peers.Set(peer, data)
+		s.change()
 		if early == nil { // otherwise its connect request is handled instead.
 			s.autoConnectLocked(peer, data, time.Now())
 		}
@@ -678,7 +727,7 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 		log.Errf("Failed to decode peer %q public key %q: %v", peer.Name, peer.PublicKey, err)
 		data.HumanHash = "BAD-PKEY"
 	}
-	nv := s.Peers.Set(peer, data)
+	s.Peers.Set(peer, data)
 	src := Source{IP: peer.IP, Port: data.Port}
 	s.Sources.Set(src, peer)
 	log.S(log.Info, "New peer", log.Any("count", s.Peers.Len()),
@@ -686,13 +735,40 @@ func (s *Server) handleDiscovery(buf []byte, addr *net.UDPAddr) {
 	if !data.Compatible() {
 		log.Warnf("%s (%s) runs an older, incompatible tsync version: upgrade it to connect", peer.Name, peer.IP)
 	}
-	s.change(nv)
+	s.change()
 	// Tell the new peer about us right away (it may have just started and not seen our
 	// multicast yet) so a connect request from either side isn't from an unknown source.
 	s.sendDiscoveryTo(addr)
 	if early = s.takeEarlyLocked(src); early == nil {
 		s.autoConnectLocked(peer, data, time.Now())
 	}
+}
+
+// duplicateInstance handles the discovery of ourselves (ignored) or of another instance with our name, address
+// and key (returns false for any other peer): the newer one stays, so we stop if that's the other one, else tell it
+// to.
+func (s *Server) duplicateInstance(peer Peer, data PeerData, addr *net.UDPAddr) bool {
+	if peer.PublicKey == s.idStr && data.RunID == s.runID {
+		// Our own multicast, from a new address not seen by checkAddress yet (or the multicast filter missed it).
+		log.LogVf("Ignoring our own discovery from %v", addr)
+		return true
+	}
+	us := Peer{Name: s.Name, IP: s.OurAddress().IP.String(), PublicKey: s.idStr}
+	if peer != us {
+		return false
+	}
+	if data.Epoch <= s.epoch.Load() {
+		log.FErrf("Duplicate newer name,ip,pubkey detected... exiting (%q run %q epoch %d)", peer, data.RunID, data.Epoch)
+		s.epoch.Store(epochStopMarker) // Stopped() right away,
+		go s.Stop()                    // the rest not from this (receiver) goroutine: Stop waits for it.
+		return true
+	}
+	log.Warnf("Duplicate older name,ip,pubkey detected... ignoring - they should exit (%q run %q epoch %d)",
+		peer, data.RunID, data.Epoch)
+	// Tell it directly too: it may not get our multicast anymore (eg lost its group membership after a
+	// network change) but still hears unicast on its discovery socket, and then exits.
+	s.sendDiscoveryTo(addr)
+	return true
 }
 
 // logPeerInterfaces logs which interface and local address is used to reach each static peer.
@@ -771,8 +847,8 @@ func newRunID() string {
 }
 
 func (s *Server) discoveryPayload(epoch int32) []byte {
-	return []byte(fmt.Sprintf(DiscoveryMessageFormat+DiscoveryExtraFormat,
-		s.Name, s.idStr, epoch, s.runID, ProtocolVersion, s.Version))
+	return fmt.Appendf(nil, DiscoveryMessageFormat+DiscoveryExtraFormat,
+		s.Name, s.idStr, epoch, s.runID, ProtocolVersion, s.Version)
 }
 
 // sendDiscoveryTo sends our discovery message directly to addr.
@@ -817,7 +893,7 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	case fast || now.Sub(s.lastMcast) >= SlowDiscoveryInterval:
 		s.lastMcast = now
 		s.checkMulticast(now) // before sending: the reopened socket then gets this very message.
-		if err := s.MCastMessageSend(epoch); err != nil {
+		if err := s.mcastSend(epoch); err != nil {
 			log.Errf("Error sending UDP packet: %v", err)
 		}
 	default:
@@ -857,7 +933,8 @@ func (s *Server) discoveryRound(epoch int32, now time.Time) {
 	}
 }
 
-func (s *Server) MCastMessageSend(epoch int32) error {
+// mcastSend sends our discovery message to the multicast group (nothing if multicast is disabled).
+func (s *Server) mcastSend(epoch int32) error {
 	if s.destAddr == nil {
 		return nil // multicast disabled.
 	}
@@ -875,7 +952,8 @@ type Discovery struct {
 	Version   string // short version, empty for older versions.
 }
 
-func (s *Server) MCastMessageDecode(buf []byte) (Discovery, error) {
+// decodeDiscovery decodes (and validates the name of) a discovery message, received by multicast or directly.
+func (s *Server) decodeDiscovery(buf []byte) (Discovery, error) {
 	var d Discovery
 	n, err := fmt.Sscanf(string(buf), DiscoveryMessageFormat+DiscoveryExtraFormat,
 		&d.Name, &d.PublicKey, &d.Epoch, &d.RunID, &d.Proto, &d.Version)

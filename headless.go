@@ -23,9 +23,9 @@ func HeadlessCheck(files []string, syncFolders int) error {
 }
 
 // RunHeadless runs the sync (only) without a UI, until interrupted. Only already trusted peers can link
-// (pair once with the UI first). cfg has the flags values, other than the identity and sync folders (fSync).
-func RunHeadless(files []string, cfg tsnet.Config, fSync syncFlags, tsyncDir string) int {
-	if err := HeadlessCheck(files, len(*fSync.folders)); err != nil {
+// (pair once with the UI first). cfg has the flags values, without the identity (loaded from tsyncDir).
+func RunHeadless(files []string, cfg tsnet.Config, tsyncDir string) int {
+	if err := HeadlessCheck(files, len(cfg.Sync)); err != nil {
 		return log.FErrf("%v", err)
 	}
 	id, storage, err := LoadIdentity(ExpandHome(tsyncDir))
@@ -34,7 +34,6 @@ func RunHeadless(files []string, cfg tsnet.Config, fSync syncFlags, tsyncDir str
 	}
 	cfg.Identity, cfg.Storage = id, storage
 	cfg.Headless, cfg.NoAutoConnect = true, false
-	fSync.Apply(&cfg)
 	// Goroutines are started: put back their ids in the logs (see cli.UntilInterrupted).
 	log.Config.GoroutineID = true
 	srv := cfg.NewServer()

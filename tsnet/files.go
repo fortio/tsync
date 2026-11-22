@@ -23,6 +23,7 @@ import (
 
 	"fortio.org/log"
 	"fortio.org/progressbar"
+	"fortio.org/tsync/syncdir"
 )
 
 // File transfer over the TCP link: the sender offers a file (name, size, time) to its
@@ -53,13 +54,14 @@ const (
 	expiredOfferLinger = 5 * time.Second
 )
 
+// TransferState is the state of a [Transfer].
 type TransferState int
 
 const (
 	TransferOffered TransferState = iota // incoming offer, not (yet) accepted.
-	TransferActive
-	TransferDone
-	TransferFailed
+	TransferActive                       // being sent or received.
+	TransferDone                         // received and saved (confirmed by the receiver, for the sender).
+	TransferFailed                       // see Transfer.Err.
 )
 
 func (ts TransferState) String() string {
@@ -165,7 +167,7 @@ func (s *Server) addTransferLocked(t *Transfer) {
 		}
 		s.transfers = append(s.transfers[:idx], s.transfers[idx+1:]...)
 	}
-	s.change(0)
+	s.change()
 }
 
 func (s *Server) progressLocked(t *Transfer, n int64) {
@@ -175,7 +177,7 @@ func (s *Server) progressLocked(t *Transfer, n int64) {
 	}
 	if now := time.Now(); now.Sub(t.lastProg) >= progressInterval {
 		t.lastProg = now
-		s.change(0)
+		s.change()
 	}
 }
 
@@ -197,7 +199,7 @@ func (s *Server) finishLocked(t *Transfer, err error) {
 	} else {
 		t.State = TransferDone
 	}
-	s.change(0)
+	s.change()
 	if t.pull != nil {
 		s.pullFinishedLocked(t, err)
 	}
@@ -274,17 +276,7 @@ func (s *Server) OfferPath(path string) (Offered, error) {
 		}
 		delete(s.offers, oldest)
 	}
-	type target struct {
-		peer Peer
-		l    *link
-		conn net.Conn
-	}
-	var targets []target
-	for peer, l := range s.links {
-		if l.conn != nil {
-			targets = append(targets, target{peer, l, l.conn})
-		}
-	}
+	targets := s.linkedLocked()
 	s.stateMu.Unlock()
 	n := 0
 	var errs []error
@@ -385,7 +377,7 @@ func (s *Server) prepareDownload(peer Peer, id uint32) (*link, error) {
 	l.incoming[id] = &recvFile{f: f, hash: sha256.New(), t: t}
 	t.State = TransferActive
 	t.Start = time.Now()
-	s.change(0)
+	s.change()
 	log.Infof("Downloading file %q (%d bytes) from %s", t.Name, t.Size, peer.Name)
 	return l, nil
 }
@@ -434,7 +426,7 @@ func (s *Server) pruneExpiredOffersLocked(now time.Time) {
 		return t.expired && now.Sub(t.End) > expiredOfferLinger
 	})
 	if len(s.transfers) != n {
-		s.change(0)
+		s.change()
 	}
 }
 
@@ -637,6 +629,12 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 		log.LogVf("File frame %q for unknown/aborted transfer %d from %s", ftype, id, peer.Name)
 		return true
 	}
+	s.incomingFileFrame(peer, l, conn, ftype, id, rf, payload)
+	return true
+}
+
+// incomingFileFrame handles the data, end or abort frame of a file we are receiving (rf).
+func (s *Server) incomingFileFrame(peer Peer, l *link, conn net.Conn, ftype byte, id uint32, rf *recvFile, payload []byte) {
 	var err error
 	switch ftype {
 	case FrameFileData:
@@ -644,7 +642,7 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 	case FrameFileEnd:
 		if rf.t.pull != nil {
 			s.syncFileEnd(l, conn, id, rf, payload)
-			return true
+			return
 		}
 		err = s.fileEnd(rf, payload)
 		if err == nil {
@@ -655,13 +653,13 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 			if rf.t.parent != nil {
 				s.requestMoreFiles(peer, l, conn, rf.t.parent)
 			}
-			return true
+			return
 		}
 	case FrameFileAbort:
 		err = fmt.Errorf("aborted by sender: %s", sanitizeReason(payload))
 	}
 	if err == nil {
-		return true
+		return
 	}
 	if ftype != FrameFileAbort {
 		_ = l.send(conn, FrameFileRefuse, idPayload(id, err.Error()))
@@ -669,7 +667,6 @@ func (s *Server) handleFileFrame(peer Peer, l *link, conn net.Conn, plain []byte
 	s.stateMu.Lock()
 	s.dropIncomingLocked(l, id, err)
 	s.stateMu.Unlock()
-	return true
 }
 
 // sanitizeReason makes a (peer provided) error message safe to log/display: single
@@ -711,7 +708,7 @@ func (s *Server) fileOffered(peer Peer, id uint32, payload []byte, files int) {
 		if t.Incoming && t.Peer == peer && t.ID == id {
 			if t.expired { // failed because the peer looked restarted/gone but it is back with the offer.
 				t.State, t.Err, t.End, t.expired = TransferOffered, "", time.Time{}, false
-				s.change(0)
+				s.change()
 				return
 			}
 			return // already known (eg resent on reconnect).
@@ -894,7 +891,7 @@ func safeFileName(name string, hidden bool) string {
 	if name[0] == '.' && !hidden { // can't be "." or "..": no trailing dots.
 		name = "_" + name
 	}
-	if isWindowsReserved(name) {
+	if syncdir.WindowsReservedName(name) {
 		name = "_" + name
 	}
 	if len(name) > MaxFileNameLen {
@@ -909,20 +906,6 @@ func safeFileName(name string, hidden bool) string {
 		name = name[:cut] + ext
 	}
 	return name
-}
-
-func isWindowsReserved(name string) bool {
-	base := strings.ToUpper(name)
-	if i := strings.IndexByte(base, '.'); i >= 0 {
-		base = base[:i]
-	}
-	base = strings.TrimSpace(base)
-	switch base {
-	case "CON", "PRN", "AUX", "NUL":
-		return true
-	}
-	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
-		base[3] >= '0' && base[3] <= '9'
 }
 
 // pacer limits the sending rate of a link: the files being sent in parallel share it.

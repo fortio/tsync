@@ -41,6 +41,7 @@ func (b *clipBox) height() int {
 	return len(b.lines) + 2
 }
 
+// NewClipPanel returns the clipboard boxes panel, each box showing at most maxLines lines.
 func NewClipPanel(ap *ansipixels.AnsiPixels, maxLines int) *ClipPanel {
 	return &ClipPanel{ap: ap, MaxLines: maxLines, cache: make(map[tsnet.Peer]clipEntry)}
 }

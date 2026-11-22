@@ -23,24 +23,8 @@ recognized for *files*, by content (see [Moves](#moves-and-renames)), which cove
 
 ## Scanning
 
-Each sync directory is scanned every `-sync-rescan` (10s by default), and right after each batch of changes
-synced from a peer (so the other peers learn about them quickly). Unless watched:
-
-- With `-sync-watch` (default on) the directories are watched for changes (file system notifications:
-  inotify on Linux, ReadDirectoryChangesW on Windows (one recursive watch: watching each directory would
-  prevent renaming or removing their parent directories), one recursive FSEvents stream on macOS (when built
-  with cgo; else kqueue, which needs a file descriptor per file, so it's off by default then)). The point is
-  not to walk hundreds of directories every 10s: only the directories notified are read again (their direct
-  content; a new sub directory is scanned whole, a removed one removed with all it had), once there was no
-  notification for 2s (still being written), or at most 10s after the first one. A file written to is hashed again even if its size and time
-  didn't change. A change to `.tsyncignore`, or lost notifications (overflow), means a full scan.
-- Notifications are only hints: the whole directory is still scanned every 15 minutes (or `-sync-rescan` if
-  longer). If that finds changes in directories that weren't notified (eg a network or shared folder, where
-  notifications don't see changes made by other machines), the directory goes back to scanning every
-  `-sync-rescan` (with a warning). Ditto if it can't watch all the directories (eg the inotify watches limit
-  on Linux, `fs.inotify.max_user_watches`) or the notifications stop.
-- What sync writes is notified like any other change: after a batch of changes synced from a peer, only the
-  directories notified are scanned again (right away, not waiting for the 2s).
+Each sync directory is scanned every `-sync-rescan` (10s by default) unless watched (see below), and right
+after each batch of changes synced from a peer (so the other peers learn about them quickly).
 
 - Paths are keys: slash separated, relative to the synced directory, Unicode NFC normalized (macOS can give
   decomposed names for accented letters, Linux and Windows usually composed ones; normalized, they are the same
@@ -52,6 +36,25 @@ synced from a peer (so the other peers learn about them quickly). Unless watched
   writable by all, shouldn't change yours). On Windows, which only has a read only attribute, the other bits
   come from the previous scan, so an executable from a Mac doesn't lose its `x` by going through Windows.
 - Directory times are ignored (they change whenever something is added or removed in them).
+
+### Watching
+
+- With `-sync-watch` (default on) the directories are watched for changes (file system notifications:
+  inotify on Linux, ReadDirectoryChangesW on Windows (one recursive watch: watching each directory would
+  prevent renaming or removing their parent directories), one recursive FSEvents stream on macOS (when built
+  with cgo; else kqueue, which needs a file descriptor per file, so it's off by default then)). The point is
+  not to walk hundreds of directories every 10s: only the directories notified are read again (their direct
+  content; a new sub directory is scanned whole, a removed one removed with all it had), once there was no
+  notification for 2s (still being written), or at most 10s after the first one. A file written to is hashed
+  again even if its size and time didn't change. A change to `.tsyncignore`, or lost notifications (overflow),
+  means a full scan.
+- Notifications are only hints: the whole directory is still scanned every 15 minutes (or `-sync-rescan` if
+  longer). If that finds changes in directories that weren't notified (eg a network or shared folder, where
+  notifications don't see changes made by other machines), the directory goes back to scanning every
+  `-sync-rescan` (with a warning). Ditto if it can't watch all the directories (eg the inotify watches limit
+  on Linux, `fs.inotify.max_user_watches`) or the notifications stop.
+- What sync writes is notified like any other change: after a batch of changes synced from a peer, only the
+  directories notified are scanned again (right away, not waiting for the 2s).
 
 ### Ignored paths
 
@@ -182,7 +185,7 @@ only handles the sync frames and the file data ones they use, and ignores all th
 
 ## On the wire
 
-Within the encrypted link of each linked peer (see the README's security section):
+Within the encrypted link of each linked peer (see "How does it work?" in the README):
 
 - `F`: our time and our labels, when the link is up;
 - `I`: our index of a directory both use, in chunks of up to 512KB (the first one with our ignore rules and

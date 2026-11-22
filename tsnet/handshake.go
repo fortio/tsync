@@ -159,7 +159,8 @@ func (s *Server) handshakeTick() {
 
 func (s *Server) setStatusLocked(peer Peer, peerData PeerData, status ConnectionStatus) {
 	peerData.Status = status
-	s.change(s.Peers.Set(peer, peerData))
+	s.Peers.Set(peer, peerData)
+	s.change()
 }
 
 // dropLinkLocked forgets any handshake/session state for peer (eg peer restarted or expired).

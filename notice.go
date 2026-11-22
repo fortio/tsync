@@ -31,6 +31,11 @@ func (n *Notice) set(color tcolor.BasicColor, msg string) {
 	n.msg, n.color, n.at, n.dirty = msg, color, time.Now(), true
 }
 
+// Show shows a notice without logging it.
+func (n *Notice) Show(color tcolor.BasicColor, msg string) {
+	n.set(color, msg)
+}
+
 // Infof logs and shows a (green) notice.
 func (n *Notice) Infof(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)

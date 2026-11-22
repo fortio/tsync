@@ -17,6 +17,13 @@ func TestShortPath(t *testing.T) {
 	if got := ShortPath(filepath.Join(home, "Downloads", "x")); got != "~"+string(filepath.Separator)+filepath.Join("Downloads", "x") {
 		t.Errorf("unexpected short path %q", got)
 	}
+	if got := ShortPath(home); got != "~" {
+		t.Errorf("unexpected short path %q for home", got)
+	}
+	// Another directory that starts like home isn't in it.
+	if other := home + "2" + string(filepath.Separator) + "x"; ShortPath(other) != other {
+		t.Errorf("unexpected short path %q for %q", ShortPath(other), other)
+	}
 }
 
 func TestFilePanel(t *testing.T) {

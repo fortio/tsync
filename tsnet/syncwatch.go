@@ -129,7 +129,7 @@ func (sw *syncWatch) event(ev fsnotify.Event) {
 		sw.full = true // the rules changed.
 	}
 	if key != "" {
-		parent := parentDir(key)
+		parent := syncdir.ParentKey(key)
 		sw.dirty[parent], sw.events[parent] = true, true
 	}
 	if sw.watched[key] {
@@ -156,7 +156,7 @@ func (sw *syncWatch) quietIn() time.Duration {
 func (sw *syncWatch) missed(old, idx syncdir.Index) []string {
 	var res []string
 	check := func(k string) {
-		if !sw.events[parentDir(k)] && !sw.events[k] {
+		if !sw.events[syncdir.ParentKey(k)] && !sw.events[k] {
 			res = append(res, k)
 		}
 	}

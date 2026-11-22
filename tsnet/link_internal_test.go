@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -85,20 +87,20 @@ func TestValidateNameAndDecode(t *testing.T) {
 		}
 	}
 	s := &Server{}
-	d, err := s.MCastMessageDecode([]byte(`tsync1 "ok" p.key e 3 r abc`))
+	d, err := s.decodeDiscovery([]byte(`tsync1 "ok" p.key e 3 r abc`))
 	if err != nil || d != (Discovery{Name: "ok", PublicKey: "p.key", Epoch: 3, RunID: "abc"}) {
 		t.Errorf("valid discovery message: %+v %v", d, err)
 	}
-	if d, err = s.MCastMessageDecode([]byte(`tsync1 "old" p.key e 3`)); err != nil || d.RunID != "" || d.Epoch != 3 {
+	if d, err = s.decodeDiscovery([]byte(`tsync1 "old" p.key e 3`)); err != nil || d.RunID != "" || d.Epoch != 3 {
 		t.Errorf("older version discovery message: %+v %v", d, err)
 	}
 	if (PeerData{}).Compatible() || !(PeerData{RunID: "x"}).Compatible() {
 		t.Errorf("Compatible() wrong")
 	}
-	if _, err = s.MCastMessageDecode([]byte(`tsync1 "x" p.key`)); err == nil {
+	if _, err = s.decodeDiscovery([]byte(`tsync1 "x" p.key`)); err == nil {
 		t.Errorf("truncated discovery message accepted")
 	}
-	if _, err := s.MCastMessageDecode([]byte(`tsync1 "evil\x1b]52;c;aGk=\a" p.key e 3 r x`)); err == nil {
+	if _, err := s.decodeDiscovery([]byte(`tsync1 "evil\x1b]52;c;aGk=\a" p.key e 3 r x`)); err == nil {
 		t.Errorf("discovery message with escape in name accepted")
 	}
 }
@@ -235,7 +237,7 @@ func readDiscoveryWith(conn *net.UDPConn, marker string) ([]byte, error) {
 func checkDuplicates(t *testing.T, s *Server, them *net.UDPConn, from *net.UDPAddr, msg func(string, string, int, string) []byte) {
 	t.Helper()
 	s.epoch.Store(5)
-	s.ourSendAddr = &net.UDPAddr{IP: from.IP, Port: 1000}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: from.IP, Port: 1000})
 	s.handleDiscovery(msg("Us", s.idStr, 9, "x"), from)
 	if s.Stopped() {
 		t.Errorf("should not stop for an older duplicate")
@@ -257,7 +259,7 @@ func TestHandleDiscovery(t *testing.T) {
 	s := (&Config{Name: "Us", Identity: id, NoAutoConnect: true}).NewServer()
 	s.idStr = id.PublicKeyToString()
 	s.runID = "ourrun"
-	s.ourSendAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000})
 	var err error
 	if s.dualUDPSock, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
 		t.Fatal(err)
@@ -330,6 +332,12 @@ func TestHandleDiscovery(t *testing.T) {
 	if _, d := get("BadKey"); d.HumanHash != "BAD-PKEY" {
 		t.Errorf("expected BAD-PKEY, got %q", d.HumanHash)
 	}
+	// Our own message (this run) from another address (eg ours just changed): ignored, not a peer.
+	nPeers := s.Peers.Len()
+	s.handleDiscovery(msg("Us", s.idStr, 1, "ourrun"), from)
+	if s.Stopped() || s.Peers.Len() != nPeers {
+		t.Errorf("our own discovery should be ignored (stopped %v, peers %d -> %d)", s.Stopped(), nPeers, s.Peers.Len())
+	}
 	checkDuplicates(t, s, them, from, msg)
 	// Dial me requests from unknown source or not connected peer are ignored.
 	s.handleDialMe(&net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1}, "x", "Us")
@@ -344,7 +352,7 @@ func TestPeersCleanupNotifiesChange(t *testing.T) {
 	s.Sources.Set(Source{IP: peer.IP, Port: 1234}, peer)
 	offered := &Transfer{Peer: peer, Incoming: true, State: TransferOffered}
 	s.addTransferLocked(offered)
-	s.PeersCleanup()
+	s.peersCleanup()
 	if s.Peers.Len() != 0 || s.Sources.Len() != 0 {
 		t.Errorf("expired peer not removed: %d peers, %d sources", s.Peers.Len(), s.Sources.Len())
 	}
@@ -355,7 +363,7 @@ func TestPeersCleanupNotifiesChange(t *testing.T) {
 		t.Errorf("offer from expired peer should be failed (and still listed), got %v", offered.State)
 	}
 	offered.End = offered.End.Add(-2 * expiredOfferLinger)
-	s.PeersCleanup()
+	s.peersCleanup()
 	if len(s.transfers) != 0 {
 		t.Errorf("expired offer should be removed after a bit")
 	}
@@ -368,7 +376,7 @@ func TestEarlyConnect(t *testing.T) {
 	s := (&Config{Name: "Us", Identity: id, NoAutoConnect: true, PeerTimeout: time.Minute}).NewServer()
 	s.idStr = id.PublicKeyToString()
 	s.runID = "ourrun"
-	s.ourSendAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1000})
 	var err error
 	if s.dualUDPSock, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
 		t.Fatal(err)
@@ -396,7 +404,7 @@ func TestEarlyConnect(t *testing.T) {
 		e.at = e.at.Add(-2 * earlyMaxAge)
 		s.early[src] = e
 	}
-	s.PeersCleanup()
+	s.peersCleanup()
 	if len(s.early) != 0 {
 		t.Errorf("stale early message not dropped")
 	}
@@ -414,7 +422,7 @@ func TestNoEscapesInLogs(t *testing.T) {
 		log.SetOutput(os.Stderr)
 	})
 	s := (&Config{Name: "us", PeerTimeout: time.Second}).NewServer()
-	d, err := s.MCastMessageDecode([]byte("tsync1 \"x\" p.\x1b]52;c;aGk=\a e 1 r \x1b[2J"))
+	d, err := s.decodeDiscovery([]byte("tsync1 \"x\" p.\x1b]52;c;aGk=\a e 1 r \x1b[2J"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +440,7 @@ func TestNoEscapesInLogs(t *testing.T) {
 	s.Sources.Set(Source{IP: good.IP, Port: 1235}, good)
 	s.handleDirectMessage([]byte(`reject1 "good" "us" "\x1b]0;title\a"`), &net.UDPAddr{IP: net.ParseIP(good.IP), Port: 1235})
 	s.Peers.Set(peer, PeerData{Port: 1234, LastSeen: time.Now().Add(-2 * time.Second), RunID: d.RunID})
-	s.PeersCleanup()
+	s.peersCleanup()
 	out := buf.String()
 	if !strings.Contains(out, "Removing 1 expired peers") || !strings.Contains(out, "rejected by good") {
 		t.Errorf("expected log lines missing: %s", out)
@@ -447,12 +455,12 @@ func TestPeersCleanupKeepsLinkedPeers(t *testing.T) {
 	peer := Peer{Name: "linked", IP: "10.0.0.1", PublicKey: "k"}
 	s.Peers.Set(peer, PeerData{Port: 1234, Proto: 1, LastSeen: time.Now().Add(-time.Minute)})
 	s.links[peer] = &link{conn: &net.TCPConn{}}
-	s.PeersCleanup()
+	s.peersCleanup()
 	if s.Peers.Len() != 1 {
 		t.Fatalf("linked peer must not expire from missing discovery")
 	}
 	s.resetLinkLocked(peer) // link lost: grace period before expiry.
-	s.PeersCleanup()
+	s.peersCleanup()
 	if s.Peers.Len() != 1 {
 		t.Errorf("peer with a just lost link expired right away")
 	}
@@ -521,12 +529,12 @@ func TestDiscoveryRoundStaticPeerBackoff(t *testing.T) {
 func TestDiscoveryProtocolDecode(t *testing.T) {
 	s := (&Config{Name: "us", Version: "v1.2.3"}).NewServer()
 	s.idStr, s.runID = "key", "run"
-	d, err := s.MCastMessageDecode(s.discoveryPayload(7))
+	d, err := s.decodeDiscovery(s.discoveryPayload(7))
 	if err != nil || d.Name != "us" || d.Epoch != 7 || d.RunID != "run" || d.Proto != ProtocolVersion || d.Version != "v1.2.3" {
 		t.Errorf("bad decode %+v %v", d, err)
 	}
 	// 0.22: no protocol level or version.
-	d, err = s.MCastMessageDecode([]byte(fmt.Sprintf(DiscoveryMessageFormat, "old", "key", 3, "r")))
+	d, err = s.decodeDiscovery([]byte(fmt.Sprintf(DiscoveryMessageFormat, "old", "key", 3, "r")))
 	if err != nil || d.Name != "old" || d.RunID != "r" || d.Proto != 0 || d.Version != "" {
 		t.Errorf("bad old decode %+v %v", d, err)
 	}
@@ -569,8 +577,8 @@ func TestMulticastWatchdog(t *testing.T) {
 	}
 	defer deaf.Close()
 	s.mcastMu.Lock()
-	old := s.broadcastListen
-	s.broadcastListen = deaf
+	old := s.mcastListen
+	s.mcastListen = deaf
 	s.mcastMu.Unlock()
 	old.Close()
 	time.Sleep(100 * time.Millisecond) // the receiver switches to the deaf socket.
@@ -582,4 +590,110 @@ func TestMulticastWatchdog(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	waitRecv(before, "nothing received on the reopened multicast socket")
+}
+
+// checkAddress: a new local address (eg new DHCP lease after sleep) is adopted and the links from the old one
+// are closed, not the others; a failed lookup or the same address changes nothing.
+func TestCheckAddress(t *testing.T) {
+	id, _ := tcrypto.NewIdentity()
+	s := (&Config{Name: "Us", Identity: id, Mcast: NoMulticast}).NewServer()
+	s.noMcast = true
+	var err error
+	if s.dualUDPSock, err = net.ListenUDP("udp4", nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.dualUDPSock.Close()
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1000})
+	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	conn, err := net.DialTCP("tcp4", nil, ln.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	peer := Peer{Name: "them", IP: "127.0.0.1", PublicKey: "p.x"}
+	s.links[peer] = &link{conn: conn}
+	lo := &net.Interface{Index: 1, Name: "lo"}
+	var lookupErr error
+	newIP := net.IPv4(127, 0, 0, 1)
+	s.lookupIf = func(context.Context, string) (*net.Interface, *net.UDPAddr, error) {
+		return lo, &net.UDPAddr{IP: newIP}, lookupErr
+	}
+	v := s.changes.Load()
+	s.checkAddress(t.Context()) // same address.
+	lookupErr = errors.New("network down")
+	newIP = net.IPv4(10, 1, 2, 3)
+	s.checkAddress(t.Context()) // lookup failed: keep ours.
+	if got := s.OurAddress(); !got.IP.Equal(net.IPv4(127, 0, 0, 1)) || s.changes.Load() != v {
+		t.Fatalf("address shouldn't change: %v (changes %d -> %d)", got, v, s.changes.Load())
+	}
+	if _, err = conn.Write([]byte("x")); err != nil {
+		t.Fatalf("link shouldn't be closed: %v", err)
+	}
+	lookupErr = nil
+	// A change between other addresses: our link (eg over a VPN) isn't from the old one, it stays.
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 9), Port: 1000})
+	s.checkAddress(t.Context())
+	if _, err = conn.Write([]byte("x")); err != nil {
+		t.Fatalf("link from another address shouldn't be closed: %v", err)
+	}
+	s.ourSendAddr.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1000})
+	v = s.changes.Load()
+	s.checkAddress(t.Context())
+	if got := s.OurAddress(); !got.IP.Equal(newIP) || got.Port != 1000 {
+		t.Errorf("expected the new address with the same port, got %v", got)
+	}
+	if s.changes.Load() == v {
+		t.Errorf("expected a change notification")
+	}
+	if _, err = conn.Write([]byte("x")); err == nil {
+		t.Errorf("link from the old address should be closed")
+	}
+}
+
+// A newer duplicate's discovery, through a started server's receiver, stops it (Stop not run on the receiver,
+// which it waits for), and concurrent and later Stop calls return.
+func TestDuplicateStopsServer(t *testing.T) {
+	id, _ := tcrypto.NewIdentity()
+	s := (&Config{
+		Name: "Dup", Port: DefaultDiscoveryPort + 15, Mcast: NoMulticast, Target: DefaultTarget, Identity: id,
+		BaseBroadcastInterval: time.Hour, // no ticks: only the newer duplicate's message matters.
+	}).NewServer()
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ours := s.OurAddress()
+	// From our own address (same name, ip and key) with an older epoch, so a newer instance: we must stop.
+	dup, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ours.IP})
+	if err != nil {
+		s.Stop()
+		t.Fatal(err)
+	}
+	defer dup.Close()
+	msg := fmt.Appendf(nil, DiscoveryMessageFormat+DiscoveryExtraFormat, "Dup", s.idStr, 0, "newer", ProtocolVersion, "x")
+	if _, err = dup.WriteToUDP(msg, &net.UDPAddr{IP: ours.IP, Port: s.Port}); err != nil {
+		s.Stop()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		for !s.Stopped() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		var wg sync.WaitGroup
+		for range 3 { // concurrently with the one duplicateInstance started.
+			wg.Go(s.Stop)
+		}
+		wg.Wait()
+		s.Stop() // and once stopped.
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server didn't stop, or Stop didn't return")
+	}
 }
